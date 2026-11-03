@@ -314,6 +314,16 @@ impl DocView {
         })
     }
 
+    /// True when line `i` holds a layout (it was on screen at the last paint).
+    pub fn is_shaped(&self, i: usize) -> bool {
+        self.lines.get(i).is_some_and(|s| s.text.is_some())
+    }
+
+    /// Line `i`'s height in pixels: measured once shaped, estimated before.
+    pub fn line_height_px(&self, i: usize) -> Option<f32> {
+        self.lines.get(i).map(|s| s.height)
+    }
+
     /// Finishes background work (images, Task 34). Returns true when
     /// something finished and the view needs a repaint. Nothing runs yet.
     pub fn poll_async(&mut self) -> bool {
@@ -424,15 +434,24 @@ impl DocView {
 
     /// Lays out and paints lines from `first` (whose top is `top`) down to the
     /// bottom of the text area, skipping lines above the top edge.
+    ///
+    /// Lines from `first` on that end up off screen release their layouts and
+    /// keep their measured heights, so memory is bounded by the screen and
+    /// scroll positions stay stable. Lines above `first` are left alone.
     fn paint_down_from(&mut self, src: &dyn ViewSource, first: usize, mut top: f32) {
         let g = self.geo();
         for i in first..self.lines.len() {
             if top >= g.text_bottom {
+                for slot in &mut self.lines[i..] {
+                    slot.forget();
+                }
                 break;
             }
             if top + self.lines[i].height > 0.0 {
                 self.relayout(src, i);
                 self.draw_line(src, i, top);
+            } else {
+                self.lines[i].forget();
             }
             top += self.lines[i].height;
         }

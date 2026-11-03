@@ -241,3 +241,48 @@ fn poll_async_has_nothing_pending() {
     let mut v = view(&t, 1.0);
     assert!(!v.poll_async());
 }
+
+/// Lines scrolled off screen release their layouts but keep their measured
+/// heights, so memory stays bounded by the screen and positions stay stable.
+#[test]
+fn scrolled_off_lines_release_layouts_and_keep_heights() {
+    let t = Tokens::defaults(Theme::Light);
+    let g = Geom::new(&t, 2.0);
+    let long = "a long line of ordinary words that keeps going ".repeat(6);
+    let mut lines: Vec<String> = (0..200).map(|i| format!("line {i}")).collect();
+    lines[1] = long;
+    let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    let src = Fake::new(&refs, t.clone());
+    let calls = Rc::new(Cell::new(0));
+    let layout = Counting {
+        inner: cosmic(&t),
+        calls: calls.clone(),
+    };
+    let mut v = DocView::new(Box::new(layout), &t, W_PT, H_PT, 2.0);
+    v.paint_all(&src);
+    assert!(v.is_shaped(0) && v.is_shaped(1));
+    let wrapped = v.line_height_px(1).unwrap();
+    assert!(wrapped > g.body_line as f32, "line 1 wraps");
+
+    assert!(v.scroll_to_cursor(Pos { line: 190, col: 0 }));
+    v.paint_all(&src);
+    assert!(v.is_shaped(190));
+    for i in 0..100 {
+        assert!(
+            !v.is_shaped(i),
+            "line {i} is off screen and holds no layout"
+        );
+    }
+    assert_eq!(v.line_height_px(1), Some(wrapped), "measured height kept");
+    let shaped = (0..200).filter(|&i| v.is_shaped(i)).count();
+    assert!(
+        shaped <= 30,
+        "{shaped} lines shaped; only the screen should be"
+    );
+
+    calls.set(0);
+    assert!(v.scroll_to_cursor(Pos { line: 0, col: 0 }));
+    v.paint_all(&src);
+    assert!(calls.get() > 0, "scrolling back lays the screen out again");
+    assert!(!v.is_shaped(190));
+}
