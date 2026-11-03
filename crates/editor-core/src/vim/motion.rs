@@ -36,6 +36,11 @@ pub enum MotionKind {
 pub struct MotionResult {
     pub cursor: Cursor,
     pub kind: MotionKind,
+    /// False when the motion failed: a relative motion (`h l j k w b e`)
+    /// that could not move at all, as `j` on the last line. Vim beeps and
+    /// an operator over a failed motion does nothing. Absolute motions
+    /// (`0 ^ $ gg G`) never fail, even when they land where they started.
+    pub moved: bool,
 }
 
 /// Where `m`, repeated `count` times (0 counts as 1), takes `cur`.
@@ -74,7 +79,10 @@ pub fn apply(m: Motion, buf: &Buffer, cur: Cursor, count: usize) -> MotionResult
                 p.line.saturating_sub(count)
             };
             let cursor = if target == p.line {
-                cur
+                Cursor {
+                    pos: p,
+                    want: cur.want,
+                }
             } else {
                 Cursor {
                     pos: Pos {
@@ -127,7 +135,50 @@ pub fn apply(m: Motion, buf: &Buffer, cur: Cursor, count: usize) -> MotionResult
             MotionKind::Linewise,
         ),
     };
-    MotionResult { cursor, kind }
+    let moved = match m {
+        Left | Right | Down | Up | WordFwd | WordBack | WordEnd => cursor.pos != p,
+        LineStart | FirstNonBlank | LineEnd | DocStart | DocEnd | GotoLine(_) => true,
+    };
+    MotionResult {
+        cursor,
+        kind,
+        moved,
+    }
+}
+
+/// True when `p` is on the last grapheme of a word (as `e` stops), so `cw`
+/// there changes only that grapheme.
+pub fn at_word_end(buf: &Buffer, p: Pos) -> bool {
+    let line = buf.line(p.line);
+    let c = class_at(line, p.col);
+    c != Class::Blank && class_at(line, grapheme::next(line, p.col)) != c
+}
+
+/// True when `p` is on a blank (whitespace, or the end of its line).
+pub fn on_blank(buf: &Buffer, p: Pos) -> bool {
+    class(buf, p) == Class::Blank
+}
+
+/// One `w` step from `p`, for an operator: the step does not cross a line
+/// end unless it starts on an empty line. Vim stops the operated text at
+/// the end of the line the last word moved over is on.
+pub fn word_fwd_for_operator(buf: &Buffer, p: Pos) -> Pos {
+    let q = word_fwd(buf, p);
+    if q.line == p.line {
+        return q;
+    }
+    if buf.line(p.line).is_empty() {
+        // Onto the next line's start; the operator's exclusive rule then
+        // makes it linewise.
+        return Pos {
+            line: p.line + 1,
+            col: 0,
+        };
+    }
+    Pos {
+        line: p.line,
+        col: buf.line(p.line).len(),
+    }
 }
 
 /// Applies `step` up to `count` times, stopping early once it stops moving
@@ -157,7 +208,7 @@ pub fn first_non_blank(line: &str) -> Option<usize> {
 }
 
 /// Where `^` lands: the first non-blank, or the last char of a blank line.
-fn caret_col(line: &str) -> usize {
+pub fn caret_col(line: &str) -> usize {
     first_non_blank(line).unwrap_or_else(|| last_col(line))
 }
 
@@ -673,6 +724,70 @@ mod tests {
         // A punctuation run is its own word.
         assert_eq!(to(Motion::WordFwd, "a->b", 0, 0), p(0, 1));
         assert_eq!(to(Motion::WordFwd, "a->b", 0, 1), p(0, 3));
+    }
+
+    #[test]
+    fn relative_motions_that_cannot_move_fail() {
+        use Motion::*;
+        for (m, text, line, col) in [
+            (Down, "a\nb", 1, 0),
+            (Up, "a\nb", 0, 0),
+            (Left, "ab", 0, 0),
+            (Right, "ab", 0, 1),
+            (WordFwd, "", 0, 0),
+            (WordBack, "ab", 0, 0),
+            (WordEnd, "ab", 0, 1),
+        ] {
+            let r = go(m, text, line, col, 1);
+            assert!(!r.moved, "{m:?} on {text:?}");
+            assert_eq!(r.cursor.pos, p(line, col), "{m:?} on {text:?}");
+        }
+        assert!(go(Down, "a\nb", 0, 0, 1).moved);
+        assert!(go(WordFwd, "hello", 0, 4, 1).moved);
+    }
+
+    #[test]
+    fn absolute_motions_never_fail() {
+        use Motion::*;
+        for m in [
+            LineStart,
+            FirstNonBlank,
+            LineEnd,
+            DocStart,
+            DocEnd,
+            GotoLine(1),
+        ] {
+            assert!(go(m, "a", 0, 0, 1).moved, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_vertical_motion_returns_the_clamped_position() {
+        // It used to hand back the cursor as given, column and all.
+        let buf = Buffer::from_text("ab");
+        let cur = Cursor {
+            pos: p(0, 99),
+            want: Want::Col(7),
+        };
+        let r = apply(Motion::Down, &buf, cur, 1);
+        assert_eq!(r.cursor.pos, p(0, 2));
+        assert_eq!(r.cursor.want, Want::Col(7));
+        assert!(!r.moved);
+    }
+
+    #[test]
+    fn word_helpers_for_operators() {
+        let buf = Buffer::from_text("foo bar\n\nbaz");
+        assert!(at_word_end(&buf, p(0, 2)));
+        assert!(!at_word_end(&buf, p(0, 1)));
+        assert!(!at_word_end(&buf, p(0, 3)));
+        assert!(on_blank(&buf, p(0, 3)));
+        assert!(on_blank(&buf, p(1, 0)));
+        assert!(!on_blank(&buf, p(0, 0)));
+        assert_eq!(word_fwd_for_operator(&buf, p(0, 0)), p(0, 4));
+        assert_eq!(word_fwd_for_operator(&buf, p(0, 4)), p(0, 7));
+        assert_eq!(word_fwd_for_operator(&buf, p(1, 0)), p(2, 0));
+        assert_eq!(word_fwd_for_operator(&buf, p(2, 0)), p(2, 3));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Test helpers shared across the crate: a recording host, editors built
 //! from text, a key-sequence driver and a position shorthand.
 
+use std::cell::{RefCell, RefMut};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::buffer::Pos;
@@ -13,30 +15,53 @@ use crate::platform::Platform;
 
 pub(crate) use crate::view_model::ViewSource;
 
-/// A host that records what it is asked.
+/// What a `FakeHost` has been asked, shared between its clones so a test
+/// can watch it after the editor owns the host.
 #[derive(Default)]
-pub(crate) struct FakeHost {
+pub(crate) struct HostState {
     pub clipboard: Option<String>,
     pub opened: Vec<String>,
     pub spawned: Vec<WindowRequest>,
     pub now: u64,
 }
 
+/// A host that records what it is asked. Clones share one `HostState`.
+#[derive(Default, Clone)]
+pub(crate) struct FakeHost {
+    state: Rc<RefCell<HostState>>,
+}
+
+impl FakeHost {
+    pub(crate) fn state(&self) -> RefMut<'_, HostState> {
+        self.state.borrow_mut()
+    }
+
+    /// The clipboard's text, "" when empty.
+    pub(crate) fn clipboard(&self) -> String {
+        self.state.borrow().clipboard.clone().unwrap_or_default()
+    }
+
+    /// Puts `text` on the clipboard, as another app copying would.
+    pub(crate) fn set_clipboard(&self, text: &str) {
+        self.state().clipboard = Some(text.to_owned());
+    }
+}
+
 impl Host for FakeHost {
     fn clipboard_get(&mut self) -> Option<String> {
-        self.clipboard.clone()
+        self.state.borrow().clipboard.clone()
     }
     fn clipboard_set(&mut self, text: &str) {
-        self.clipboard = Some(text.to_owned());
+        self.state().clipboard = Some(text.to_owned());
     }
     fn open_external(&mut self, target: &str) {
-        self.opened.push(target.to_owned());
+        self.state().opened.push(target.to_owned());
     }
     fn spawn_window(&mut self, req: WindowRequest) {
-        self.spawned.push(req);
+        self.state().spawned.push(req);
     }
     fn now_ns(&self) -> u64 {
-        self.now
+        self.state.borrow().now
     }
     fn waker(&self) -> Waker {
         Arc::new(|| {})
@@ -53,20 +78,31 @@ pub(crate) fn req(path: &str) -> OpenRequest {
 
 /// An editor on `text` (named `notes.md`) with the given config.
 pub(crate) fn build(text: &str, cfg: Config, bench: bool) -> Editor {
-    Editor::build(
+    build_with_host(text, cfg, bench).0
+}
+
+fn build_with_host(text: &str, cfg: Config, bench: bool) -> (Editor, FakeHost) {
+    let host = FakeHost::default();
+    let e = Editor::build(
         req("notes.md"),
         text,
         None,
         cfg,
         Platform::Mac,
-        Box::new(FakeHost::default()),
+        Box::new(host.clone()),
         bench,
-    )
+    );
+    (e, host)
 }
 
 /// A vim editor on `text`, in Normal mode at the document start.
 pub(crate) fn ed(text: &str) -> Editor {
     build(text, Config::default(), false)
+}
+
+/// Like `ed`, with a handle on the editor's host.
+pub(crate) fn ed_with_host(text: &str) -> (Editor, FakeHost) {
+    build_with_host(text, Config::default(), false)
 }
 
 pub(crate) fn pos(line: usize, col: usize) -> Pos {
@@ -133,10 +169,7 @@ pub(crate) fn keys(e: &mut Editor, seq: &str) -> Effects {
             None if c == ' ' => ((Key::Space, Mods::default()), 1),
             None => ((Key::Char(c), Mods::default()), c.len_utf8()),
         };
-        let out = e.handle(key_with(k, mods));
-        fx.redraw = std::mem::take(&mut fx.redraw).merge(out.redraw);
-        fx.dirty = fx.dirty.or(out.dirty);
-        fx.scroll_to_cursor |= out.scroll_to_cursor;
+        fx = fx.merge(e.handle(key_with(k, mods)));
         rest = &rest[used..];
     }
     fx
