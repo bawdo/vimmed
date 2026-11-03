@@ -22,8 +22,6 @@ pub const MAX_UNDO_GROUPS: usize = 1_000;
 struct Group {
     edits: Vec<(Edit, Edit)>,
     first_cursor: Pos,
-    /// True when the group's first change was a linewise delete or change.
-    linewise: bool,
 }
 
 #[derive(Debug, Default)]
@@ -59,37 +57,30 @@ pub fn forward(inverse: &Edit, inserted: &str) -> Edit {
 
 /// Applies `edits` to `buf` and returns the cursor vim leaves after
 /// undoing or redoing `g` (`u_undoredo`, checked against vim 9.1 in the
-/// golden tests in `vim/repeat.rs`).
+/// golden tests in `vim/repeat.rs`). Undo and redo use the same rule.
 ///
 /// The saved cursor is the one vim has at the group's first change, after
-/// the operator's motion has moved it: `dd` and `cc` are on the first
-/// non-blank, `dk` and `dgg` on the motion's landing, `dj` and `dG` where
-/// they started, `A` at the line end. The cursor goes to the top line the
-/// edits changed. On it, if it is the saved cursor's line, the saved
-/// column (clamped to a grapheme Normal mode rests on), else the first
-/// non-blank. A change that only adds or takes whole lines below a line
-/// (an `o`, a linewise `dd` on the last line) counts from the line below.
+/// the operator's motion has moved it. Vim's operator range starts at the
+/// lesser of the cursor before the command and where the command leaves it:
+/// - `dd` and `cc` leave it on the first non-blank of the last line of the
+///   count, so one line starts at the first non-blank (or the cursor's
+///   column if that is less) and a count of lines starts at the cursor.
+/// - `dk` and `dgg` start at the motion's landing; `dj` and `dG` where they
+///   began; `A` at the line end.
+/// - Visual Line starts at column 0 of its first line, or at the head where
+///   it moved up; charwise operators at the start of their range.
+/// - A linewise change over more than one line (`Vjc`, `cj`, `ck`, `2cc`)
+///   first deletes the lines after the first with the cursor moved down
+///   onto them, so the saved cursor is the range start's column on the
+///   second line, which is where undo lands (unlike `cc`).
 ///
-/// Vim's rule for using the saved cursor is that it lies in the changed
-/// block or the line either side of it (the "gwap" comment in
-/// `u_undoredo`), which also covers `o` and the multi-line linewise
-/// change (`Vjc`, `cj`, `ck`, `2cc`) first deletes the lines after the
-/// first with the cursor moved down onto them, so the saved cursor is on
-/// the second line and undo lands there, unlike `cc`. Its column is the
-/// range start's: the cursor's own for `cj`, `2cc` and `ck` (the landing
-/// of `k`), column 0 for Visual Line. That is the one thing telling
-/// `2cc` (column kept) from `Vjc` (column 0): vim's range start is the
-/// lesser of the cursor and where the command left it, which is the
-/// cursor for a count of lines but the Visual start (column 0) in
-/// Visual Line. Redo of a
-/// linewise delete or change always goes to the first non-blank of the top
-/// line.
-fn apply<'a>(
-    buf: &mut Buffer,
-    edits: impl Iterator<Item = &'a Edit>,
-    g: &Group,
-    redo: bool,
-) -> Pos {
+/// The cursor goes to the saved cursor if it lies in the block of lines the
+/// edits changed or on the line either side of it (the "gwap" comment in
+/// `u_undoredo`; this also covers `o`), clamped to a grapheme Normal mode
+/// rests on. Otherwise it goes to the first non-blank of the top changed
+/// line. A change that only adds or takes whole lines below a line (an `o`,
+/// a linewise `dd` on the last line) counts from the line below.
+fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group) -> Pos {
     let mut top = usize::MAX;
     // How many lines the edit that set `top` leaves in its place.
     let mut size = 0;
@@ -115,12 +106,7 @@ fn apply<'a>(
     // Vim: a saved cursor within the changed block, or the line either
     // side of it, is where the cursor goes back to.
     let near = saved.line + 1 >= top && saved.line <= top + size;
-    let at = if redo && g.linewise {
-        Pos {
-            line,
-            col: vim::motion::caret_col(buf.line(line)),
-        }
-    } else if near {
+    let at = if near {
         saved
     } else {
         Pos {
@@ -143,7 +129,6 @@ impl History {
             self.open = Some(Group {
                 edits: Vec::new(),
                 first_cursor: Pos::default(),
-                linewise: false,
             });
         }
         self.depth += 1;
@@ -181,19 +166,10 @@ impl History {
             None => {
                 let g = Group {
                     first_cursor: cursor,
-                    linewise: false,
                     edits: vec![(inverse, forward)],
                 };
                 self.push(g);
             }
-        }
-    }
-
-    /// Marks the open group as a linewise change, so that redo goes to the
-    /// first non-blank of its top line.
-    pub fn mark_linewise(&mut self) {
-        if let Some(g) = &mut self.open {
-            g.linewise = true;
         }
     }
 
@@ -211,12 +187,7 @@ impl History {
     /// (see `apply`), or `None` when there is nothing to undo.
     pub fn undo(&mut self, buf: &mut Buffer) -> Option<Pos> {
         let g = self.undo.pop_back()?;
-        let at = apply(
-            buf,
-            g.edits.iter().rev().map(|(inverse, _)| inverse),
-            &g,
-            false,
-        );
+        let at = apply(buf, g.edits.iter().rev().map(|(inverse, _)| inverse), &g);
         self.redo.push(g);
         Some(at)
     }
@@ -226,7 +197,7 @@ impl History {
     /// nothing to redo.
     pub fn redo(&mut self, buf: &mut Buffer) -> Option<Pos> {
         let g = self.redo.pop()?;
-        let at = apply(buf, g.edits.iter().map(|(_, forward)| forward), &g, true);
+        let at = apply(buf, g.edits.iter().map(|(_, forward)| forward), &g);
         self.undo.push_back(g);
         Some(at)
     }

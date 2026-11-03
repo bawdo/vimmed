@@ -381,8 +381,7 @@ fn linewise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
     let a = range.start.line.min(last);
     let b = range.end.line.min(last).max(a);
     if op != Operator::Yank {
-        // Undo restores the cursor vim had at the change, and redo of a
-        // linewise change goes to the first non-blank.
+        // Undo and redo restore the cursor vim had at the change.
         ctx.cursor = Pos {
             line: a,
             col: range.start.col,
@@ -393,7 +392,6 @@ fn linewise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
             // cursor undo restores.
             ctx.cursor.line = a + 1;
         }
-        ctx.history.mark_linewise();
     }
     let line_end = |buf: &Buffer, line: usize| Pos {
         line,

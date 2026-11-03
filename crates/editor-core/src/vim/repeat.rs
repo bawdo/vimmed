@@ -655,7 +655,8 @@ mod tests {
         keys(&mut e, "u");
         assert_eq!(e.cursor(), pos(0, 5));
         keys(&mut e, "<C-r>");
-        assert_eq!(e.cursor(), pos(0, 0));
+        // Vim reports [1,6], past the end of "mno"; ours clamps.
+        assert_eq!(e.cursor(), pos(0, 2));
     }
 
     #[test]
@@ -727,8 +728,8 @@ mod tests {
 
     #[test]
     fn vim_golden_dd_undo_redo() {
-        // Vim: start (2,9), result [2,7].
-        golden("j8l", "ddu<C-r>", pos(1, 6));
+        // Vim: start (2,9), result [2,5] (each step its own undo block).
+        golden("j8l", "ddu<C-r>", pos(1, 4));
     }
 
     #[test]
@@ -739,8 +740,8 @@ mod tests {
 
     #[test]
     fn vim_golden_dk_undo_redo() {
-        // Vim: start (3,10), result [2,2].
-        golden("jj9l", "dku<C-r>", pos(1, 1));
+        // Vim: start (3,10), result [2,10] (each step its own undo block).
+        golden("jj9l", "dku<C-r>", pos(1, 9));
     }
 
     #[test]
@@ -815,7 +816,10 @@ mod tests {
         golden("j8l", "yykPu", pos(0, 8));
     }
 
+    // `J` is not implemented in vim/mod.rs yet, so this passes without
+    // testing anything: ignored until a task adds `J`, then enable it.
     #[test]
+    #[ignore = "J is not implemented yet"]
     fn vim_golden_j_join_undo() {
         // Vim: start (2,9), result [2,9].
         golden("j8l", "Ju", pos(1, 8));
@@ -879,6 +883,71 @@ mod tests {
     fn vim_golden_ck_undo() {
         // Vim: start (3,10), result [3,10].
         golden("jj9l", "ckZZ<Esc>u", pos(2, 9));
+    }
+
+    #[test]
+    fn vim_golden_cc_undo_redo() {
+        // Vim: start (2,9), result [2,2] (each step its own undo block).
+        golden("j8l", "ccZZ<Esc>u<C-r>", pos(1, 1));
+    }
+
+    #[test]
+    fn vim_golden_big_v_d_undo_redo() {
+        // Vim: start (2,9), result [2,1] (each step its own undo block).
+        golden("j8l", "Vdu<C-r>", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_dd_undo_redo_on_line_3() {
+        // Vim: start (3,10), result [3,7] (each step its own undo block).
+        golden("jj9l", "ddu<C-r>", pos(2, 6));
+    }
+
+    #[test]
+    fn vim_golden_big_v_j_d_undo_redo() {
+        // Vim: start (2,9), result [2,1] (each step its own undo block).
+        golden("j8l", "Vjdu<C-r>", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_big_v_k_c_undo_redo() {
+        // Vim: start (3,10), result [3,10] (each step its own undo block).
+        golden("jj9l", "VkcZZ<Esc>u<C-r>", pos(2, 9));
+    }
+
+    #[test]
+    fn vim_golden_cj_undo_redo() {
+        // Vim: start (2,9), result [3,9] (each step its own undo block).
+        golden("j8l", "cjZZ<Esc>u<C-r>", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_two_cc_undo_redo() {
+        // Vim: start (2,9), result [3,9] (each step its own undo block).
+        golden("j8l", "2ccZZ<Esc>u<C-r>", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_a_xyz_undo_redo() {
+        // Vim: start (2,9), result [2,14] (each step its own undo block).
+        golden("j8l", "Axyz<Esc>0u<C-r>", pos(1, 13));
+    }
+
+    #[test]
+    fn undo_lands_on_a_cluster_start_when_the_saved_column_is_inside_one() {
+        // R12. `cj` from (3,10) saves column 9 of line 4, which is inside
+        // the cluster. Vim works on codepoints and lands on byte column 10;
+        // we land on the cluster start.
+        let fam = "👩\u{200d}👩\u{200d}👧";
+        let mut e = ed(&format!(
+            "  alpha one\n    bravo two\n      charlie three\nab{fam}cd"
+        ));
+        keys(&mut e, "jj9lcjZZ<Esc>u");
+        assert_eq!(e.cursor(), pos(3, 2));
+        keys(&mut e, "<C-r>");
+        let text = e.text();
+        let line = text.lines().nth(e.cursor().line).unwrap_or("");
+        assert_eq!(crate::grapheme::floor(line, e.cursor().col), e.cursor().col);
     }
 
     #[test]
