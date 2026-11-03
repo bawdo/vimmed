@@ -7,6 +7,7 @@
 pub mod damage;
 pub mod fonts;
 pub mod frame;
+pub mod highlight;
 pub mod layout;
 pub mod layout_cosmic;
 pub mod paint;
