@@ -59,10 +59,12 @@ pub const AUTO_CAP_BASE: u64 = 30 * S;
 pub const AUTO_CAP_PER_KEY: u64 = 50 * MS;
 
 /// Exit code when a benched window reaches the startup cap without ever
-/// marking `first_frame`. Chosen to sit beside the launcher's 220 (window
-/// not started) and the window's 221 (protocol mismatch), clear of 0, 1
-/// (`:cq`), 2 (usage) and 128 + n (signals).
-pub const EXIT_NO_FIRST_FRAME: i32 = 222;
+/// marking `first_frame`. It sits in the reserved block after 220 (window
+/// not started), 221 (protocol mismatch) and 222 (the launcher lost track
+/// of the window, D7), clear of 0, 1 (`:cq`), 2 (usage) and 128 + n
+/// (signals). The launcher passes window codes through, so it must not
+/// reuse any of those (ruling R28).
+pub const EXIT_NO_FIRST_FRAME: i32 = 223;
 
 impl BenchPlan {
     /// Parses a `<P>BENCH` value: `start`, or `type-manual:N`,
@@ -175,6 +177,10 @@ mod tests {
 
     #[test]
     fn exit_is_non_zero_only_without_a_first_frame() {
+        // 220 to 222 are taken (window not started, protocol mismatch,
+        // launcher lost the window), and the launcher passes window codes
+        // through, so the cap must not reuse one of them.
+        assert_eq!(EXIT_NO_FIRST_FRAME, 223);
         let mut p = Progress::default();
         assert_eq!(BenchPlan::Start.exit_code(&p), EXIT_NO_FIRST_FRAME);
         let plan = BenchPlan::Type {
