@@ -73,9 +73,15 @@ pub fn forward(inverse: &Edit, inserted: &str) -> Edit {
 /// Vim's rule for using the saved cursor is that it lies in the changed
 /// block or the line either side of it (the "gwap" comment in
 /// `u_undoredo`), which also covers `o` and the multi-line linewise
-/// change: `Vjc` and `cj` first delete the lines after the first with the
-/// cursor moved onto them, so the saved cursor is on the second line and
-/// undo lands there (`[3,1]` in the golden case), unlike `cc`. Redo of a
+/// change (`Vjc`, `cj`, `ck`, `2cc`) first deletes the lines after the
+/// first with the cursor moved down onto them, so the saved cursor is on
+/// the second line and undo lands there, unlike `cc`. Its column is the
+/// range start's: the cursor's own for `cj`, `2cc` and `ck` (the landing
+/// of `k`), column 0 for Visual Line. That is the one thing telling
+/// `2cc` (column kept) from `Vjc` (column 0): vim's range start is the
+/// lesser of the cursor and where the command left it, which is the
+/// cursor for a count of lines but the Visual start (column 0) in
+/// Visual Line. Redo of a
 /// linewise delete or change always goes to the first non-blank of the top
 /// line.
 fn apply<'a>(

@@ -129,7 +129,7 @@ pub fn replay(ctx: &mut EditCtx, change: &Change) -> OpOutcome {
             count,
             inserted,
         } => {
-            let r = OpRange::lines(ctx.buf, cur.pos.line, *count);
+            let r = OpRange::lines(ctx.buf, cur.pos.line, cur.pos.col, *count);
             let out = operator::operate(ctx, *op, r);
             type_in(ctx, out, inserted.as_deref())
         }
@@ -676,7 +676,7 @@ mod tests {
         assert_eq!(e.text(), "ab");
         keys(&mut e, "u");
         assert_eq!(e.text(), "ab\n  cd");
-        assert_eq!(e.cursor(), pos(1, 2));
+        assert_eq!(e.cursor(), pos(1, 0));
         keys(&mut e, "<C-r>");
         assert_eq!(e.cursor(), pos(0, 0));
     }
@@ -861,6 +861,24 @@ mod tests {
     fn vim_golden_v_k_d_undo() {
         // Vim: start (3,10), result [2,10].
         golden("jj9l", "vkdu", pos(1, 9));
+    }
+
+    #[test]
+    fn vim_golden_cj_undo() {
+        // Vim: start (2,9), result [3,9].
+        golden("j8l", "cjZZ<Esc>u", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_two_cc_undo() {
+        // Vim: start (2,9), result [3,9].
+        golden("j8l", "2ccZZ<Esc>u", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_ck_undo() {
+        // Vim: start (3,10), result [3,10].
+        golden("jj9l", "ckZZ<Esc>u", pos(2, 9));
     }
 
     #[test]

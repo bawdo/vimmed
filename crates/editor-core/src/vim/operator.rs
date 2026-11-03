@@ -63,17 +63,23 @@ pub struct OpRange {
 }
 
 impl OpRange {
-    /// `count` whole lines from `line`, as far as the buffer goes (`dd cc
-    /// yy`).
-    pub fn lines(buf: &Buffer, line: usize, count: usize) -> OpRange {
+    /// `count` whole lines from the cursor's `line` and `col`, as far as
+    /// the buffer goes (`dd cc yy`). As in vim, where the operator's range
+    /// starts at the lesser of the cursor and where `dd` leaves it (the
+    /// first non-blank of the last line), `start.col` is the first
+    /// non-blank for one line (or the cursor's column if that is less), and
+    /// the cursor's column for more.
+    pub fn lines(buf: &Buffer, line: usize, col: usize, count: usize) -> OpRange {
         let last = buf.line_count() - 1;
         let line = line.min(last);
         let end = line.saturating_add(count.max(1) - 1).min(last);
+        let col = if end == line {
+            col.min(motion::caret_col(buf.line(line)))
+        } else {
+            col
+        };
         OpRange {
-            start: Pos {
-                line,
-                col: motion::caret_col(buf.line(line)),
-            },
+            start: Pos { line, col },
             end: Pos { line: end, col: 0 },
             linewise: true,
         }

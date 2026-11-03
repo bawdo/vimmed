@@ -418,7 +418,7 @@ impl Vim {
                 }
                 Step::Operate {
                     op,
-                    range: OpRange::lines(buf, cur.pos.line, count),
+                    range: OpRange::lines(buf, cur.pos.line, cur.pos.col, count),
                 }
             }
             Some(_) => {

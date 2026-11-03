@@ -143,7 +143,7 @@ pub fn shape(buf: &Buffer, sel: Selection) -> Shape {
 pub fn region(buf: &Buffer, at: Pos, shape: Shape) -> OpRange {
     let at = buf.clamp(at);
     let head = match shape {
-        Shape::Lines(n) => return OpRange::lines(buf, at.line, n),
+        Shape::Lines(n) => return OpRange::lines(buf, at.line, at.col, n),
         Shape::Chars(n) => {
             let line = buf.line(at.line);
             let mut col = at.col;
