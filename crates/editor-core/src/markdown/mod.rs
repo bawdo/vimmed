@@ -9,8 +9,8 @@ pub mod table;
 
 pub use block::{BlockId, Blocks, CodeBlockInfo, LineKind, ListKind, ordered_display};
 pub use display::{
-    BlockDeco, DisplaySpan, LineDisplay, Prefix, Reveal, SpanStyle, TablePart, code_bg,
+    BlockDeco, DisplaySpan, LineDisplay, Prefix, Reveal, SpanBase, SpanStyle, TablePart, code_bg,
     display_to_src, line_display, src_to_display,
 };
-pub use inline::{InlineEl, InlineKind, parse_inline, parses_inline};
+pub use inline::{InlineEl, InlineKind, parse_inline, parse_line};
 pub use table::{Align, TableId, TableInfo};

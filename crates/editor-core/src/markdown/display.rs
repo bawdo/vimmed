@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use super::block::{Blocks, LineKind, ListKind};
-use super::inline::{InlineEl, InlineKind};
+use super::inline::{InlineEl, InlineKind, content_start};
 use super::table::TableId;
 
 /// What the cursor reveals on a line.
@@ -35,22 +35,46 @@ pub enum Prefix {
     QuoteBars(u8),
 }
 
-/// The role a run of source text renders in.
+/// The base role a run of source text renders in, before inline flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpanStyle {
+pub enum SpanBase {
     Body,
-    Strong,
-    Em,
-    StrongEm,
-    Strike,
-    Code,
-    Link,
-    /// Revealed markdown syntax (monospace, `color.syntax.reveal`).
-    Syntax,
     Heading(u8),
+    /// An inline code span.
+    Code,
+    /// A line of a fenced code block.
     CodeBlock {
         lang: Option<String>,
     },
+    /// Revealed markdown syntax (monospace, `color.syntax.reveal`). Never
+    /// carries flags.
+    Syntax,
+}
+
+/// How a run of source text renders: the line's base role (or `Code` inside
+/// an inline code span), plus a flag for every enclosing element. Styles
+/// compose: bold strikethrough inside a link sets `strong`, `strike` and
+/// `link`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanStyle {
+    pub base: SpanBase,
+    pub strong: bool,
+    pub em: bool,
+    pub strike: bool,
+    pub link: bool,
+}
+
+impl SpanStyle {
+    /// `base` with no flags set.
+    pub fn plain(base: SpanBase) -> SpanStyle {
+        SpanStyle {
+            base,
+            strong: false,
+            em: false,
+            strike: false,
+            link: false,
+        }
+    }
 }
 
 /// A run of the line's source shown in one style. Display text is the
@@ -104,18 +128,23 @@ pub struct LineDisplay {
 const BULLET: char = '◦';
 
 /// The display of `line` (of kind `kind`, with inline elements `inline` from
-/// `parse_inline`) for the given reveal.
+/// `parse_line`) for the given reveal.
+///
+/// Styles compose: each span takes the line's base (`Heading(n)` on heading
+/// lines, `Body` otherwise, `CodeBlock` on code lines; `Code` inside an
+/// inline code span) with a flag set for every enclosing bold, italic,
+/// strikethrough and link.
 ///
 /// - Inline: with `Reveal::Cursor(c)`, the element whose syntax range holds
 ///   `c` (a cursor at its end does not count) shows raw, climbing to its
 ///   outermost parent; when several do, the one starting first wins. Every
 ///   element inside the revealed one shows raw with it. Revealed markers take
-///   `SpanStyle::Syntax`; content keeps its style; other elements stay
+///   `SpanBase::Syntax`; content keeps its style; other elements stay
 ///   rendered.
 /// - A heading, list, quote or rule prefix shows raw (as `Syntax`) whenever
 ///   the cursor is on the line; otherwise it is hidden behind a `Prefix`.
-///   Elements that start inside the prefix are ignored, so a `*` bullet never
-///   opens an italic.
+///   Elements that start inside the prefix are ignored (a guard: `parse_line`
+///   never produces them).
 /// - Code, table and image lines reveal as a whole: any cursor on them (or
 ///   `Reveal::Block`) shows the line raw.
 ///
@@ -147,16 +176,17 @@ pub fn line_display(
                 unclosed: false,
             };
             if is_code {
-                d.spans.push(whole(SpanStyle::CodeBlock { lang: None }));
+                d.spans
+                    .push(whole(SpanStyle::plain(SpanBase::CodeBlock { lang: None })));
             } else if on_line {
-                d.spans.push(whole(SpanStyle::Syntax));
+                d.spans.push(whole(SpanStyle::plain(SpanBase::Syntax)));
             }
             d.spans.retain(|s| !s.src.is_empty());
             return d;
         }
         LineKind::Rule => {
             if on_line {
-                d.spans.push(whole(SpanStyle::Syntax));
+                d.spans.push(whole(SpanStyle::plain(SpanBase::Syntax)));
             } else {
                 d.deco = BlockDeco::Rule;
             }
@@ -200,14 +230,11 @@ pub fn line_display(
                     | LineKind::TableRow { .. }
             ));
 
-    let (prefix_end, base) = match kind {
-        LineKind::Heading(level) => (heading_content(line), SpanStyle::Heading(*level)),
-        LineKind::ListItem { content_offset, .. } | LineKind::Quote { content_offset, .. } => {
-            (*content_offset, SpanStyle::Body)
-        }
-        _ => (0, SpanStyle::Body),
+    let base = match kind {
+        LineKind::Heading(level) => SpanBase::Heading(*level),
+        _ => SpanBase::Body,
     };
-    let prefix_end = prefix_end.min(len);
+    let prefix_end = content_start(line, kind).min(len);
     if prefix_end > 0 && !on_line {
         match kind {
             LineKind::ListItem { kind, .. } => {
@@ -321,28 +348,27 @@ impl Flag {
 }
 
 /// The style of a byte under `counts`, or `None` when it is hidden. Revealed
-/// syntax wins over hidden syntax; a byte takes the strongest inline role
-/// covering it (code, link, then emphasis, then strikethrough).
-fn style_of(counts: &[i32; Flag::COUNT], base: &SpanStyle) -> Option<SpanStyle> {
+/// syntax wins over hidden syntax and carries no flags.
+/// Otherwise the base is the line's, or `Code` inside an inline code span,
+/// with a flag for every enclosing bold, italic, strikethrough and link.
+fn style_of(counts: &[i32; Flag::COUNT], base: &SpanBase) -> Option<SpanStyle> {
     let on = |f: Flag| counts[f as usize] > 0;
-    Some(if on(Flag::Syntax) {
-        SpanStyle::Syntax
-    } else if on(Flag::Hidden) {
+    if on(Flag::Syntax) {
+        return Some(SpanStyle::plain(SpanBase::Syntax));
+    }
+    if on(Flag::Hidden) {
         return None;
-    } else if on(Flag::Code) {
-        SpanStyle::Code
-    } else if on(Flag::Link) {
-        SpanStyle::Link
-    } else if on(Flag::Strong) && on(Flag::Em) {
-        SpanStyle::StrongEm
-    } else if on(Flag::Strong) {
-        SpanStyle::Strong
-    } else if on(Flag::Em) {
-        SpanStyle::Em
-    } else if on(Flag::Strike) {
-        SpanStyle::Strike
-    } else {
-        base.clone()
+    }
+    Some(SpanStyle {
+        base: if on(Flag::Code) {
+            SpanBase::Code
+        } else {
+            base.clone()
+        },
+        strong: on(Flag::Strong),
+        em: on(Flag::Em),
+        strike: on(Flag::Strike),
+        link: on(Flag::Link),
     })
 }
 
@@ -369,14 +395,6 @@ fn revealed_root(
         }
     }
     best
-}
-
-/// Where a heading's text starts: after the hashes and the whitespace after
-/// them.
-fn heading_content(line: &str) -> usize {
-    let hashes = line.bytes().take_while(|&b| b == b'#').count();
-    let rest = &line[hashes..];
-    hashes + rest.len() - rest.trim_start().len()
 }
 
 /// The code block decoration of `line`, derived from the line kinds around
@@ -460,7 +478,7 @@ mod tests {
     use super::*;
     use crate::buffer::Buffer;
     use crate::markdown::block::BlockId;
-    use crate::markdown::inline::parse_inline;
+    use crate::markdown::inline::{parse_inline, parse_line};
 
     /// The display text: every span's source text, in order.
     fn text_of(d: &LineDisplay, l: &str) -> String {
@@ -468,7 +486,22 @@ mod tests {
     }
 
     fn show(l: &str, kind: &LineKind, reveal: Reveal) -> LineDisplay {
-        line_display(l, kind, &parse_inline(l), reveal)
+        line_display(l, kind, &parse_line(l, kind), reveal)
+    }
+
+    /// `base` with the flags named in `flags` ("strong em strike link").
+    fn sty(base: SpanBase, flags: &str) -> SpanStyle {
+        let mut st = SpanStyle::plain(base);
+        for f in flags.split_whitespace() {
+            match f {
+                "strong" => st.strong = true,
+                "em" => st.em = true,
+                "strike" => st.strike = true,
+                "link" => st.link = true,
+                other => panic!("unknown flag {other}"),
+            }
+        }
+        st
     }
 
     fn para(l: &str, reveal: Reveal) -> LineDisplay {
@@ -541,16 +574,16 @@ mod tests {
         assert_eq!(
             styled(&para(l, Reveal::None), l),
             [
-                s("a ", SpanStyle::Body),
-                s("b", SpanStyle::Strong),
-                s(" ", SpanStyle::Body),
-                s("c", SpanStyle::Em),
-                s(" ", SpanStyle::Body),
-                s("d", SpanStyle::Strike),
-                s(" ", SpanStyle::Body),
-                s("e", SpanStyle::Code),
-                s(" ", SpanStyle::Body),
-                s("f", SpanStyle::Link),
+                s("a ", sty(SpanBase::Body, "")),
+                s("b", sty(SpanBase::Body, "strong")),
+                s(" ", sty(SpanBase::Body, "")),
+                s("c", sty(SpanBase::Body, "em")),
+                s(" ", sty(SpanBase::Body, "")),
+                s("d", sty(SpanBase::Body, "strike")),
+                s(" ", sty(SpanBase::Body, "")),
+                s("e", sty(SpanBase::Code, "")),
+                s(" ", sty(SpanBase::Body, "")),
+                s("f", sty(SpanBase::Body, "link")),
             ]
         );
     }
@@ -561,12 +594,12 @@ mod tests {
         assert_eq!(
             styled(&para(l, Reveal::Cursor(4)), l),
             [
-                s("a ", SpanStyle::Body),
-                s("**", SpanStyle::Syntax),
-                s("b", SpanStyle::Strong),
-                s("**", SpanStyle::Syntax),
-                s(" ", SpanStyle::Body),
-                s("c", SpanStyle::Em),
+                s("a ", sty(SpanBase::Body, "")),
+                s("**", sty(SpanBase::Syntax, "")),
+                s("b", sty(SpanBase::Body, "strong")),
+                s("**", sty(SpanBase::Syntax, "")),
+                s(" ", sty(SpanBase::Body, "")),
+                s("c", sty(SpanBase::Body, "em")),
             ]
         );
     }
@@ -584,10 +617,10 @@ mod tests {
         assert_eq!(
             styled(&para(l, Reveal::None), l),
             [
-                s("a ", SpanStyle::Strong),
-                s("b", SpanStyle::StrongEm),
-                s(" c", SpanStyle::Strong),
-                s(" d", SpanStyle::Body),
+                s("a ", sty(SpanBase::Body, "strong")),
+                s("b", sty(SpanBase::Body, "strong em")),
+                s(" c", sty(SpanBase::Body, "strong")),
+                s(" d", sty(SpanBase::Body, "")),
             ]
         );
         // The cursor on the italic climbs to its parent bold.
@@ -617,9 +650,9 @@ mod tests {
         assert_eq!(
             styled(&para(l, Reveal::Cursor(2)), l),
             [
-                s("a ", SpanStyle::Body),
-                s("\\", SpanStyle::Syntax),
-                s("*b", SpanStyle::Body),
+                s("a ", sty(SpanBase::Body, "")),
+                s("\\", sty(SpanBase::Syntax, "")),
+                s("*b", sty(SpanBase::Body, "")),
             ]
         );
     }
@@ -653,16 +686,16 @@ mod tests {
         assert_eq!(
             styled(&d, l),
             [
-                s("Sub ", SpanStyle::Heading(2)),
-                s("bold", SpanStyle::Strong)
+                s("Sub ", sty(SpanBase::Heading(2), "")),
+                s("bold", sty(SpanBase::Heading(2), "strong"))
             ]
         );
         let d = show(l, &LineKind::Heading(2), Reveal::Cursor(14));
         assert_eq!(
             styled(&d, l)[..2],
             [
-                s("## ", SpanStyle::Syntax),
-                s("Sub ", SpanStyle::Heading(2))
+                s("## ", sty(SpanBase::Syntax, "")),
+                s("Sub ", sty(SpanBase::Heading(2), ""))
             ]
         );
         // Cursor at 14 is inside the bold, so its markers show too.
@@ -686,7 +719,10 @@ mod tests {
         assert_eq!(d.prefix, Prefix::None);
         assert_eq!(
             styled(&d, l),
-            [s("- ", SpanStyle::Syntax), s("item", SpanStyle::Body)]
+            [
+                s("- ", sty(SpanBase::Syntax, "")),
+                s("item", sty(SpanBase::Body, ""))
+            ]
         );
     }
 
@@ -721,12 +757,134 @@ mod tests {
     }
 
     #[test]
-    fn list_marker_is_not_parsed_as_inline() {
-        // The `*` bullet would otherwise open an italic with the next `*`.
-        let l = "* a *b*";
+    fn star_bullet_does_not_pair_with_inline_star() {
+        // Divergence from moon_edit (which parses the raw line): parsing starts
+        // after the prefix, so the `*` bullet never opens an italic.
+        let em = || sty(SpanBase::Body, "em");
+        let l = "* a *b* c *d*";
         let d = show_line(l, Reveal::None);
         assert_eq!(d.prefix, Prefix::Bullet('◦'));
-        assert_eq!(text_of(&d, l), "a *b*");
+        assert_eq!(
+            styled(&d, l),
+            [
+                s("a ", sty(SpanBase::Body, "")),
+                s("b", em()),
+                s(" c ", sty(SpanBase::Body, "")),
+                s("d", em()),
+            ]
+        );
+        let l = "> *x*";
+        let d = show_line(l, Reveal::None);
+        assert_eq!(d.prefix, Prefix::QuoteBars(1));
+        assert_eq!(styled(&d, l), [s("x", em())]);
+        let l = "# *x*";
+        assert_eq!(
+            styled(&show_line(l, Reveal::None), l),
+            [s("x", sty(SpanBase::Heading(1), "em"))]
+        );
+        // Revealed, the prefix shows raw and the italic still pairs.
+        let l = "* a *b*";
+        assert_eq!(
+            styled(&show_line(l, Reveal::Cursor(0)), l),
+            [
+                s("* ", sty(SpanBase::Syntax, "")),
+                s("a ", sty(SpanBase::Body, "")),
+                s("b", em()),
+            ]
+        );
+    }
+
+    // Composed styles.
+
+    #[test]
+    fn strike_inside_bold_keeps_both() {
+        let l = "**a ~~b~~**";
+        assert_eq!(
+            styled(&para(l, Reveal::None), l),
+            [
+                s("a ", sty(SpanBase::Body, "strong")),
+                s("b", sty(SpanBase::Body, "strong strike")),
+            ]
+        );
+    }
+
+    #[test]
+    fn bold_inside_link_keeps_both() {
+        let l = "[**x**](u)";
+        assert_eq!(
+            styled(&para(l, Reveal::None), l),
+            [s("x", sty(SpanBase::Body, "link strong"))]
+        );
+    }
+
+    #[test]
+    fn bold_inside_heading_keeps_the_heading_base() {
+        let l = "# Hi **x**";
+        assert_eq!(
+            styled(&show_line(l, Reveal::None), l),
+            [
+                s("Hi ", sty(SpanBase::Heading(1), "")),
+                s("x", sty(SpanBase::Heading(1), "strong")),
+            ]
+        );
+    }
+
+    #[test]
+    fn triple_asterisks_render_bold_with_a_literal_star() {
+        let l = "***x***";
+        assert_eq!(
+            styled(&para(l, Reveal::None), l),
+            [
+                s("*x", sty(SpanBase::Body, "strong")),
+                s("*", sty(SpanBase::Body, ""))
+            ]
+        );
+        assert_eq!(
+            styled(&para(l, Reveal::Cursor(0)), l),
+            [
+                s("**", sty(SpanBase::Syntax, "")),
+                s("*x", sty(SpanBase::Body, "strong")),
+                s("**", sty(SpanBase::Syntax, "")),
+                s("*", sty(SpanBase::Body, "")),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_code_keeps_enclosing_flags() {
+        let l = "**a `b`** [`c`](u)";
+        assert_eq!(
+            styled(&para(l, Reveal::None), l),
+            [
+                s("a ", sty(SpanBase::Body, "strong")),
+                s("b", sty(SpanBase::Code, "strong")),
+                s(" ", sty(SpanBase::Body, "")),
+                s("c", sty(SpanBase::Code, "link")),
+            ]
+        );
+    }
+
+    #[test]
+    fn revealed_syntax_carries_no_flags() {
+        let l = "**a _b_**";
+        let d = para(l, Reveal::Cursor(4));
+        for span in d
+            .spans
+            .iter()
+            .filter(|sp| sp.style.base == SpanBase::Syntax)
+        {
+            assert_eq!(span.style, SpanStyle::plain(SpanBase::Syntax), "{span:?}");
+        }
+        assert_eq!(
+            styled(&d, l),
+            [
+                s("**", sty(SpanBase::Syntax, "")),
+                s("a ", sty(SpanBase::Body, "strong")),
+                s("_", sty(SpanBase::Syntax, "")),
+                s("b", sty(SpanBase::Body, "strong em")),
+                s("_**", sty(SpanBase::Syntax, "")),
+            ]
+        );
     }
 
     // Quotes (moon_edit editor_line_render_test, blockquote rendering).
@@ -797,7 +955,7 @@ mod tests {
         let l = "---";
         let d = show_line(l, Reveal::Cursor(1));
         assert_eq!(d.deco, BlockDeco::None);
-        assert_eq!(styled(&d, l), [s("---", SpanStyle::Syntax)]);
+        assert_eq!(styled(&d, l), [s("---", sty(SpanBase::Syntax, ""))]);
     }
 
     // Code blocks.
@@ -812,7 +970,10 @@ mod tests {
     fn code_content_renders_in_the_code_block_style() {
         let l = "console.log(\"**hi**\");";
         let d = line_display(l, &LineKind::Code { block: BlockId(0) }, &[], Reveal::None);
-        assert_eq!(styled(&d, l), [s(l, SpanStyle::CodeBlock { lang: None })]);
+        assert_eq!(
+            styled(&d, l),
+            [s(l, sty(SpanBase::CodeBlock { lang: None }, ""))]
+        );
         assert_eq!(
             d.deco,
             BlockDeco::CodeBg {
@@ -873,7 +1034,7 @@ mod tests {
         for reveal in [Reveal::Block, Reveal::Cursor(2)] {
             let d = line_display("```python", &open, &[], reveal);
             assert_eq!(text_of(&d, "```python"), "```python");
-            assert_eq!(d.spans[0].style, SpanStyle::Syntax);
+            assert_eq!(d.spans[0].style, sty(SpanBase::Syntax, ""));
         }
         let d = line_display(
             "print(1)",

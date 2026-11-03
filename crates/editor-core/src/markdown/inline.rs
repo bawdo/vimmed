@@ -43,9 +43,8 @@ pub struct InlineEl {
 const ESCAPABLE: &[u8] = b"\\`*_{}[]()<>#+-.!|~";
 
 /// Whether lines of this kind carry inline elements. Code lines (fences
-/// included) and rules do not: callers skip `parse_inline` for them, and
-/// `line_display` ignores whatever is passed for them.
-pub fn parses_inline(kind: &LineKind) -> bool {
+/// included) and rules do not.
+fn parses_inline(kind: &LineKind) -> bool {
     !matches!(
         kind,
         LineKind::Rule
@@ -53,6 +52,57 @@ pub fn parses_inline(kind: &LineKind) -> bool {
             | LineKind::FenceClose { .. }
             | LineKind::Code { .. }
     )
+}
+
+/// Where the inline text of a line of this kind starts: after a list marker
+/// (and its indentation), after quote markers, or after a heading's hashes
+/// and the whitespace that follows them. 0 for other kinds.
+pub(crate) fn content_start(line: &str, kind: &LineKind) -> usize {
+    match kind {
+        LineKind::ListItem { content_offset, .. } | LineKind::Quote { content_offset, .. } => {
+            *content_offset
+        }
+        LineKind::Heading(_) => {
+            let hashes = line.bytes().take_while(|&b| b == b'#').count();
+            let rest = &line[hashes..];
+            hashes + rest.len() - rest.trim_start().len()
+        }
+        _ => 0,
+    }
+}
+
+/// The inline elements of a line of kind `kind`, for `line_display`. Empty
+/// for code and rule lines. Parsing starts after the line's prefix (see
+/// `content_start`), so a `*` bullet never pairs with a `*` in the text;
+/// ranges are still offsets into the whole line.
+///
+/// This diverges from moon_edit, which parses the raw line including its
+/// prefix.
+pub fn parse_line(line: &str, kind: &LineKind) -> Vec<InlineEl> {
+    if !parses_inline(kind) {
+        return Vec::new();
+    }
+    let start = content_start(line, kind);
+    let Some(content) = line.get(start..) else {
+        return Vec::new();
+    };
+    let shift = |r: Range<usize>| r.start + start..r.end + start;
+    parse_inline(content)
+        .into_iter()
+        .map(|e| InlineEl {
+            kind: match e.kind {
+                InlineKind::Link { url } => InlineKind::Link { url: shift(url) },
+                InlineKind::Image { alt, src } => InlineKind::Image {
+                    alt: shift(alt),
+                    src: shift(src),
+                },
+                other => other,
+            },
+            syntax: shift(e.syntax),
+            content: shift(e.content),
+            parent: e.parent,
+        })
+        .collect()
 }
 
 /// The inline elements of `line`, sorted by `syntax.start`.
@@ -704,15 +754,85 @@ mod tests {
     #[test]
     fn code_and_rule_lines_carry_no_inline_elements() {
         use crate::markdown::BlockId;
-        assert!(!parses_inline(&LineKind::Code { block: BlockId(0) }));
-        assert!(!parses_inline(&LineKind::FenceOpen {
-            block: BlockId(0),
-            lang: None
-        }));
-        assert!(!parses_inline(&LineKind::FenceClose { block: BlockId(0) }));
-        assert!(!parses_inline(&LineKind::Rule));
-        assert!(parses_inline(&LineKind::Paragraph));
-        assert!(parses_inline(&LineKind::Heading(1)));
+        let l = "**not parsed**";
+        for kind in [
+            LineKind::Code { block: BlockId(0) },
+            LineKind::FenceOpen {
+                block: BlockId(0),
+                lang: None,
+            },
+            LineKind::FenceClose { block: BlockId(0) },
+            LineKind::Rule,
+        ] {
+            assert!(parse_line(l, &kind).is_empty(), "{kind:?}");
+        }
+        assert_eq!(parse_line(l, &LineKind::Paragraph), parse(l));
+    }
+
+    #[test]
+    fn parse_line_starts_after_a_star_bullet() {
+        // Divergence from moon_edit, which parses the raw line: the bullet
+        // `*` would open an italic and shift every later pairing.
+        let l = "* a *b* c *d*";
+        let kind = LineKind::ListItem {
+            indent: 0,
+            kind: crate::markdown::ListKind::Bullet('*'),
+            content_offset: 2,
+        };
+        let els = parse_line(l, &kind);
+        assert_eq!(
+            els,
+            [
+                el(InlineKind::Italic, 4..7, 5..6),
+                el(InlineKind::Italic, 10..13, 11..12),
+            ]
+        );
+        assert_eq!(&l[els[0].content.clone()], "b");
+        assert_eq!(&l[els[1].content.clone()], "d");
+    }
+
+    #[test]
+    fn parse_line_skips_quote_and_heading_prefixes() {
+        let quote = LineKind::Quote {
+            depth: 1,
+            content_offset: 2,
+        };
+        assert_eq!(
+            parse_line("> *x*", &quote),
+            [el(InlineKind::Italic, 2..5, 3..4)]
+        );
+        assert_eq!(
+            parse_line("# *x*", &LineKind::Heading(1)),
+            [el(InlineKind::Italic, 2..5, 3..4)]
+        );
+        // Ranges and parents stay whole-line offsets and indices.
+        let els = parse_line("## **a *b***", &LineKind::Heading(2));
+        assert_eq!(els[0].kind, InlineKind::Bold);
+        assert_eq!(els[0].syntax.start, 3);
+        let l = "- **a _b_**";
+        let item = LineKind::ListItem {
+            indent: 0,
+            kind: crate::markdown::ListKind::Bullet('-'),
+            content_offset: 2,
+        };
+        let els = parse_line(l, &item);
+        assert_eq!(els[1].parent, Some(0));
+        assert_eq!(&l[els[1].content.clone()], "b");
+    }
+
+    #[test]
+    fn parse_line_tolerates_a_bad_content_offset() {
+        let kind = LineKind::Quote {
+            depth: 1,
+            content_offset: 99,
+        };
+        assert!(parse_line("> x", &kind).is_empty());
+        // Mid-char offset: nothing to parse rather than a panic.
+        let kind = LineKind::Quote {
+            depth: 1,
+            content_offset: 1,
+        };
+        assert!(parse_line("é *x*", &kind).is_empty());
     }
 
     // Edge cases.
