@@ -28,38 +28,3 @@ pub trait Host {
     fn now_ns(&self) -> u64;
     fn waker(&self) -> Waker;
 }
-
-/// A host that records what it is asked. Task 19 moves it into `testkit`.
-#[cfg(test)]
-pub(crate) mod fake {
-    use super::*;
-
-    #[derive(Default)]
-    pub(crate) struct FakeHost {
-        pub clipboard: Option<String>,
-        pub opened: Vec<String>,
-        pub spawned: Vec<WindowRequest>,
-        pub now: u64,
-    }
-
-    impl Host for FakeHost {
-        fn clipboard_get(&mut self) -> Option<String> {
-            self.clipboard.clone()
-        }
-        fn clipboard_set(&mut self, text: &str) {
-            self.clipboard = Some(text.to_owned());
-        }
-        fn open_external(&mut self, target: &str) {
-            self.opened.push(target.to_owned());
-        }
-        fn spawn_window(&mut self, req: WindowRequest) {
-            self.spawned.push(req);
-        }
-        fn now_ns(&self) -> u64 {
-            self.now
-        }
-        fn waker(&self) -> Waker {
-            Arc::new(|| {})
-        }
-    }
-}
