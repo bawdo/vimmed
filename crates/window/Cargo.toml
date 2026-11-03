@@ -16,3 +16,6 @@ marks = { path = "../marks" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 shell-mac = { path = "../shell-mac" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+shell-gtk = { path = "../shell-gtk" }

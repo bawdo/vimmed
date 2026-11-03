@@ -1,0 +1,18 @@
+[package]
+name = "shell-gtk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+app-meta = { path = "../app-meta" }
+editor-core = { path = "../editor-core" }
+editor-render = { path = "../editor-render" }
+marks = { path = "../marks" }
+
+# Toolkit crates, Linux only, so `cargo test --workspace` still builds on macOS.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+yeslogic-fontconfig-sys = "6"
+libc = "0.2"
