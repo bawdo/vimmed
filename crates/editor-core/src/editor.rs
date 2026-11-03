@@ -162,8 +162,13 @@ impl Editor {
             Input::Key(k) => self.key(k),
             Input::Text(text) => self.insert(&text),
             // TODO(later tasks): ask before closing with unsaved changes.
-            Input::CloseRequested | Input::Signal(_) => Effects {
+            Input::CloseRequested => Effects {
                 close: Some(0),
+                ..Effects::default()
+            },
+            // TODO(Task 34): write the recovery copy before closing.
+            Input::Signal(s) => Effects {
+                close: Some(s.exit_code()),
                 ..Effects::default()
             },
             Input::Preedit { .. }
@@ -841,9 +846,29 @@ mod tests {
     fn close_requested_closes_with_code_zero() {
         let mut e = ed("");
         assert_eq!(e.handle(Input::CloseRequested).close, Some(0));
+    }
+
+    #[test]
+    fn terminate_closes_with_143() {
+        let mut e = ed("");
         assert_eq!(
             e.handle(Input::Signal(SignalKind::Terminate)).close,
-            Some(0)
+            Some(143)
+        );
+    }
+
+    #[test]
+    fn hangup_closes_with_129() {
+        let mut e = ed("");
+        assert_eq!(e.handle(Input::Signal(SignalKind::Hangup)).close, Some(129));
+    }
+
+    #[test]
+    fn interrupt_closes_with_130() {
+        let mut e = ed("");
+        assert_eq!(
+            e.handle(Input::Signal(SignalKind::Interrupt)).close,
+            Some(130)
         );
     }
 

@@ -67,6 +67,23 @@ pub enum SignalKind {
     Terminate,
 }
 
+impl SignalKind {
+    /// The POSIX signal number.
+    pub fn number(self) -> i32 {
+        match self {
+            SignalKind::Hangup => 1,
+            SignalKind::Interrupt => 2,
+            SignalKind::Terminate => 15,
+        }
+    }
+
+    /// The exit code after closing on this signal: 128 plus its number.
+    /// TODO(Task 34): the recovery copy is written before the window exits.
+    pub fn exit_code(self) -> i32 {
+        128 + self.number()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Input {
     Key(KeyEvent),
