@@ -53,6 +53,7 @@ const STEPS: &[Step] = &[
     ("clippy", clippy),
     ("test", test),
     ("lint-name", lint_name),
+    ("lint-literals", crate::literals::run),
     ("rename-test", rename_test),
 ];
 
