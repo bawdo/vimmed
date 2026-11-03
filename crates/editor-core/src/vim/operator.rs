@@ -52,7 +52,9 @@ impl Operator {
 
 /// The text an operator acts on. Charwise, `start..end` with `end`
 /// exclusive. Linewise, every line from `start.line` to `end.line`; the
-/// columns are not used.
+/// columns are not used to cut, but `start` is the cursor vim has at the
+/// change (what undo restores): the motion's landing for `k` and `gg`, the
+/// first non-blank for `dd`, the cursor for forward motions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpRange {
     pub start: Pos,
@@ -68,7 +70,10 @@ impl OpRange {
         let line = line.min(last);
         let end = line.saturating_add(count.max(1) - 1).min(last);
         OpRange {
-            start: Pos { line, col: 0 },
+            start: Pos {
+                line,
+                col: motion::caret_col(buf.line(line)),
+            },
             end: Pos { line: end, col: 0 },
             linewise: true,
         }
@@ -181,10 +186,7 @@ fn span(buf: &Buffer, from: Pos, to: Pos, kind: MotionKind) -> OpRange {
     let (a, b) = if to < from { (to, from) } else { (from, to) };
     match kind {
         MotionKind::Linewise => OpRange {
-            start: Pos {
-                line: a.line,
-                col: 0,
-            },
+            start: a,
             end: Pos {
                 line: b.line,
                 col: 0,
@@ -369,6 +371,15 @@ fn linewise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
     let last = ctx.buf.line_count() - 1;
     let a = range.start.line.min(last);
     let b = range.end.line.min(last).max(a);
+    if op != Operator::Yank {
+        // Undo restores the cursor vim had at the change, and redo of a
+        // linewise change goes to the first non-blank.
+        ctx.cursor = Pos {
+            line: a,
+            col: range.start.col,
+        };
+        ctx.history.mark_linewise();
+    }
     let line_end = |buf: &Buffer, line: usize| Pos {
         line,
         col: buf.line(line).len(),

@@ -631,13 +631,13 @@ mod tests {
     }
 
     #[test]
-    fn undo_goes_to_the_first_non_blank_when_the_top_line_is_not_the_cursor_line() {
+    fn undo_of_dk_and_dgg_land_where_the_motion_put_the_cursor() {
         let mut e = ed("x\n  yy\nzzzz");
         keys(&mut e, "jj$dk");
         assert_eq!(e.text(), "x");
         keys(&mut e, "u");
         assert_eq!(e.text(), "x\n  yy\nzzzz");
-        assert_eq!(e.cursor(), pos(1, 2));
+        assert_eq!(e.cursor(), pos(1, 3));
         keys(&mut e, "<C-r>");
         assert_eq!(e.cursor(), pos(0, 0));
         let mut e = ed("  a\nbb\ncc");
@@ -655,7 +655,7 @@ mod tests {
         keys(&mut e, "u");
         assert_eq!(e.cursor(), pos(0, 5));
         keys(&mut e, "<C-r>");
-        assert_eq!(e.cursor(), pos(0, 2));
+        assert_eq!(e.cursor(), pos(0, 0));
     }
 
     #[test]
@@ -676,7 +676,7 @@ mod tests {
         assert_eq!(e.text(), "ab");
         keys(&mut e, "u");
         assert_eq!(e.text(), "ab\n  cd");
-        assert_eq!(e.cursor(), pos(1, 0));
+        assert_eq!(e.cursor(), pos(1, 2));
         keys(&mut e, "<C-r>");
         assert_eq!(e.cursor(), pos(0, 0));
     }
@@ -694,6 +694,132 @@ mod tests {
         keys(&mut e, "<C-r>");
         assert_eq!(e.text(), format!("{fam}z"));
         assert_eq!(e.cursor(), pos(0, 0));
+    }
+
+    // Golden cases from real vim (VIM 9.1, headless), owner ruling R29.
+    // Positions here are 0-based; each test notes vim's 1-based ones.
+
+    const GOLDEN: &str = "  alpha one\n    bravo two\n      charlie three\n delta four";
+
+    fn golden(start: &str, typed: &str, want: crate::buffer::Pos) {
+        let mut e = ed(GOLDEN);
+        keys(&mut e, start);
+        keys(&mut e, typed);
+        assert_eq!(e.cursor(), want, "{typed:?} from {start:?}");
+    }
+
+    #[test]
+    fn vim_golden_a_xyz_then_undo() {
+        // Vim: start (2,9), result [2,13].
+        golden("j8l", "Axyz<Esc>0u", pos(1, 12));
+    }
+
+    #[test]
+    fn vim_golden_dd_undo() {
+        // Vim: start (2,9), result [2,5].
+        golden("j8l", "ddu", pos(1, 4));
+    }
+
+    #[test]
+    fn vim_golden_dd_undo_redo() {
+        // Vim: start (2,9), result [2,7].
+        golden("j8l", "ddu<C-r>", pos(1, 6));
+    }
+
+    #[test]
+    fn vim_golden_dk_undo() {
+        // Vim: start (3,10), result [2,10].
+        golden("jj9l", "dku", pos(1, 9));
+    }
+
+    #[test]
+    fn vim_golden_dk_undo_redo() {
+        // Vim: start (3,10), result [2,2].
+        golden("jj9l", "dku<C-r>", pos(1, 1));
+    }
+
+    #[test]
+    fn vim_golden_dj_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dju", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_dgg_undo() {
+        // Vim: start (4,8), result [1,3].
+        golden("jjj7l", "dggu", pos(0, 2));
+    }
+
+    #[test]
+    fn vim_golden_big_g_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dGu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_x_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "xu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_dw_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dwu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_dw_undo_redo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dwu<C-r>", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_cw_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "cwZZ<Esc>u", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_o_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "oNEW<Esc>u", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_big_o_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "ONEW<Esc>u", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_o_undo_redo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "oNEW<Esc>u<C-r>", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_yyjp_undo() {
+        // Vim: start (2,9), result [3,9].
+        golden("j8l", "yyjpu", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_yykp_undo() {
+        // Vim: start (2,9), result [1,9].
+        golden("j8l", "yykPu", pos(0, 8));
+    }
+
+    #[test]
+    fn vim_golden_j_join_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "Ju", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_cc_undo() {
+        // Vim: start (2,9), result [2,5].
+        golden("j8l", "ccZZ<Esc>u", pos(1, 4));
     }
 
     #[test]
