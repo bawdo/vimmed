@@ -2,6 +2,7 @@ mod bench;
 mod ci;
 mod fixture;
 mod lint;
+mod literals;
 mod rename;
 
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("ci") => ci::run(&root(), rest.iter().any(|a| a == "--linux")),
         Some("lint-name") => ci::lint_name(&root()),
+        Some("lint-literals") => literals::run(&root()),
         Some("rename-test") => {
             let name = rest
                 .iter()
@@ -52,6 +54,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | lint-name | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
+        "usage: cargo xtask <ci [--linux] | lint-name | lint-literals | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
     );
 }
