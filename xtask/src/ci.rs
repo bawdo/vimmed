@@ -47,13 +47,13 @@ fn rename_test(root: &Path) -> Result<(), String> {
     rename::run(root, rename::DEFAULT_NAME)
 }
 
-/// Later tasks add one line each (`lint-literals`, `shell-lines`).
 const STEPS: &[Step] = &[
     ("fmt", fmt),
     ("clippy", clippy),
     ("test", test),
     ("lint-name", lint_name),
     ("lint-literals", crate::literals::run),
+    ("shell-lines", crate::shell_lines::run),
     ("rename-test", rename_test),
 ];
 
