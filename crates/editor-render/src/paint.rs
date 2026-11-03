@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use editor_core::markdown::{LineDisplay, Prefix, SpanBase, SpanStyle};
 use editor_core::tokens::{Rgba, TokenId, Tokens};
-use tiny_skia::{Paint, Pixmap, Rect, Transform};
+use tiny_skia::{FilterQuality, Paint, Pattern, Pixmap, Rect, SpreadMode, Transform};
 
 use crate::layout::{FontRole, GlyphMask, MaskData, StyledSpan};
 
@@ -20,6 +20,86 @@ fn heading_size(n: u8) -> TokenId {
         5 => TokenId::FontSizeH5,
         _ => TokenId::FontSizeH6,
     }
+}
+
+/// Copies the premultiplied `src` onto `p` at whole pixels `x, y` (source-over),
+/// only inside the rows `clip` and the pixmap. `opaque` says every source pixel
+/// has full alpha, which makes each row a plain memory copy.
+pub fn blit(p: &mut Pixmap, x: i32, y: i32, src: &Pixmap, opaque: bool, clip: &Range<f32>) {
+    let (pw, ph) = (p.width() as i32, p.height() as i32);
+    let (sw, sh) = (src.width() as i32, src.height() as i32);
+    let ys = y.max(clip.start.ceil() as i32).max(0)..(y + sh).min(clip.end as i32).min(ph);
+    let xs = x.max(0)..(x + sw).min(pw);
+    if ys.is_empty() || xs.is_empty() {
+        return;
+    }
+    let n = (xs.end - xs.start) as usize;
+    let (src_data, dst) = (src.data(), p.data_mut());
+    for yy in ys {
+        let s0 = (((yy - y) * sw + (xs.start - x)) * 4) as usize;
+        let d0 = ((yy * pw + xs.start) * 4) as usize;
+        let s_row = &src_data[s0..s0 + n * 4];
+        let d_row = &mut dst[d0..d0 + n * 4];
+        if opaque {
+            d_row.copy_from_slice(s_row);
+            continue;
+        }
+        for (d, s) in d_row
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(s_row.as_chunks::<4>().0)
+        {
+            let inv = 255 - u16::from(s[3]);
+            for k in 0..4 {
+                let v = u16::from(s[k]) + (u16::from(d[k]) * inv + 127) / 255;
+                d[k] = v.min(255) as u8;
+            }
+        }
+    }
+}
+
+/// Draws `src` scaled to the `w` by `h` pixel box at `x, y`, only inside the
+/// rows `clip`. The source is premultiplied, so transparency blends correctly.
+pub fn draw_scaled(
+    p: &mut Pixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    src: &Pixmap,
+    clip: &Range<f32>,
+) {
+    let (y0, y1) = (y.max(clip.start), (y + h).min(clip.end));
+    let (x0, x1) = (x.max(0.0), (x + w).min(p.width() as f32));
+    if y1 <= y0 || x1 <= x0 || src.width() == 0 || src.height() == 0 {
+        return;
+    }
+    let Some(rect) = Rect::from_ltrb(x0, y0, x1, y1) else {
+        return;
+    };
+    // Fill just the clipped rect with the image as a shader: no allocation
+    // proportional to the frame, and only the rect's pixels are sampled.
+    let (sx, sy) = (w / src.width() as f32, h / src.height() as f32);
+    // A whole-pixel copy needs no filtering.
+    let copy = sx == 1.0 && sy == 1.0 && x.fract() == 0.0 && y.fract() == 0.0;
+    let quality = if copy {
+        FilterQuality::Nearest
+    } else {
+        FilterQuality::Bilinear
+    };
+    let paint = Paint {
+        shader: Pattern::new(
+            src.as_ref(),
+            SpreadMode::Pad,
+            quality,
+            1.0,
+            Transform::from_row(sx, 0.0, 0.0, sy, x, y),
+        ),
+        anti_alias: false,
+        ..Paint::default()
+    };
+    p.fill_rect(rect, &paint, Transform::identity(), None);
 }
 
 /// The styled span for `style` over display bytes `range`, at `scale`.
