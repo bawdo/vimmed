@@ -58,14 +58,268 @@ const STEPS: &[Step] = &[
 ];
 
 pub fn run(root: &Path, linux: bool) -> Result<(), String> {
-    if linux {
-        return Err("--linux: linux-check is not available yet (Task 17 adds it)".into());
-    }
     for (name, step) in STEPS {
         println!("== ci: {name}");
         step(root).map_err(|e| format!("ci step `{name}` failed: {e}"))?;
         println!("ci: {name} OK");
     }
     println!("ci: all {} steps OK", STEPS.len());
+    if linux {
+        println!("== ci: linux-check");
+        linux_check(root)?;
+    }
     Ok(())
+}
+
+// `linux-check`: the workspace built and tested in a Linux container
+// (docker/Dockerfile.check), then a smoke run of the launcher under a
+// headless weston. The workspace is mounted at /work; the cargo registry,
+// the target directory and the fixture live on a named volume, so repeat
+// runs are incremental and the host's own target directory is untouched.
+// The smoke run leaves its evidence in target/linux-check on the host.
+
+const WORK: &str = "/work";
+/// Where the smoke run leaves its evidence, relative to the workspace.
+const CHECK_OUT: &str = "target/linux-check";
+
+/// The `channel` rust-toolchain.toml pins.
+pub fn toolchain_channel(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        (k.trim() == "channel").then(|| v.trim().trim_matches('"').to_string())
+    })
+}
+
+/// Libraries the launcher may link: the vDSO, libc, libgcc_s and the
+/// dynamic loader (named differently on each architecture).
+fn ldd_allowed(lib: &str) -> bool {
+    let name = lib.rsplit('/').next().unwrap_or(lib);
+    [
+        "linux-vdso.so",
+        "linux-gate.so",
+        "libc.so",
+        "libgcc_s.so",
+        "ld-linux",
+    ]
+    .iter()
+    .any(|p| name.starts_with(p))
+}
+
+/// Checks `ldd` output for the launcher: only libc, libgcc_s, the loader
+/// and the vDSO. Returns the unexpected lines.
+pub fn ldd_ok(text: &str) -> Result<(), Vec<String>> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Err(vec!["ldd printed nothing".into()]);
+    }
+    let bad: Vec<String> = lines
+        .iter()
+        .filter(|l| !l.split_whitespace().next().is_some_and(ldd_allowed))
+        .map(|l| l.to_string())
+        .collect();
+    if bad.is_empty() { Ok(()) } else { Err(bad) }
+}
+
+/// The smoke run's verdict from its marks log, the launcher's exit code
+/// and `ldd`: `first_frame` in milliseconds, or what went wrong.
+pub fn smoke_verdict(marks: &str, exit_code: &str, ldd: &str) -> Result<f64, String> {
+    let mut m = std::collections::BTreeMap::new();
+    crate::bench::parse_log(marks, &mut m);
+    let first = m
+        .get(marks::names::FIRST_FRAME)
+        .and_then(|v| v.first().copied());
+    let first = first.ok_or("first_frame was never logged")?;
+    match exit_code.trim() {
+        "0" => {}
+        "" => return Err("the launcher's exit code was not recorded".into()),
+        code => return Err(format!("the launcher exited with {code}")),
+    }
+    ldd_ok(ldd).map_err(|bad| format!("launcher links more than libc: {}", bad.join("; ")))?;
+    Ok(first)
+}
+
+/// The one-line summary of a passing run.
+pub fn summary(first_frame_ms: f64) -> String {
+    format!(
+        "linux-check: build OK, tests OK, weston smoke first_frame={first_frame_ms:.1}, launcher ldd OK"
+    )
+}
+
+/// The smoke script run in the container, for a given env prefix.
+fn smoke_script(prefix: &str) -> String {
+    format!(
+        r#"set -u
+out={WORK}/{CHECK_OUT}
+mkdir -p "$out"
+cargo xtask fixture /cargo/fixture > /dev/null || exit 11
+export XDG_RUNTIME_DIR=/tmp/xdg-run
+mkdir -p -m 0700 "$XDG_RUNTIME_DIR"
+weston --backend=headless --socket=wl-check --idle-time=0 > "$out/weston.log" 2>&1 &
+wpid=$!
+for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/wl-check" ] && break; sleep 0.1; done
+[ -S "$XDG_RUNTIME_DIR/wl-check" ] || {{ cat "$out/weston.log"; exit 12; }}
+ldd /cargo/target/debug/launcher > "$out/ldd.txt" 2>&1
+WAYLAND_DISPLAY=wl-check GDK_BACKEND=wayland GTK_A11Y=none NO_AT_BRIDGE=1 \
+  {prefix}BENCH=start {prefix}MARKS="$out/marks.log" \
+  timeout 60 /cargo/target/debug/launcher /cargo/fixture/test.md > "$out/launcher.log" 2>&1
+echo $? > "$out/exit-code"
+kill "$wpid" 2> /dev/null
+exit 0
+"#
+    )
+}
+
+fn docker(root: &Path, args: &[&str]) -> Result<(), String> {
+    let ok = Command::new("docker")
+        .current_dir(root)
+        .args(args)
+        .status()
+        .map_err(|e| format!("docker: {e}"))?
+        .success();
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("docker {} failed", args.first().unwrap_or(&"")))
+    }
+}
+
+/// Runs `script` with bash in the check container.
+fn in_container(root: &Path, image: &str, volume: &str, script: &str) -> Result<(), String> {
+    let work = format!("{}:{WORK}", root.display());
+    let cache = format!("{volume}:/cargo");
+    docker(
+        root,
+        &[
+            "run",
+            "--rm",
+            "-v",
+            &work,
+            "-v",
+            &cache,
+            "-w",
+            WORK,
+            "-e",
+            "CARGO_HOME=/cargo/home",
+            "-e",
+            "CARGO_TARGET_DIR=/cargo/target",
+            image,
+            "bash",
+            "-c",
+            script,
+        ],
+    )
+}
+
+pub fn linux_check(root: &Path) -> Result<(), String> {
+    let pinned = std::fs::read_to_string(root.join("rust-toolchain.toml"))
+        .map_err(|e| format!("rust-toolchain.toml: {e}"))?;
+    let channel = toolchain_channel(&pinned).ok_or("rust-toolchain.toml: no `channel` found")?;
+    let image = format!("{}-check", app_meta::KEBAB);
+    let volume = format!("{}-check-cargo", app_meta::KEBAB);
+    let arg = format!("RUST_TOOLCHAIN={channel}");
+    let build_image = [
+        "build",
+        "-f",
+        "docker/Dockerfile.check",
+        "--build-arg",
+        &arg,
+        "-t",
+        &image,
+        "docker",
+    ];
+    docker(root, &build_image).map_err(|e| format!("linux-check: image build failed: {e}"))?;
+    let run = |script: &str| in_container(root, &image, &volume, script);
+    run("cargo build --workspace --all-targets")
+        .map_err(|e| format!("linux-check: build failed: {e}"))?;
+    run("cargo test --workspace").map_err(|e| format!("linux-check: tests failed: {e}"))?;
+    let out = root.join(CHECK_OUT);
+    let _ = std::fs::remove_dir_all(&out);
+    run(&smoke_script(app_meta::ENV_PREFIX))
+        .map_err(|e| format!("linux-check: smoke setup failed: {e}"))?;
+    let read = |f: &str| std::fs::read_to_string(out.join(f)).unwrap_or_default();
+    match smoke_verdict(&read("marks.log"), &read("exit-code"), &read("ldd.txt")) {
+        Ok(ms) => {
+            println!("{}", summary(ms));
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "linux-check: smoke failed: {e}\n--- launcher.log\n{}--- weston.log (tail)\n{}",
+            read("launcher.log"),
+            tail(&read("weston.log"), 20)
+        )),
+    }
+}
+
+fn tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut s = lines[lines.len().saturating_sub(n)..].join("\n");
+    s.push('\n');
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LDD_GOOD: &str = "\tlinux-vdso.so.1 (0x0000ffff8a9c0000)
+\tlibgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000ffff8a900000)
+\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff8a750000)
+\t/lib/ld-linux-aarch64.so.1 (0x0000ffff8a983000)
+";
+
+    #[test]
+    fn toolchain_channel_is_read_from_the_pin() {
+        let t = "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"rustfmt\"]\n";
+        assert_eq!(toolchain_channel(t).as_deref(), Some("1.99.1"));
+        assert_eq!(toolchain_channel("[toolchain]\n"), None);
+    }
+
+    #[test]
+    fn ldd_allows_only_libc_libgcc_and_the_loader() {
+        assert_eq!(ldd_ok(LDD_GOOD), Ok(()));
+        let x86 = "\tlinux-vdso.so.1 (0x7ffd)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1)\n\t/lib64/ld-linux-x86-64.so.2 (0x2)\n";
+        assert_eq!(ldd_ok(x86), Ok(()));
+        let bad = format!("{LDD_GOOD}\tlibgtk-4.so.1 => /lib/libgtk-4.so.1 (0x3)\n");
+        let err = ldd_ok(&bad).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(err[0].contains("libgtk-4"));
+        assert!(ldd_ok("").is_err(), "no output is not a pass");
+    }
+
+    #[test]
+    fn smoke_needs_first_frame_exit_zero_and_clean_ldd() {
+        let marks = "window_main,10.000\nfirst_paint,80.000\nfirst_frame,95.250\n";
+        assert_eq!(smoke_verdict(marks, "0\n", LDD_GOOD), Ok(95.25));
+        let e = smoke_verdict("first_paint,80.0\n", "0\n", LDD_GOOD).unwrap_err();
+        assert!(e.contains("first_frame"), "{e}");
+        let e = smoke_verdict(marks, "223\n", LDD_GOOD).unwrap_err();
+        assert!(e.contains("223"), "{e}");
+        let e = smoke_verdict(marks, "", LDD_GOOD).unwrap_err();
+        assert!(e.contains("exit"), "{e}");
+        let bad = format!("{LDD_GOOD}\tlibm.so.6 => /lib/libm.so.6 (0x3)\n");
+        let e = smoke_verdict(marks, "0", &bad).unwrap_err();
+        assert!(e.contains("libm"), "{e}");
+    }
+
+    #[test]
+    fn summary_line_matches_the_brief() {
+        assert_eq!(
+            summary(95.25),
+            "linux-check: build OK, tests OK, weston smoke first_frame=95.2, launcher ldd OK"
+        );
+    }
+
+    #[test]
+    fn smoke_script_uses_the_prefix_and_the_fixture() {
+        let s = smoke_script("ABC_DEF_");
+        assert!(s.contains("ABC_DEF_BENCH=start"));
+        assert!(s.contains("ABC_DEF_MARKS="));
+        assert!(s.contains("weston --backend=headless"));
+        assert!(s.contains("cargo xtask fixture /cargo/fixture"));
+        assert!(s.contains("ldd /cargo/target/debug/launcher"));
+    }
 }

@@ -7,6 +7,7 @@ members = [
     "crates/marks",
     "crates/launcher",
     "crates/shell-mac",
+    "crates/shell-gtk",
     "crates/window",
     "xtask",
     "crates/layout-bench",
@@ -18,6 +19,7 @@ default-members = [
     "crates/marks",
     "crates/launcher",
     "crates/shell-mac",
+    "crates/shell-gtk",
     "crates/window",
     "xtask",
 ]

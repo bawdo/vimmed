@@ -23,6 +23,7 @@ fn main() -> ExitCode {
     let rest = &args[args.len().min(1)..];
     let result = match args.first().map(String::as_str) {
         Some("ci") => ci::run(&root(), rest.iter().any(|a| a == "--linux")),
+        Some("linux-check") => ci::linux_check(&root()),
         Some("lint-name") => ci::lint_name(&root()),
         Some("lint-literals") => literals::run(&root()),
         Some("shell-lines") => shell_lines::run(&root()),
@@ -59,6 +60,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | lint-name | lint-literals | shell-lines | bundle-mac [--release] | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
+        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | bundle-mac [--release] | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
     );
 }

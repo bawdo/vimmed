@@ -1,0 +1,18 @@
+# The image `cargo xtask linux-check` builds and tests in: Debian trixie with
+# the GTK 4 and fontconfig development files, weston for a headless Wayland
+# session, and one font family. The workspace is mounted at /work and the
+# cargo registry and target directory live on a named volume, so this image
+# holds only the toolchain and system packages.
+FROM rust:1-trixie
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgtk-4-dev libfontconfig-dev pkg-config weston fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# The toolchain rust-toolchain.toml pins, installed once here rather than on
+# every run. xtask passes the channel.
+ARG RUST_TOOLCHAIN
+RUN test -n "$RUST_TOOLCHAIN" \
+    && rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+        --component rustfmt --component clippy

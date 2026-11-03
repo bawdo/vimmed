@@ -16,7 +16,7 @@ use app_meta::SLUG;
 use editor_core::host::WindowArgs;
 
 const EXIT_USAGE: i32 = 2;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const EXIT_NOT_STARTED: i32 = 220;
 const EXIT_PROTOCOL: i32 = 221;
 
@@ -49,10 +49,8 @@ fn run(args: WindowArgs) -> i32 {
 }
 
 #[cfg(target_os = "linux")]
-fn run(_args: WindowArgs) -> i32 {
-    // TODO(Task 17): call `shell_gtk::run(args)` once the GTK shell exists.
-    eprintln!("{SLUG}: window binary could not be started: no GTK shell yet");
-    EXIT_NOT_STARTED
+fn run(args: WindowArgs) -> i32 {
+    shell_gtk::run(args)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

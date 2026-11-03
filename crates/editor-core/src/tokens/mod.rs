@@ -38,6 +38,20 @@ macro_rules! token_table {
 mod defaults;
 pub use defaults::TokenId;
 
+/// Family names a shell's font resolver works with: the sentinels that
+/// `font.body` and `font.mono` default to, and the generic names a platform
+/// matcher (fontconfig, as in CSS) maps to its configured faces.
+pub mod family {
+    /// `font.body`'s default: the platform's interface face.
+    pub const SYSTEM_UI: &str = "system-ui";
+    /// `font.mono`'s default: the platform's monospace face.
+    pub const SYSTEM_MONO: &str = "system-mono";
+    pub const GENERIC_SANS: &str = "sans-serif";
+    pub const GENERIC_MONO: &str = "monospace";
+    pub const GENERIC_EMOJI: &str = "emoji";
+    pub const GENERIC_SYMBOL: &str = "symbol";
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Color,
