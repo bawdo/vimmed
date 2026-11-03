@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 app-meta = { path = "../crates/app-meta" }
 png = "0.17"
+marks = { path = "../crates/marks" }

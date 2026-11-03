@@ -1,3 +1,4 @@
+mod bench;
 mod ci;
 mod fixture;
 mod lint;
@@ -29,6 +30,7 @@ fn main() -> ExitCode {
             rename::run(&root(), name)
         }
         Some("fixture") => return fixture::run(rest.first().cloned()),
+        Some("bench") => return bench::run(rest.to_vec()),
         Some(other) => {
             eprintln!("xtask: unknown subcommand `{other}`");
             usage();
@@ -50,6 +52,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | lint-name | rename-test [--name SLUG] | fixture [DIR]>"
+        "usage: cargo xtask <ci [--linux] | lint-name | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
     );
 }
