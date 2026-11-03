@@ -472,7 +472,7 @@ mod tests {
     // Owned carry-overs.
 
     #[test]
-    fn big_o_redo_lands_where_the_session_ended() {
+    fn big_o_redo_lands_on_the_opened_line_at_the_saved_column() {
         let mut e = ed("abc");
         keys(&mut e, "lOfoo<Esc>");
         assert_eq!(e.text(), "foo\nabc");
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(e.cursor(), pos(0, 1));
         keys(&mut e, "<C-r>");
         assert_eq!(e.text(), "foo\nabc");
-        assert_eq!(e.cursor(), pos(0, 2));
+        assert_eq!(e.cursor(), pos(0, 1));
         // With nothing typed, redo lands on the opened line, not after it.
         let mut e = ed("abc");
         keys(&mut e, "O<Esc>u<C-r>");
@@ -610,7 +610,9 @@ mod tests {
     // Undo and redo.
 
     #[test]
-    fn undo_restores_the_cursor_before_and_redo_the_cursor_after() {
+    fn undo_and_redo_land_on_the_top_changed_line_as_vim_does() {
+        // Decision D12 (vim's `u_undoredo`): the saved column is the
+        // cursor at the group's first change.
         let mut e = ed("one two three");
         keys(&mut e, "wdw");
         assert_eq!(e.cursor(), pos(0, 4));
@@ -618,12 +620,80 @@ mod tests {
         assert_eq!(e.cursor(), pos(0, 4));
         keys(&mut e, "$<C-r>");
         assert_eq!(e.cursor(), pos(0, 4));
+        // `A` moves to the end before it changes anything: column 3, which
+        // Normal mode clamps to 2 on `abc`, and 3 on `abcxyz` after redo.
         let mut e = ed("abc");
         keys(&mut e, "Axyz<Esc>");
         keys(&mut e, "0u");
-        assert_eq!(e.cursor(), pos(0, 0));
+        assert_eq!(e.cursor(), pos(0, 2));
         keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 3));
+    }
+
+    #[test]
+    fn undo_goes_to_the_first_non_blank_when_the_top_line_is_not_the_cursor_line() {
+        let mut e = ed("x\n  yy\nzzzz");
+        keys(&mut e, "jj$dk");
+        assert_eq!(e.text(), "x");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "x\n  yy\nzzzz");
+        assert_eq!(e.cursor(), pos(1, 2));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 0));
+        let mut e = ed("  a\nbb\ncc");
+        keys(&mut e, "jj$dgg");
+        assert_eq!(e.text(), "");
+        keys(&mut e, "u");
+        assert_eq!(e.cursor(), pos(0, 2));
+    }
+
+    #[test]
+    fn undo_of_dj_keeps_the_saved_column() {
+        let mut e = ed("abcdef\nghijkl\nmno");
+        keys(&mut e, "lllllldj");
+        assert_eq!(e.text(), "mno");
+        keys(&mut e, "u");
         assert_eq!(e.cursor(), pos(0, 5));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 2));
+    }
+
+    #[test]
+    fn undo_and_redo_of_o_land_on_the_line_it_was_opened_from() {
+        let mut e = ed("abc\ndef");
+        keys(&mut e, "lofoo<Esc>u");
+        assert_eq!(e.text(), "abc\ndef");
+        assert_eq!(e.cursor(), pos(0, 1));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.text(), "abc\nfoo\ndef");
+        assert_eq!(e.cursor(), pos(0, 1));
+    }
+
+    #[test]
+    fn undo_of_dd_on_the_last_line_lands_on_it() {
+        let mut e = ed("ab\n  cd");
+        keys(&mut e, "jdd");
+        assert_eq!(e.text(), "ab");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "ab\n  cd");
+        assert_eq!(e.cursor(), pos(1, 0));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 0));
+    }
+
+    #[test]
+    fn redo_floors_the_saved_column_to_a_grapheme_boundary() {
+        // `d0` from column 5 leaves the cluster at the line start, so the
+        // saved column 5 falls inside it.
+        let fam = "👩\u{200d}👩\u{200d}👧";
+        let mut e = ed(&format!("abcde{fam}z"));
+        keys(&mut e, "llllld0");
+        assert_eq!(e.text(), format!("{fam}z"));
+        keys(&mut e, "u");
+        assert_eq!(e.cursor(), pos(0, 5));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.text(), format!("{fam}z"));
+        assert_eq!(e.cursor(), pos(0, 0));
     }
 
     #[test]

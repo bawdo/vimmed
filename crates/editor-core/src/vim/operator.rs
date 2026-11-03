@@ -274,7 +274,7 @@ impl<'a> EditCtx<'a> {
         let inverse = self.buf.replace(r, text);
         let delta = self.buf.line_count() as isize - before as isize;
         self.history
-            .record(inverse.clone(), undo::forward(&inverse, text));
+            .record(self.cursor, inverse.clone(), undo::forward(&inverse, text));
         self.cursor = inverse.range.end;
         self.touched.push(Touched {
             start_line: inverse.range.start.line,

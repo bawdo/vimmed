@@ -11,17 +11,17 @@
 use std::collections::VecDeque;
 
 use crate::buffer::{Buffer, Edit, Pos};
+use crate::vim;
 
 /// The most undo steps kept. Past it, the oldest group is dropped.
 pub const MAX_UNDO_GROUPS: usize = 1_000;
 
 /// One undo step: the edits it made, oldest first, as (inverse, forward)
-/// pairs, and where the cursor was before and after.
+/// pairs, and where the cursor was when the first of them was made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Group {
     edits: Vec<(Edit, Edit)>,
-    cursor_before: Pos,
-    cursor_after: Pos,
+    first_cursor: Pos,
 }
 
 #[derive(Debug, Default)]
@@ -55,27 +55,56 @@ pub fn forward(inverse: &Edit, inserted: &str) -> Edit {
     }
 }
 
+/// Applies `edits` to `buf` and returns the cursor vim leaves after
+/// undoing or redoing `g` (`u_undoredo`): the top line the edits changed;
+/// on it, the column saved at the group's first change if that is the line
+/// the cursor was on, else the first non-blank. A change that only adds or
+/// takes whole lines below a line (an `o`, a linewise `dd` on the last
+/// line) counts from the line below, and a top line just under the saved
+/// cursor line falls back to it, as vim does for `o`.
+fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group) -> Pos {
+    let mut top = usize::MAX;
+    for e in edits {
+        let start = e.range.start;
+        let at_end = start.line < buf.line_count() && buf.line(start.line).len() == start.col;
+        let breaks = e.text.starts_with('\n') || buf.text_range(e.range.clone()).starts_with('\n');
+        top = top.min(start.line + usize::from(at_end && breaks));
+        buf.replace(e.range.clone(), &e.text);
+    }
+    let saved = g.first_cursor;
+    let mut line = top.min(buf.line_count() - 1);
+    if saved.line + 1 == top && top > 0 {
+        line = saved.line.min(buf.line_count() - 1);
+    }
+    let col = if line == saved.line {
+        saved.col
+    } else {
+        vim::motion::caret_col(buf.line(line))
+    };
+    vim::rest(buf, Pos { line, col })
+}
+
 impl History {
     pub fn new() -> History {
         History::default()
     }
 
-    /// Opens a group with the cursor at `cursor`, or nests in the open one.
-    pub fn begin(&mut self, cursor: Pos) {
+    /// Opens a group, or nests in the open one. The group's cursor is the
+    /// one given to its first `record`.
+    pub fn begin(&mut self) {
         if self.depth == 0 {
             self.open = Some(Group {
                 edits: Vec::new(),
-                cursor_before: cursor,
-                cursor_after: cursor,
+                first_cursor: Pos::default(),
             });
         }
         self.depth += 1;
     }
 
-    /// Closes the group `begin` opened, leaving the cursor at `cursor`. The
-    /// outermost `end` files it as one undo step, unless it is empty. With
-    /// no group open it does nothing.
-    pub fn end(&mut self, cursor: Pos) {
+    /// Closes the group `begin` opened. The outermost `end` files it as
+    /// one undo step, unless it is empty. With no group open it does
+    /// nothing.
+    pub fn end(&mut self) {
         if self.depth == 0 {
             return;
         }
@@ -83,24 +112,27 @@ impl History {
         if self.depth > 0 {
             return;
         }
-        if let Some(mut g) = self.open.take()
+        if let Some(g) = self.open.take()
             && !g.edits.is_empty()
         {
-            g.cursor_after = cursor;
             self.push(g);
         }
     }
 
-    /// Records one replacement: `inverse` undoes it and `forward` redoes it.
-    /// Outside an open group it is an undo step of its own, with the cursor
-    /// at the edit's start before it and after the inserted text after.
-    pub fn record(&mut self, inverse: Edit, forward: Edit) {
+    /// Records one replacement made with the cursor at `cursor`: `inverse`
+    /// undoes it and `forward` redoes it. Outside an open group it is an
+    /// undo step of its own.
+    pub fn record(&mut self, cursor: Pos, inverse: Edit, forward: Edit) {
         match &mut self.open {
-            Some(g) => g.edits.push((inverse, forward)),
+            Some(g) => {
+                if g.edits.is_empty() {
+                    g.first_cursor = cursor;
+                }
+                g.edits.push((inverse, forward));
+            }
             None => {
                 let g = Group {
-                    cursor_before: forward.range.start,
-                    cursor_after: inverse.range.end,
+                    first_cursor: cursor,
                     edits: vec![(inverse, forward)],
                 };
                 self.push(g);
@@ -118,26 +150,21 @@ impl History {
         }
     }
 
-    /// Undoes the latest group in `buf` and returns the cursor from before
-    /// it, or `None` when there is nothing to undo.
+    /// Undoes the latest group in `buf` and returns where the cursor goes
+    /// (see `apply`), or `None` when there is nothing to undo.
     pub fn undo(&mut self, buf: &mut Buffer) -> Option<Pos> {
         let g = self.undo.pop_back()?;
-        for (inverse, _) in g.edits.iter().rev() {
-            buf.replace(inverse.range.clone(), &inverse.text);
-        }
-        let at = g.cursor_before;
+        let at = apply(buf, g.edits.iter().rev().map(|(inverse, _)| inverse), &g);
         self.redo.push(g);
         Some(at)
     }
 
-    /// Redoes the latest undone group in `buf` and returns the cursor from
-    /// after it, or `None` when there is nothing to redo.
+    /// Redoes the latest undone group in `buf` and returns where the
+    /// cursor goes, by the same rule as `undo`, or `None` when there is
+    /// nothing to redo.
     pub fn redo(&mut self, buf: &mut Buffer) -> Option<Pos> {
         let g = self.redo.pop()?;
-        for (_, forward) in &g.edits {
-            buf.replace(forward.range.clone(), &forward.text);
-        }
-        let at = g.cursor_after;
+        let at = apply(buf, g.edits.iter().map(|(_, forward)| forward), &g);
         self.undo.push_back(g);
         Some(at)
     }
@@ -166,9 +193,10 @@ mod tests {
 
     /// Replaces `r` in `buf` and records it, as `EditCtx::replace` does.
     fn edit(h: &mut History, buf: &mut Buffer, r: std::ops::Range<Pos>, text: &str) {
+        let at = r.start;
         let inverse = buf.replace(r, text);
         let fwd = forward(&inverse, text);
-        h.record(inverse, fwd);
+        h.record(at, inverse, fwd);
     }
 
     // operation_log_test.dart: OperationLog.
@@ -261,22 +289,22 @@ mod tests {
     // operation_log_test.dart: OperationLog with cursor positions.
 
     #[test]
-    fn undo_returns_the_cursor_before_and_redo_the_cursor_after() {
+    fn undo_and_redo_land_where_vim_does() {
         let mut h = History::new();
         let mut buf = Buffer::from_text("");
-        h.begin(pos(0, 0));
+        h.begin();
         edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "hello");
-        h.end(pos(0, 5));
+        h.end();
         assert!(h.can_undo());
         assert_eq!(h.undo(&mut buf), Some(pos(0, 0)));
-        assert_eq!(h.redo(&mut buf), Some(pos(0, 5)));
+        assert_eq!(h.redo(&mut buf), Some(pos(0, 0)));
     }
 
     #[test]
     fn an_empty_group_is_discarded() {
         let mut h = History::new();
-        h.begin(pos(0, 0));
-        h.end(pos(0, 0));
+        h.begin();
+        h.end();
         assert!(!h.can_undo());
     }
 
@@ -286,8 +314,8 @@ mod tests {
         let mut buf = Buffer::from_text("");
         edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "a");
         h.undo(&mut buf);
-        h.begin(pos(0, 0));
-        h.end(pos(0, 0));
+        h.begin();
+        h.end();
         assert!(h.can_redo());
     }
 
@@ -300,7 +328,7 @@ mod tests {
         assert_eq!(h.undo_len(), 2);
         assert_eq!(h.undo(&mut buf), Some(pos(0, 2)));
         assert_eq!(buf.to_text(), "axb");
-        assert_eq!(h.redo(&mut buf), Some(pos(0, 3)));
+        assert_eq!(h.redo(&mut buf), Some(pos(0, 2)));
     }
 
     // Grouping.
@@ -309,16 +337,16 @@ mod tests {
     fn a_group_undoes_all_its_edits_in_one_step() {
         let mut h = History::new();
         let mut buf = Buffer::from_text("hello world");
-        h.begin(pos(0, 0));
+        h.begin();
         edit(&mut h, &mut buf, pos(0, 0)..pos(0, 5), "");
         edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "x\ny");
         edit(&mut h, &mut buf, pos(1, 1)..pos(1, 1), "z");
-        h.end(pos(1, 1));
+        h.end();
         assert_eq!(buf.to_text(), "x\nyz world");
         assert_eq!(h.undo_len(), 1);
         assert_eq!(h.undo(&mut buf), Some(pos(0, 0)));
         assert_eq!(buf.to_text(), "hello world");
-        assert_eq!(h.redo(&mut buf), Some(pos(1, 1)));
+        assert_eq!(h.redo(&mut buf), Some(pos(0, 0)));
         assert_eq!(buf.to_text(), "x\nyz world");
     }
 
@@ -326,14 +354,14 @@ mod tests {
     fn nested_groups_make_one_step() {
         let mut h = History::new();
         let mut buf = Buffer::from_text("");
-        h.begin(pos(0, 0));
+        h.begin();
         for (i, c) in ["a", "b", "c"].into_iter().enumerate() {
-            h.begin(pos(0, i));
+            h.begin();
             edit(&mut h, &mut buf, pos(0, i)..pos(0, i), c);
-            h.end(pos(0, i + 1));
+            h.end();
             assert!(!h.can_undo(), "still open");
         }
-        h.end(pos(0, 2));
+        h.end();
         assert_eq!(h.undo_len(), 1);
         assert_eq!(h.undo(&mut buf), Some(pos(0, 0)));
         assert_eq!(buf.to_text(), "");
@@ -343,7 +371,7 @@ mod tests {
     fn end_without_begin_does_nothing() {
         let mut h = History::new();
         let mut buf = Buffer::from_text("");
-        h.end(pos(0, 0));
+        h.end();
         edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "a");
         assert_eq!(h.undo_len(), 1);
     }
@@ -352,12 +380,12 @@ mod tests {
     fn multiline_edits_round_trip() {
         let mut h = History::new();
         let mut buf = Buffer::from_text("line1\nline2\nline3");
-        h.begin(pos(0, 0));
+        h.begin();
         edit(&mut h, &mut buf, pos(0, 0)..pos(1, 0), "");
-        h.end(pos(0, 0));
-        h.begin(pos(0, 0));
+        h.end();
+        h.begin();
         edit(&mut h, &mut buf, pos(0, 3)..pos(1, 2), "A\nB\nC");
-        h.end(pos(2, 1));
+        h.end();
         assert_eq!(buf.to_text(), "linA\nB\nCne3");
         h.undo(&mut buf);
         assert_eq!(buf.to_text(), "line2\nline3");
@@ -374,9 +402,9 @@ mod tests {
         let mut buf = Buffer::from_text("");
         let extra = 5;
         for i in 0..MAX_UNDO_GROUPS + extra {
-            h.begin(pos(0, i));
+            h.begin();
             edit(&mut h, &mut buf, pos(0, i)..pos(0, i), "x");
-            h.end(pos(0, i + 1));
+            h.end();
             assert!(h.undo_len() <= MAX_UNDO_GROUPS);
         }
         assert_eq!(h.undo_len(), MAX_UNDO_GROUPS);
@@ -384,7 +412,7 @@ mod tests {
             assert!(h.undo(&mut buf).is_some());
         }
         // The last group kept: the one after the dropped ones.
-        assert_eq!(h.undo(&mut buf), Some(pos(0, extra)));
+        assert_eq!(h.undo(&mut buf), Some(pos(0, extra - 1)));
         assert_eq!(buf.to_text(), "x".repeat(extra));
         assert_eq!(h.undo(&mut buf), None);
         assert_eq!(buf.to_text(), "x".repeat(extra));
