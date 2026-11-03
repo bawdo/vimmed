@@ -27,9 +27,9 @@ pub use count::Count;
 pub use motion::{Motion, MotionKind, MotionResult};
 pub use operator::{OpRange, Operator};
 
-/// The editing mode. Normal, Insert, Visual and Visual Line have their
-/// behaviour; Search and Command have only their entry from Visual (Tasks
-/// 24 and 25 build them), and later tasks build the rest.
+/// The editing mode. Normal, Insert, Visual, Visual Line and Search have
+/// their behaviour; Command has only its entry from Visual (Task 25 builds
+/// it), and later tasks build the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -98,8 +98,21 @@ pub enum Step {
     /// `:` from Visual: the command line, pre-filled with the selection's
     /// range.
     Cmdline,
-    /// `/` from Visual: search, then come back to Visual.
-    Search,
+    /// `/` (`forward`) or `?`: type a search, from Normal, Visual (to come
+    /// back to) or after an operator (`d/foo`), which then acts up to the
+    /// match. The `count`th match is the one.
+    Search {
+        forward: bool,
+        op: Option<Operator>,
+        count: usize,
+    },
+    /// `n`, or `N` (`reverse`): the `count`th match of the last search from
+    /// the cursor, as a motion or, after an operator, its exclusive target.
+    SearchNext {
+        reverse: bool,
+        op: Option<Operator>,
+        count: usize,
+    },
     /// An operator over the inner code block (`yic dic cic`).
     InnerCode { op: Operator },
 }
@@ -193,8 +206,14 @@ impl Vim {
 
     /// Replays the last change at `ctx.cursor`. A `count` replaces the
     /// recorded one, for this and later repeats. With no change recorded
-    /// it does nothing.
-    pub fn repeat(&mut self, ctx: &mut EditCtx, count: Option<usize>) -> OpOutcome {
+    /// it does nothing. `search` is the last search's query and direction,
+    /// which a repeated `dn` (or `d/foo`) looks for.
+    pub fn repeat(
+        &mut self,
+        ctx: &mut EditCtx,
+        count: Option<usize>,
+        search: Option<(&str, bool)>,
+    ) -> OpOutcome {
         let Some(change) = self.last.as_mut() else {
             return OpOutcome {
                 cursor: ctx.cursor,
@@ -204,7 +223,7 @@ impl Vim {
         if let Some(n) = count {
             change.set_count(n);
         }
-        repeat::replay(ctx, change)
+        repeat::replay(ctx, change, search)
     }
 
     /// Handles one Normal-mode key for a cursor at `cur` in `buf`. Esc (and
@@ -345,6 +364,7 @@ impl Vim {
                 step
             }
             'd' | 'c' | 'y' => self.operator_key(c, buf, cur),
+            '/' | '?' | 'n' | 'N' => self.search_key(c),
             'x' if !after_op => {
                 let count = self.count.effective();
                 self.reset();
@@ -425,6 +445,36 @@ impl Vim {
                 self.reset();
                 Step::Pending
             }
+        }
+    }
+
+    /// `/ ? n N`, as motions or after an operator. Under an operator they
+    /// record a change that `.` repeats as `n` would: for `d/foo` that is
+    /// the same once `foo` is the last search. The editor discards it when
+    /// the search finds nothing or is cancelled.
+    fn search_key(&mut self, c: char) -> Step {
+        let count = self.count.effective();
+        let op = self.op;
+        self.reset();
+        if let Some(op) = op.filter(|&op| op != Operator::Yank) {
+            self.pending = Some(Change::Search {
+                op,
+                reverse: c == 'N',
+                count,
+                inserted: (op == Operator::Change).then(String::new),
+            });
+        }
+        match c {
+            '/' | '?' => Step::Search {
+                forward: c == '/',
+                op,
+                count,
+            },
+            _ => Step::SearchNext {
+                reverse: c == 'N',
+                op,
+                count,
+            },
         }
     }
 

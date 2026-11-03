@@ -14,6 +14,11 @@
 //! editor keeps the selection's anchor. The clipboard keys (Primary+C, X
 //! and V, and Ctrl+C) are handled here before any mode sees the key.
 //!
+//! Search (`/` and `?`) is typed here: every key searches again from where
+//! it started and moves the cursor to the match, Enter keeps it and Esc
+//! puts the cursor back. The confirmed search stays for `n`, `N` and the
+//! highlights, which follow every edit (`crate::search`).
+//!
 //! Undo groups: each Normal- or Visual-mode command is one undo step, a
 //! paste is one, and an Insert
 //! session is one step from its entry key (with the line `o` opens or the
@@ -38,6 +43,7 @@ use crate::markdown::{
     line_display, ordered_display, parse_line,
 };
 use crate::platform::Platform;
+use crate::search::{self, Hit, Search};
 use crate::status::{self, Mode};
 use crate::strings;
 use crate::tokens::{Theme, Tokens};
@@ -69,6 +75,19 @@ impl Default for Config {
     fn default() -> Config {
         Config { vim: true }
     }
+}
+
+/// A search being typed, and what to go back to when it ends.
+struct Searching {
+    search: Search,
+    /// The mode `/` or `?` came from: Normal, Visual or Visual Line.
+    ret: Mode,
+    /// The operator waiting for the match (`d/foo`).
+    op: Option<Operator>,
+    /// Which match counts (`2/foo`).
+    count: usize,
+    /// The Up/Down goal column before the search, for Esc to restore.
+    goal: Option<Want>,
 }
 
 /// A run of lines that reveals as a whole: a fenced code block or a table.
@@ -115,15 +134,20 @@ pub struct Editor {
     cmdline: String,
     /// The selection `:` left Visual with.
     last_visual: Option<Selection>,
-    /// The Visual mode `/` left, to come back to when the search ends.
-    search_return: Option<Mode>,
+    /// The search being typed (Search mode).
+    searching: Option<Searching>,
+    /// The last search confirmed: what `n` and `N` look for and the
+    /// highlights show.
+    search: Option<Search>,
     vim: Vim,
     registers: Registers,
     history: History,
     dirty: bool,
     reader: bool,
     title: String,
-    message: Option<&'static str>,
+    message: Option<String>,
+    /// When a timed message goes (`marks::now_ns` clock).
+    message_until: Option<u64>,
     cfg: Config,
     platform: Platform,
     host: Box<dyn Host>,
@@ -184,14 +208,16 @@ impl Editor {
             anchor: None,
             cmdline: String::new(),
             last_visual: None,
-            search_return: None,
+            searching: None,
+            search: None,
             vim: Vim::new(),
             registers: Registers::new(),
             history: History::new(),
             dirty: false,
             reader: req.view,
             title,
-            message,
+            message: message.map(str::to_owned),
+            message_until: None,
             cfg,
             platform,
             host,
@@ -206,7 +232,8 @@ impl Editor {
             // buffer there.
             Input::Text(text) if !self.cfg.vim || self.mode == Mode::Insert => self.insert(&text),
             Input::Text(text) if self.takes_keys() => self.normal_text(&text),
-            // TODO(Tasks 24 and 25): text on the search and command lines.
+            Input::Text(text) if self.mode == Mode::Search => self.search_input(&text),
+            // TODO(Task 25): text on the command line.
             Input::Text(_) => Effects::default(),
             // TODO(later tasks): ask before closing with unsaved changes.
             Input::CloseRequested => Effects {
@@ -222,8 +249,8 @@ impl Editor {
             | Input::Mouse(_)
             | Input::Scroll { .. }
             | Input::Focus(_)
-            | Input::Tick { .. }
             | Input::Appearance(_) => Effects::default(),
+            Input::Tick { now_ns } => self.tick(now_ns),
         }
     }
 
@@ -234,11 +261,39 @@ impl Editor {
 
     /// A message for the status bar, if there is one. Task 26 shows it.
     pub fn message(&self) -> Option<&str> {
-        self.message
+        self.message.as_deref()
+    }
+
+    /// Shows `text` in the status bar, for `for_ns` nanoseconds or (with
+    /// `None`) until something replaces it.
+    fn say(&mut self, text: String, for_ns: Option<u64>) {
+        self.message = Some(text);
+        self.message_until = for_ns.map(|ns| self.host.now_ns().saturating_add(ns));
+    }
+
+    /// The main loop woke: a timed message whose time is up goes.
+    fn tick(&mut self, now_ns: u64) -> Effects {
+        if self.message_until.is_none_or(|until| now_ns < until) {
+            return Effects::default();
+        }
+        self.message = None;
+        self.message_until = None;
+        Effects {
+            redraw: Redraw::Status,
+            ..Effects::default()
+        }
     }
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The search being typed, or else the last one confirmed.
+    pub fn search(&self) -> Option<&Search> {
+        match &self.searching {
+            Some(s) => Some(&s.search),
+            None => self.search.as_ref(),
+        }
     }
 
     /// The pending count and keys, for the status line (Task 26).
@@ -421,8 +476,9 @@ impl Editor {
         fx.merge(self.selection_redraw(before))
     }
 
-    fn normal_step(&mut self, k: KeyEvent) -> Effects {
-        let cur = Cursor {
+    /// The cursor with the column vertical motions aim for.
+    fn vim_cursor(&self) -> Cursor {
+        Cursor {
             pos: self.cursor,
             want: self.goal.unwrap_or_else(|| {
                 Want::Col(grapheme::display_col(
@@ -430,7 +486,11 @@ impl Editor {
                     self.cursor.col,
                 ))
             }),
-        };
+        }
+    }
+
+    fn normal_step(&mut self, k: KeyEvent) -> Effects {
+        let cur = self.vim_cursor();
         let step = match self.shown_selection().filter(|_| self.visual()) {
             Some(sel) => self.vim.visual_key(&k, &self.buf, cur, sel),
             None => self.vim.key(&k, &self.buf, cur),
@@ -463,10 +523,9 @@ impl Editor {
                 self.cmdline = "'<,'>".to_owned();
                 status
             }
-            Step::Search => {
-                self.search_return = Some(self.mode);
-                self.mode = Mode::Search;
-                status
+            Step::Search { forward, op, count } => self.start_search(forward, op, count),
+            Step::SearchNext { reverse, op, count } => {
+                status.merge(self.search_next(reverse, op, count))
             }
             Step::InnerCode { op } => self.inner_code(op),
             Step::Move(c) => {
@@ -499,7 +558,11 @@ impl Editor {
         let linewise = match self.mode {
             Mode::Visual => false,
             Mode::VisualLine => true,
-            Mode::Search => self.search_return? == Mode::VisualLine,
+            Mode::Search => match self.searching.as_ref()?.ret {
+                Mode::Visual => false,
+                Mode::VisualLine => true,
+                _ => return None,
+            },
             _ => return None,
         };
         self.anchor.map(|anchor| Selection {
@@ -565,23 +628,210 @@ impl Editor {
         }
     }
 
-    /// A key on the search line: Esc and Enter end the search, back in the
-    /// Visual mode it started from (or Normal).
-    /// TODO(Task 24): typing and running the search.
-    fn search_key(&mut self, k: KeyEvent) -> Effects {
-        if !matches!(k.key, Key::Esc | Key::Enter) {
-            return Effects::default();
+    /// `/` or `?`: Search mode, from the cursor as it is now. The last
+    /// search's highlights give way to the new one's.
+    fn start_search(&mut self, forward: bool, op: Option<Operator>, count: usize) -> Effects {
+        let origin = self.vim_cursor();
+        self.searching = Some(Searching {
+            search: Search::new(forward, origin),
+            ret: self.mode,
+            op,
+            count,
+            goal: self.goal,
+        });
+        self.mode = Mode::Search;
+        Effects {
+            redraw: if self.search.is_some() {
+                Redraw::All
+            } else {
+                Redraw::Status
+            },
+            ..Effects::default()
         }
+    }
+
+    /// A key on the search line. Typing and Backspace search again from
+    /// the start; Backspace on an empty query leaves, as Esc does. Enter
+    /// confirms. Other keys do nothing.
+    fn search_key(&mut self, k: KeyEvent) -> Effects {
+        match k.key {
+            Key::Esc => self.end_search(false),
+            Key::Enter => self.end_search(true),
+            Key::Backspace => {
+                let Some(s) = self.searching.as_mut() else {
+                    return Effects::default();
+                };
+                let query = &mut s.search.query;
+                if query.is_empty() {
+                    return self.end_search(false);
+                }
+                query.truncate(grapheme::prev(query, query.len()));
+                self.search_again()
+            }
+            Key::Char(c) => self.search_input(c.encode_utf8(&mut [0; 4])),
+            Key::Space => self.search_input(" "),
+            _ => Effects::default(),
+        }
+    }
+
+    /// Text typed on the search line. A line break cannot be in a match,
+    /// so it is dropped.
+    fn search_input(&mut self, text: &str) -> Effects {
+        let Some(s) = self.searching.as_mut() else {
+            return Effects::default();
+        };
+        s.search
+            .query
+            .extend(text.chars().filter(|c| !matches!(c, '\n' | '\r')));
+        self.search_again()
+    }
+
+    /// Searches for the query as it is now from where the search started,
+    /// moving the cursor to the match (or back to the start when there is
+    /// none). The highlights change everywhere, so all is repainted.
+    fn search_again(&mut self) -> Effects {
+        let Some(s) = self.searching.as_mut() else {
+            return Effects::default();
+        };
+        s.search.refresh(&self.buf);
+        let origin = s.search.origin.pos;
+        let hit = search::find(
+            &self.buf,
+            &s.search.query,
+            origin,
+            s.search.forward,
+            s.count,
+        );
+        s.search.set_current(hit.as_ref());
+        self.cursor = hit.map_or(origin, |h| h.pos());
+        Effects {
+            redraw: Redraw::All,
+            scroll_to_cursor: true,
+            ..Effects::default()
+        }
+    }
+
+    /// Esc (`confirm` false) or Enter on the search line: back to the mode
+    /// the search came from. Esc puts the cursor back and keeps the last
+    /// search. Enter makes this one the last (an empty query repeats the
+    /// last one's), then goes to its match, or applies the waiting
+    /// operator up to it, or says there is none.
+    fn end_search(&mut self, confirm: bool) -> Effects {
         let before = self.selection_lines();
-        self.mode = self.search_return.take().unwrap_or(Mode::Normal);
+        let Some(Searching {
+            mut search,
+            ret,
+            op,
+            count,
+            goal,
+        }) = self.searching.take()
+        else {
+            return Effects::default();
+        };
+        self.mode = ret;
         if !self.visual() {
             self.anchor = None;
         }
-        Effects {
+        let origin = search.origin.pos;
+        self.cursor = origin;
+        if confirm
+            && search.query.is_empty()
+            && let Some(last) = &self.search
+        {
+            search.query.clone_from(&last.query);
+        }
+        let all = Effects {
+            redraw: Redraw::All,
+            scroll_to_cursor: true,
+            ..Effects::default()
+        };
+        let hit = confirm
+            .then(|| search::find(&self.buf, &search.query, origin, search.forward, count))
+            .flatten();
+        let found = match hit {
+            Some(hit) => hit,
+            None => {
+                self.goal = goal;
+                if op.is_some() {
+                    self.vim.discard();
+                }
+                if confirm && !search.query.is_empty() {
+                    // vim: the pattern is the last search all the same.
+                    self.say(strings::pattern_not_found(&search.query), None);
+                    search.refresh(&self.buf);
+                    self.search = Some(search);
+                }
+                return all.merge(self.selection_redraw(before));
+            }
+        };
+        search.refresh(&self.buf);
+        search.set_current(Some(&found));
+        self.search = Some(search);
+        // Like a Normal-mode command: one undo step, and the change `.`
+        // repeats once it is done.
+        self.history.begin();
+        let fx = self.go_to_match(op, &found);
+        if self.mode != Mode::Insert {
+            self.history.end();
+        }
+        if self.reader {
+            self.vim.discard();
+        } else if self.mode == Mode::Normal {
+            self.vim.commit();
+        }
+        all.merge(fx).merge(self.selection_redraw(before))
+    }
+
+    /// `n` (or, `reverse`, `N`): the `count`th match of the last search
+    /// from the cursor. With no search, or no match, the operator waiting
+    /// for it does nothing.
+    fn search_next(&mut self, reverse: bool, op: Option<Operator>, count: usize) -> Effects {
+        let Some(last) = self.search.as_mut() else {
+            self.vim.discard();
+            return Effects::default();
+        };
+        let forward = last.forward != reverse;
+        let hit = search::find(&self.buf, &last.query, self.cursor, forward, count);
+        last.set_current(hit.as_ref());
+        match hit {
+            Some(hit) => self.go_to_match(op, &hit),
+            None => {
+                let text = strings::pattern_not_found(&last.query);
+                self.vim.discard();
+                self.say(text, None);
+                Effects::default()
+            }
+        }
+    }
+
+    /// Moves the cursor to `hit`, or applies `op` from the cursor up to it
+    /// (exclusive, charwise, as vim does), and says when the search
+    /// wrapped. An operator with nothing between does nothing.
+    fn go_to_match(&mut self, op: Option<Operator>, hit: &Hit) -> Effects {
+        if hit.wrapped {
+            self.say(
+                strings::SEARCH_WRAPPED.to_owned(),
+                Some(search::WRAPPED_FOR_NS),
+            );
+        } else {
+            self.message = None;
+            self.message_until = None;
+        }
+        let status = Effects {
             redraw: Redraw::Status,
             ..Effects::default()
-        }
-        .merge(self.selection_redraw(before))
+        };
+        let fx = match op {
+            None => self.move_across(hit.pos()),
+            Some(op) => match OpRange::exclusive(&self.buf, self.cursor, hit.pos()) {
+                Some(range) => self.operate(op, range),
+                None => {
+                    self.vim.discard();
+                    Effects::default()
+                }
+            },
+        };
+        status.merge(fx)
     }
 
     /// `yic dic cic`: the operator over the inner code block at the cursor.
@@ -715,6 +965,9 @@ impl Editor {
         };
         // A step can touch many places, so rebuild and repaint it all.
         self.blocks = Blocks::new(&self.buf);
+        if let Some(s) = self.search.as_mut() {
+            s.refresh(&self.buf);
+        }
         self.cursor = vim::rest(&self.buf, at);
         self.goal = None;
         let was_dirty = std::mem::replace(&mut self.dirty, true);
@@ -731,8 +984,12 @@ impl Editor {
         if self.reader {
             return Effects::default();
         }
+        let last = self.search.as_ref().map(|s| (s.query.clone(), s.forward));
+        let last = last
+            .as_ref()
+            .map(|(query, forward)| (query.as_str(), *forward));
         let mut vim = std::mem::take(&mut self.vim);
-        let fx = self.run(|ctx| vim.repeat(ctx, count));
+        let fx = self.run(|ctx| vim.repeat(ctx, count, last));
         self.vim = vim;
         fx
     }
@@ -753,13 +1010,17 @@ impl Editor {
     }
 
     /// Committed text in Normal or Visual mode is a run of keys. Once one
-    /// of them enters Insert, the rest is typed; once one leaves for
-    /// another mode (the command line), the rest is dropped.
+    /// of them enters Insert, the rest is typed, and once one enters
+    /// Search, the rest is the query; once one leaves for another mode (the
+    /// command line), the rest is dropped.
     fn normal_text(&mut self, text: &str) -> Effects {
         let mut fx = Effects::default();
         for (i, c) in text.char_indices() {
             if self.mode == Mode::Insert {
                 return fx.merge(self.insert(&text[i..]));
+            }
+            if self.mode == Mode::Search {
+                return fx.merge(self.search_input(&text[i..]));
             }
             if !self.takes_keys() {
                 return fx;
@@ -913,6 +1174,14 @@ impl Editor {
                 Redraw::All
             }
         };
+        // The highlights follow the edit, on the lines it touched.
+        if let Some(s) = self.search.as_mut() {
+            match touched {
+                [] => {}
+                [t] => s.edited(&self.buf, t),
+                _ => s.refresh(&self.buf),
+            }
+        }
         self.cursor = self.buf.clamp(cursor);
         self.goal = None;
         let new = self.reveal_extent(self.cursor.line);
@@ -1082,8 +1351,8 @@ impl ViewSource for Editor {
     fn selection(&self) -> Option<Selection> {
         self.shown_selection()
     }
-    fn matches(&self, _i: usize) -> &[Range<usize>] {
-        &[]
+    fn matches(&self, i: usize) -> &[Range<usize>] {
+        self.search().map_or(&[], |s| s.matches_on(i))
     }
 }
 

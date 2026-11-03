@@ -204,7 +204,8 @@ impl Vim {
         if let Some(step) = self.counted(c, buf, cur) {
             return step;
         }
-        let count = self.count.given().then(|| self.count.effective());
+        let given = self.count.given().then(|| self.count.effective());
+        let count = self.count.effective();
         self.reset();
         match c {
             'v' | 'V' => {
@@ -234,8 +235,17 @@ impl Vim {
                 }
             }
             ':' => Step::Cmdline,
-            '/' => Step::Search,
-            '.' => Step::Repeat { count },
+            '/' | '?' => Step::Search {
+                forward: c == '/',
+                op: None,
+                count,
+            },
+            'n' | 'N' => Step::SearchNext {
+                reverse: c == 'N',
+                op: None,
+                count,
+            },
+            '.' => Step::Repeat { count: given },
             _ => Step::Pending,
         }
     }

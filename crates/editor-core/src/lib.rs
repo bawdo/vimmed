@@ -6,6 +6,7 @@ pub mod host;
 pub mod input;
 pub mod markdown;
 pub mod platform;
+pub mod search;
 pub mod status;
 pub mod strings;
 #[cfg(test)]
