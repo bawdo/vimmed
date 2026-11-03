@@ -1,3 +1,4 @@
+mod bench;
 mod fixture;
 
 use std::process::ExitCode;
@@ -5,6 +6,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         // Later tasks add one arm per subcommand here.
+        Some("bench") => bench::run(std::env::args().skip(2).collect()),
         Some("fixture") => fixture::run(std::env::args().nth(2)),
         Some(other) => {
             eprintln!("xtask: unknown subcommand `{other}`");

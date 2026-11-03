@@ -283,6 +283,8 @@ dependencies = [
 name = "xtask"
 version = "0.9.0"
 dependencies = [
+ "app-meta",
+ "marks",
  "png",
 ]
 
