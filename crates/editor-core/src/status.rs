@@ -12,8 +12,9 @@ impl Mode {
         match self {
             Mode::Normal => strings::MODE_NORMAL,
             Mode::Insert => strings::MODE_INSERT,
-            // TODO(Task 26): names for the modes later tasks build. Until
-            // then nothing enters them.
+            // TODO(Task 26): names for the other modes. Visual, Visual
+            // Line, Search and Command can be entered already and show no
+            // name until then.
             Mode::Visual
             | Mode::VisualLine
             | Mode::Search

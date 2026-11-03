@@ -1,8 +1,9 @@
 //! The vim engine: modes, counts, motions, operators and the keys that
 //! enter Insert.
 //!
-//! `Editor` routes Normal-mode keys here. The engine keeps the pending
-//! command (count, operator, `g` prefix), decides what each key means, and
+//! `Editor` routes Normal-mode keys here, and Visual-mode keys to
+//! `Vim::visual_key` (`visual`). The engine keeps the pending command
+//! (count, operator, `g` or `i` prefix), decides what each key means, and
 //! hands back a `Step` for the editor to carry out on its buffer (operators
 //! through `operator::operate` and `operator::put`). Insert-mode typing
 //! stays on the editor's own path, which tells the engine what was typed so
@@ -13,6 +14,8 @@ pub mod motion;
 pub mod operator;
 pub mod register;
 pub mod repeat;
+pub mod textobj;
+pub mod visual;
 
 use crate::buffer::{Buffer, Pos};
 use crate::grapheme;
@@ -24,8 +27,9 @@ pub use count::Count;
 pub use motion::{Motion, MotionKind, MotionResult};
 pub use operator::{OpRange, Operator};
 
-/// The editing mode. Only Normal and Insert have behaviour yet; later tasks
-/// build the rest.
+/// The editing mode. Normal, Insert, Visual and Visual Line have their
+/// behaviour; Search and Command have only their entry from Visual (Tasks
+/// 24 and 25 build them), and later tasks build the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -86,6 +90,18 @@ pub enum Step {
     /// Repeat the last change (`.`), with a new count if one was typed
     /// (`Vim::repeat`).
     Repeat { count: Option<usize> },
+    /// Enter Visual (or, with `linewise`, Visual Line), or switch to it
+    /// from the other one, keeping the anchor.
+    Visual { linewise: bool },
+    /// Leave Visual for Normal.
+    Leave,
+    /// `:` from Visual: the command line, pre-filled with the selection's
+    /// range.
+    Cmdline,
+    /// `/` from Visual: search, then come back to Visual.
+    Search,
+    /// An operator over the inner code block (`yic dic cic`).
+    InnerCode { op: Operator },
 }
 
 /// The Normal-mode command being typed.
@@ -94,7 +110,7 @@ pub struct Vim {
     count: Count,
     /// `d`, `c` or `y`, waiting for its motion.
     op: Option<Operator>,
-    /// `g`, waiting for its second key.
+    /// `g`, or `i` after an operator, waiting for its second key.
     prefix: Option<char>,
     /// The change the latest command made, until it is done: an Insert
     /// session's change is done at Esc.
@@ -233,7 +249,9 @@ impl Vim {
         }
     }
 
-    fn char(&mut self, c: char, buf: &Buffer, cur: Cursor) -> Step {
+    /// The keys Normal and Visual share: counts, the `g` prefix and the
+    /// motions. `None` when `c` is none of them.
+    fn counted(&mut self, c: char, buf: &Buffer, cur: Cursor) -> Option<Step> {
         if let Some(prefix) = self.prefix.take() {
             if prefix == 'g' && c == 'g' {
                 let m = if self.count.given() {
@@ -241,17 +259,17 @@ impl Vim {
                 } else {
                     Motion::DocStart
                 };
-                return self.motion(m, buf, cur);
+                return Some(self.motion(m, buf, cur));
             }
             self.reset();
-            return Step::Pending;
+            return Some(Step::Pending);
         }
         let after_op = self.op.is_some();
         if let Some(d) = c.to_digit(10)
             && (d != 0 || self.count.pending(after_op))
         {
             self.count.push(d as usize, after_op);
-            return Step::Pending;
+            return Some(Step::Pending);
         }
         let m = match c {
             'h' => Motion::Left,
@@ -268,7 +286,44 @@ impl Vim {
             'G' => Motion::DocEnd,
             'g' => {
                 self.prefix = Some('g');
-                return Step::Pending;
+                return Some(Step::Pending);
+            }
+            _ => return None,
+        };
+        Some(self.motion(m, buf, cur))
+    }
+
+    fn char(&mut self, c: char, buf: &Buffer, cur: Cursor) -> Step {
+        if self.prefix == Some('i') {
+            // `ic` after an operator: the inner code block. Counts do not
+            // apply.
+            let op = self.op;
+            self.reset();
+            return match op {
+                Some(op) if c == 'c' => {
+                    if op != Operator::Yank {
+                        self.pending = Some(Change::InnerCode {
+                            op,
+                            inserted: (op == Operator::Change).then(String::new),
+                        });
+                    }
+                    Step::InnerCode { op }
+                }
+                _ => Step::Pending,
+            };
+        }
+        if let Some(step) = self.counted(c, buf, cur) {
+            return step;
+        }
+        let after_op = self.op.is_some();
+        match c {
+            'i' if after_op => {
+                self.prefix = Some('i');
+                Step::Pending
+            }
+            'v' | 'V' if !after_op => {
+                self.reset();
+                Step::Visual { linewise: c == 'V' }
             }
             // `D` is `d$` and `C` is `c$`, counts and all. Without a count
             // they record as themselves.
@@ -287,19 +342,19 @@ impl Vim {
                         Change::CapC(String::new())
                     });
                 }
-                return step;
+                step
             }
-            'd' | 'c' | 'y' => return self.operator_key(c, buf, cur),
+            'd' | 'c' | 'y' => self.operator_key(c, buf, cur),
             'x' if !after_op => {
                 let count = self.count.effective();
                 self.reset();
-                return OpRange::chars(buf, cur.pos, count).map_or(Step::Pending, |range| {
+                OpRange::chars(buf, cur.pos, count).map_or(Step::Pending, |range| {
                     self.pending = Some(Change::X(count));
                     Step::Operate {
                         op: Operator::Delete,
                         range,
                     }
-                });
+                })
             }
             'p' | 'P' if !after_op => {
                 let count = self.count.effective();
@@ -308,10 +363,10 @@ impl Vim {
                     after: c == 'p',
                     count,
                 });
-                return Step::Put {
+                Step::Put {
                     before: c == 'P',
                     count,
-                };
+                }
             }
             'i' | 'a' | 'A' | 'I' | 'o' | 'O' if !after_op => {
                 // The count is not used: inserting it N times is not built.
@@ -320,24 +375,23 @@ impl Vim {
                     entry: c,
                     text: String::new(),
                 });
-                return insert_entry(c, buf, cur.pos);
+                insert_entry(c, buf, cur.pos)
             }
             'u' if !after_op => {
                 let count = self.count.effective();
                 self.reset();
-                return Step::Undo { count };
+                Step::Undo { count }
             }
             '.' if !after_op => {
                 let count = self.count.given().then(|| self.count.effective());
                 self.reset();
-                return Step::Repeat { count };
+                Step::Repeat { count }
             }
             _ => {
                 self.reset();
-                return Step::Pending;
+                Step::Pending
             }
-        };
-        self.motion(m, buf, cur)
+        }
     }
 
     /// `d`, `c` or `y`: starts an operator, or doubled (`dd cc yy`) acts

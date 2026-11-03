@@ -4,7 +4,8 @@
 
 use std::ops::Range;
 
-use crate::buffer::Pos;
+use crate::buffer::{Buffer, Pos};
+use crate::grapheme;
 use crate::markdown::LineDisplay;
 use crate::tokens::{Theme, Tokens};
 
@@ -54,6 +55,33 @@ impl Selection {
         let to = if line == end.line { end.col } else { line_len };
         let (from, to) = (from.min(line_len), to.min(line_len));
         (from < to).then_some(from..to)
+    }
+}
+
+impl Selection {
+    /// The source byte range selected on each line, for paint, in line
+    /// order. Every line from the start to the end is listed, an empty one
+    /// with an empty range. Linewise, each line is whole. Charwise, the
+    /// selection takes the whole grapheme under its end (as Visual mode
+    /// does), and its ends snap to grapheme boundaries.
+    pub fn ranges(&self, buf: &Buffer) -> Vec<(usize, Range<usize>)> {
+        let (start, end) = self.ordered();
+        let (start, end) = (buf.clamp(start), buf.clamp(end));
+        (start.line..=end.line)
+            .map(|i| {
+                let len = buf.line(i).len();
+                if self.linewise {
+                    return (i, 0..len);
+                }
+                let from = if i == start.line { start.col } else { 0 };
+                let to = if i == end.line {
+                    grapheme::next(buf.line(i), end.col)
+                } else {
+                    len
+                };
+                (i, from..to.max(from))
+            })
+            .collect()
     }
 }
 

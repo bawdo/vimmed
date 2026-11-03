@@ -82,13 +82,17 @@ pub(crate) fn build(text: &str, cfg: Config, bench: bool) -> Editor {
 }
 
 fn build_with_host(text: &str, cfg: Config, bench: bool) -> (Editor, FakeHost) {
+    build_on(text, cfg, Platform::Mac, bench)
+}
+
+fn build_on(text: &str, cfg: Config, platform: Platform, bench: bool) -> (Editor, FakeHost) {
     let host = FakeHost::default();
     let e = Editor::build(
         req("notes.md"),
         text,
         None,
         cfg,
-        Platform::Mac,
+        platform,
         Box::new(host.clone()),
         bench,
     );
@@ -121,6 +125,16 @@ pub(crate) fn ed_with_host(text: &str) -> (Editor, FakeHost) {
     build_with_host(text, Config::default(), false)
 }
 
+/// Like `ed_with_host`, on Linux, where Ctrl is the primary modifier.
+pub(crate) fn ed_linux_with_host(text: &str) -> (Editor, FakeHost) {
+    build_on(text, Config::default(), Platform::Linux, false)
+}
+
+/// A vim-off editor on `text` (Insert only), with a handle on its host.
+pub(crate) fn plain_with_host(text: &str) -> (Editor, FakeHost) {
+    build_with_host(text, Config { vim: false }, false)
+}
+
 pub(crate) fn pos(line: usize, col: usize) -> Pos {
     Pos { line, col }
 }
@@ -138,7 +152,9 @@ pub(crate) fn key(k: Key) -> Input {
 }
 
 /// The key a `<name>` escape stands for: `Esc`, `CR`, `BS`, `Tab`, `Del`,
-/// `Space`, `lt`, the arrows, `Home`, `End`, or `C-x` for Ctrl and a char.
+/// `Space`, `lt`, the arrows, `Home`, `End`, `C-x` for Ctrl and a char, or
+/// `D-x` for Cmd and a char (the primary modifier on the Mac, which the
+/// test editors run as).
 fn named(name: &str) -> Option<(Key, Mods)> {
     let plain = |k| Some((k, Mods::default()));
     match name {
@@ -156,15 +172,26 @@ fn named(name: &str) -> Option<(Key, Mods)> {
         "Home" => plain(Key::Home),
         "End" => plain(Key::End),
         _ => {
-            let mut rest = name.strip_prefix("C-")?.chars();
+            let (mods, rest) = if let Some(rest) = name.strip_prefix("C-") {
+                (
+                    Mods {
+                        ctrl: true,
+                        ..Mods::default()
+                    },
+                    rest,
+                )
+            } else {
+                (
+                    Mods {
+                        cmd: true,
+                        ..Mods::default()
+                    },
+                    name.strip_prefix("D-")?,
+                )
+            };
+            let mut rest = rest.chars();
             let c = rest.next()?;
-            rest.next().is_none().then_some((
-                Key::Char(c),
-                Mods {
-                    ctrl: true,
-                    ..Mods::default()
-                },
-            ))
+            rest.next().is_none().then_some((Key::Char(c), mods))
         }
     }
 }

@@ -297,9 +297,7 @@ impl<'a> EditCtx<'a> {
 
     /// Writes the unnamed register and the system clipboard.
     pub fn write_register(&mut self, reg: Register) {
-        self.host.clipboard_set(&reg.text);
-        self.registers.wrote_clipboard(&reg.text);
-        self.registers.set(None, reg);
+        write_register(self.host, self.registers, reg);
     }
 
     /// What `p` and `P` put: the clipboard, read as `Registers::from_clipboard`
@@ -308,6 +306,14 @@ impl<'a> EditCtx<'a> {
         let clip = self.host.clipboard_get();
         self.registers.from_clipboard(clip)
     }
+}
+
+/// Writes `reg` to the unnamed register and the system clipboard, which
+/// mirrors it.
+pub fn write_register(host: &mut dyn Host, registers: &mut Registers, reg: Register) {
+    host.clipboard_set(&reg.text);
+    registers.wrote_clipboard(&reg.text);
+    registers.set(None, reg);
 }
 
 /// What a command left behind.

@@ -7,8 +7,11 @@
 //! replays it through the same operators, so the repeat lands where the
 //! command itself would at the new cursor.
 
+use crate::markdown::Blocks;
 use crate::vim::motion::Motion;
 use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator};
+use crate::vim::textobj;
+use crate::vim::visual::{self, Shape};
 use crate::vim::{Cursor, insert_at, leave_insert};
 
 /// A repeatable change, as `.` replays it. Counts are the effective count
@@ -39,13 +42,28 @@ pub enum Change {
     CapC(String),
     /// `D` without a count.
     CapD,
+    /// An operator over a Visual selection, repeated over a region the
+    /// same size from the cursor.
+    Visual {
+        op: Operator,
+        shape: Shape,
+        inserted: Option<String>,
+    },
+    /// An operator over the inner code block (`dic`, `cic`).
+    InnerCode {
+        op: Operator,
+        inserted: Option<String>,
+    },
 }
 
 impl Change {
     /// The text typed in the change's Insert session, when it has one.
     pub fn text_mut(&mut self) -> Option<&mut String> {
         match self {
-            Change::Op { inserted, .. } | Change::Line { inserted, .. } => inserted.as_mut(),
+            Change::Op { inserted, .. }
+            | Change::Line { inserted, .. }
+            | Change::Visual { inserted, .. }
+            | Change::InnerCode { inserted, .. } => inserted.as_mut(),
             Change::Insert { text, .. } | Change::CapC(text) => Some(text),
             Change::X(_) | Change::Put { .. } | Change::CapD => None,
         }
@@ -59,7 +77,9 @@ impl Change {
             | Change::Op { count, .. }
             | Change::Line { count, .. }
             | Change::Put { count, .. } => *count = n,
-            Change::Insert { .. } => {}
+            // The region's size is the selection's, and `ic` takes no
+            // count.
+            Change::Insert { .. } | Change::Visual { .. } | Change::InnerCode { .. } => {}
             Change::CapC(text) => {
                 *self = Change::Op {
                     op: Operator::Change,
@@ -129,6 +149,25 @@ pub fn replay(ctx: &mut EditCtx, change: &Change) -> OpOutcome {
             }
         }
         Change::Put { after, count } => operator::put(ctx, !after, *count),
+        Change::Visual {
+            op,
+            shape,
+            inserted,
+        } => {
+            let r = visual::region(ctx.buf, cur.pos, *shape);
+            let out = operator::operate(ctx, *op, r);
+            type_in(ctx, out, inserted.as_deref())
+        }
+        Change::InnerCode { op, inserted } => {
+            // `.` is rare enough that rescanning the blocks is fine.
+            match textobj::code_block(&Blocks::new(ctx.buf), cur.pos.line) {
+                Some(block) if textobj::acts(*op, Some(&block)) => {
+                    let out = textobj::operate(ctx, *op, block);
+                    type_in(ctx, out, inserted.as_deref())
+                }
+                _ => stay,
+            }
+        }
         Change::Insert { entry, text } => {
             let out = match entry {
                 'o' => operator::open_line(ctx, false),
