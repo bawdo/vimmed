@@ -8,3 +8,11 @@ publish = false
 [[bin]]
 name = "window"
 path = "src/main.rs"
+
+[dependencies]
+app-meta = { path = "../app-meta" }
+editor-core = { path = "../editor-core" }
+marks = { path = "../marks" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+shell-mac = { path = "../shell-mac" }

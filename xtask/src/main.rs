@@ -1,9 +1,12 @@
 mod bench;
+mod bundle_mac;
 mod ci;
 mod fixture;
 mod lint;
 mod literals;
 mod rename;
+mod shell_lines;
+mod templates;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,6 +25,8 @@ fn main() -> ExitCode {
         Some("ci") => ci::run(&root(), rest.iter().any(|a| a == "--linux")),
         Some("lint-name") => ci::lint_name(&root()),
         Some("lint-literals") => literals::run(&root()),
+        Some("shell-lines") => shell_lines::run(&root()),
+        Some("bundle-mac") => bundle_mac::run(&root(), rest),
         Some("rename-test") => {
             let name = rest
                 .iter()
@@ -54,6 +59,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | lint-name | lint-literals | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
+        "usage: cargo xtask <ci [--linux] | lint-name | lint-literals | shell-lines | bundle-mac [--release] | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
     );
 }

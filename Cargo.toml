@@ -6,6 +6,7 @@ members = [
     "crates/editor-render",
     "crates/marks",
     "crates/launcher",
+    "crates/shell-mac",
     "crates/window",
     "xtask",
     "crates/layout-bench",
@@ -16,6 +17,7 @@ default-members = [
     "crates/editor-render",
     "crates/marks",
     "crates/launcher",
+    "crates/shell-mac",
     "crates/window",
     "xtask",
 ]

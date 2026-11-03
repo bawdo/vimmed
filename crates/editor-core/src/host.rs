@@ -18,6 +18,16 @@ pub struct WindowRequest {
     pub display_name: Option<String>,
 }
 
+/// What the window binary was started with, handed to the platform shell.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowArgs {
+    /// The file to open. `None` starts the window in router mode (Task 16).
+    pub path: Option<PathBuf>,
+    /// True to open in reader mode.
+    pub view: bool,
+    pub display_name: Option<String>,
+}
+
 pub trait Host {
     fn clipboard_get(&mut self) -> Option<String>;
     fn clipboard_set(&mut self, text: &str);

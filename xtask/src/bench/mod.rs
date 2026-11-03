@@ -232,11 +232,16 @@ pub fn env_report(platform: Platform) -> String {
     s
 }
 
-/// Seam for Task 15: on macOS the launcher will live inside the app bundle, and
-/// this is where that path gets wired in. `--bin PATH` overrides it.
+/// The launcher to run: on macOS the one inside the bundle that
+/// `cargo xtask bundle-mac --release` writes, so the window it starts is the
+/// bundle executable. `--bin PATH` overrides it.
 fn default_launcher(platform: Platform) -> PathBuf {
     match platform {
-        Platform::Linux | Platform::Macos => PathBuf::from("target/release/launcher"),
+        Platform::Linux => PathBuf::from("target/release/launcher"),
+        Platform::Macos => PathBuf::from("target/dist")
+            .join(format!("{}.app", app_meta::BUNDLE_NAME))
+            .join("Contents/MacOS")
+            .join(app_meta::SLUG),
     }
 }
 

@@ -12,9 +12,6 @@ pub const KEY_P95_MS: f64 = 16.0;
 pub const KEY_MIN_SAMPLES: usize = 500;
 pub const GLASS_PERIODS: f64 = 2.5;
 
-/// Log value carrying the display refresh rate.
-const REFRESH_HZ: &str = "refresh_hz";
-
 /// Linux stage budgets in ms: (stage, from mark, to mark, budget). T0 is 0 ms.
 pub const STAGES: [(&str, Option<&str>, &str, f64); 5] = [
     ("launcher", None, names::WINDOW_MAIN, 65.0),
@@ -123,7 +120,11 @@ pub fn summarise(samples: &BTreeMap<String, Vec<f64>>, platform: Platform) -> St
 
     if let Some(v) = samples.get(names::KEY_GLASS_MS).filter(|v| !v.is_empty()) {
         let p95 = nearest_rank(&sorted(v), 0.95);
-        match samples.get(REFRESH_HZ).and_then(|h| h.first()).copied() {
+        match samples
+            .get(names::REFRESH_HZ)
+            .and_then(|h| h.first())
+            .copied()
+        {
             Some(hz) if hz > 0.0 => {
                 let periods = p95 * hz / 1000.0;
                 let _ = writeln!(

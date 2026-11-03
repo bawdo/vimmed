@@ -4,6 +4,8 @@
 //! pay only for one cached flag check. `<P>T0` (ns on the `now_ns` clock) is the
 //! pre-spawn timestamp that marks are measured from.
 
+pub mod bench;
+
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
@@ -52,6 +54,8 @@ pub mod names {
     pub const KEY_GLASS_MS: &str = "key_glass_ms";
     pub const KEY_GLASS_EST_MS: &str = "key_glass_est_ms";
     pub const GLASS_UNAVAILABLE: &str = "glass_unavailable";
+    /// A value, not a time: the display's refresh rate in Hz.
+    pub const REFRESH_HZ: &str = "refresh_hz";
 }
 
 struct Log {
