@@ -6,4 +6,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+app-meta = { path = "../app-meta" }
+marks = { path = "../marks" }
 unicode-segmentation = "1.12"
