@@ -2,12 +2,19 @@
 //! with `<P>PROTOCOL` set; it checks the protocol, parses its arguments and
 //! hands them to the platform shell.
 //!
-//! Exit codes: the shell's own (0, or 128 + n after signal n); 2 for bad
-//! arguments; 220 when no shell exists for this platform yet; 221 when the
-//! launcher speaks a different protocol; 223 when a bench run never marked
-//! `first_frame` (`marks::bench::EXIT_NO_FIRST_FRAME`). 222 is reserved
-//! too: the launcher's own code when it loses track of the window (D7), so
-//! the window never exits with it. 220 to 223 are the reserved block.
+//! With no path the window is the macOS router (Finder and `open` start it
+//! that way): it creates no window, starts one sibling window process per
+//! file it is asked to open, and exits 0. Elsewhere no path is a usage
+//! error.
+//!
+//! Exit codes: the shell's own (0, 1 for `:cq`, or 128 + n after signal n);
+//! 0 from the router; 2 for bad arguments; 220 when no window can come up,
+//! because no shell exists for this platform or the toolkit cannot start
+//! (R34: the launcher's 220 means the same, so it passes through unchanged);
+//! 221 when the launcher speaks a different protocol; 223 when a bench run
+//! never marked `first_frame` (`marks::bench::EXIT_NO_FIRST_FRAME`). 222 is
+//! the launcher's own code when it loses track of the window (D7), so the
+//! window never exits with it. 220 to 223 are the reserved block.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -15,6 +22,8 @@ use std::path::PathBuf;
 use app_meta::SLUG;
 use editor_core::host::WindowArgs;
 
+/// Only the macOS shell has a router (no path: route Finder's opens).
+const HAS_ROUTER: bool = cfg!(target_os = "macos");
 const EXIT_USAGE: i32 = 2;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const EXIT_NOT_STARTED: i32 = 220;
@@ -33,7 +42,8 @@ fn main() {
         std::process::exit(EXIT_PROTOCOL);
     }
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let args = match parse(&argv) {
+    let parsed = parse(&argv).and_then(|a| path_check(&a, HAS_ROUTER).map(|()| a));
+    let args = match parsed {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("{SLUG}: {msg}");
@@ -57,6 +67,14 @@ fn run(args: WindowArgs) -> i32 {
 fn run(_args: WindowArgs) -> i32 {
     eprintln!("{SLUG}: window binary could not be started: unsupported platform");
     EXIT_NOT_STARTED
+}
+
+/// No path is router mode, which only a platform with a router accepts.
+fn path_check(args: &WindowArgs, has_router: bool) -> Result<(), String> {
+    if args.path.is_none() && !has_router {
+        return Err("no file given".into());
+    }
+    Ok(())
 }
 
 /// An absent `<P>PROTOCOL` is fine (the window started by hand or by the
@@ -105,6 +123,15 @@ mod tests {
         let got = parse(&a(&["/x/a.md"])).unwrap();
         assert!(!got.view);
         assert_eq!(got.display_name, None);
+    }
+
+    #[test]
+    fn router_mode_needs_a_router() {
+        let none = WindowArgs::default();
+        assert!(path_check(&none, true).is_ok());
+        assert_eq!(path_check(&none, false), Err("no file given".to_string()));
+        let some = parse(&a(&["/x/a.md"])).unwrap();
+        assert!(path_check(&some, false).is_ok());
     }
 
     #[test]

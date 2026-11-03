@@ -8,4 +8,5 @@ publish = false
 [dependencies]
 app-meta = { path = "../app-meta" }
 marks = { path = "../marks" }
+detach = { path = "../detach" }
 libc = "0.2"

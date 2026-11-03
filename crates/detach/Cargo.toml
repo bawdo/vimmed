@@ -1,0 +1,10 @@
+[package]
+name = "detach"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# libc only: the launcher links this, and the launcher links nothing else.
+[dependencies]
+libc = "0.2"
