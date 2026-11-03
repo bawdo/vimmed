@@ -131,6 +131,8 @@ dependencies = [
 name = "editor-core"
 version = "0.9.0"
 dependencies = [
+ "app-meta",
+ "marks",
  "unicode-segmentation",
 ]
 
