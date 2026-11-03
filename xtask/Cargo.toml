@@ -9,3 +9,8 @@ publish = false
 app-meta = { path = "../crates/app-meta" }
 png = "0.17"
 marks = { path = "../crates/marks" }
+
+# The fixture's layout test opens the generated document in a headless view.
+[dev-dependencies]
+editor-core = { path = "../crates/editor-core" }
+editor-render = { path = "../crates/editor-render" }
