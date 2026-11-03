@@ -295,33 +295,153 @@ fn language_for_resolves_every_alias() {
 
 #[test]
 fn each_language_highlights_a_keyword() {
-    let samples: &[(&str, &str)] = &[
-        ("rust", "fn main() { let x = 1; }"),
-        ("go", "package main\n\nfunc main() {\n\treturn\n}"),
-        ("javascript", "const x = function () { return 1; };"),
+    use SyntaxClass::*;
+    // (language, sample, [(needle, class the needle must be coloured as)]).
+    // Each needle must lie wholly inside one span of exactly that class.
+    type Sample<'a> = (&'a str, &'a str, &'a [(&'a str, SyntaxClass)]);
+    let samples: &[Sample] = &[
+        (
+            "rust",
+            "// note\nfn main() { let s = \"hi\"; }",
+            &[("fn", Keyword), ("\"hi\"", String), ("// note", Comment)],
+        ),
+        (
+            "go",
+            "// note\nfunc main() {\n\tx := \"hi\"\n}",
+            &[("func", Keyword), ("\"hi\"", String), ("// note", Comment)],
+        ),
+        (
+            "javascript",
+            "// note\nconst x = function () { return \"hi\"; };\nconst y = <div>hi</div>;",
+            &[
+                ("const", Keyword),
+                ("return", Keyword),
+                ("\"hi\"", String),
+                ("// note", Comment),
+                ("div", Tag),
+            ],
+        ),
         (
             "typescript",
-            "interface A { b: string }\nconst x: number = 1;",
+            "// note\ninterface A { b: string }\nconst x = \"hi\";",
+            &[
+                ("interface", Keyword),
+                ("const", Keyword),
+                ("\"hi\"", String),
+                ("// note", Comment),
+            ],
         ),
-        ("tsx", "const A = () => <div className=\"a\">hi</div>;"),
-        ("ruby", "def foo\n  return 1\nend"),
-        ("sql", "SELECT a FROM t WHERE b = 1;"),
-        ("html", "<div class=\"a\">hi</div>"),
-        ("css", "a { color: red; }"),
-        ("bash", "if [ -f x ]; then echo hi; fi"),
-        ("hcl", "resource \"a\" \"b\" {\n  c = 1\n}"),
-        ("md", "# Title\n\n- item\n\n```\ncode\n```"),
+        (
+            "tsx",
+            "// note\nconst A = () => <div className=\"a\">hi</div>;",
+            &[
+                ("const", Keyword),
+                ("div", Tag),
+                ("\"a\"", String),
+                ("// note", Comment),
+            ],
+        ),
+        (
+            "ruby",
+            "# note\ndef foo\n  return \"hi\"\nend",
+            &[
+                ("def", Keyword),
+                ("return", Keyword),
+                ("\"hi\"", String),
+                ("# note", Comment),
+            ],
+        ),
+        (
+            "sql",
+            "-- note\nSELECT a FROM t WHERE b = 'hi';",
+            &[
+                ("SELECT", Keyword),
+                ("FROM", Keyword),
+                ("'hi'", String),
+                ("-- note", Comment),
+            ],
+        ),
+        (
+            "html",
+            "<!-- note -->\n<div class=\"abc\">hi</div>",
+            &[
+                ("div", Tag),
+                ("class", Attribute),
+                // The grammar's query colours the value, not the quotes.
+                ("abc", String),
+                ("<!-- note -->", Comment),
+            ],
+        ),
+        (
+            "css",
+            "/* note */\na { color: red; content: \"hi\"; }",
+            &[
+                ("color", Property),
+                ("\"hi\"", String),
+                ("/* note */", Comment),
+            ],
+        ),
+        (
+            "bash",
+            "# note\nif [ -f x ]; then echo \"hi\"; fi",
+            &[
+                ("if", Keyword),
+                ("then", Keyword),
+                ("\"hi\"", String),
+                ("# note", Comment),
+            ],
+        ),
+        (
+            "hcl",
+            "# note\nresource \"a\" \"b\" {\n  name = \"hi\"\n  count = 1\n}",
+            &[
+                ("resource", Keyword),
+                ("name", Property),
+                ("\"hi\"", String),
+                ("1", Number),
+                ("# note", Comment),
+            ],
+        ),
+        (
+            "md",
+            "# Title\n\nplain *emph* and `code`",
+            // The inline query colours a code span's text; the backticks are
+            // punctuation.
+            &[("Title", Keyword), ("code", String), ("emph", Variable)],
+        ),
     ];
-    for (i, (lang, text)) in samples.iter().enumerate() {
+    let mut failures = Vec::new();
+    for (i, (lang, text, wants)) in samples.iter().enumerate() {
         let (waker, _) = counting_waker();
         let mut h = Highlighter::new(waker);
         let b = BlockId(100 + i as u32);
         h.request(b, lang, text);
         wait_for(&mut h, b);
-        let lines = text.split('\n').count();
-        let any = (0..lines).any(|l| !h.spans(b, l).is_empty());
-        assert!(any, "{lang}: no non-plain span for {text:?}");
+        // Byte offset of each line start, to turn a needle into (line, range).
+        let mut starts = vec![0usize];
+        starts.extend(text.match_indices('\n').map(|(p, _)| p + 1));
+        let dump = || {
+            (0..starts.len())
+                .map(|l| format!("line {l}: {:?}", h.spans(b, l)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for (needle, want) in *wants {
+            let at = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{lang}: needle {needle:?} not in sample"));
+            let line = starts.partition_point(|&s| s <= at) - 1;
+            let range = (at - starts[line])..(at - starts[line] + needle.len());
+            let hit = h
+                .spans(b, line)
+                .iter()
+                .any(|(r, c)| r.start <= range.start && range.end <= r.end && c == want);
+            if !hit {
+                failures.push(format!("{lang}: {needle:?} should be {want:?}\n{}", dump()));
+            }
+        }
     }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
 
 #[test]

@@ -220,10 +220,13 @@ impl Lang {
             Lang::JavaScript => lazy_config!(
                 "javascript",
                 tree_sitter_javascript::LANGUAGE,
+                // The JSX patterns go first: for an identical node the earliest
+                // pattern wins, and the generic `(identifier) @variable` would
+                // otherwise colour a tag name as a variable.
                 format!(
                     "{}\n{}",
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::HIGHLIGHT_QUERY
                 )
             ),
             // The TypeScript query only adds to the JavaScript one.
@@ -241,8 +244,8 @@ impl Lang {
                 tree_sitter_typescript::LANGUAGE_TSX,
                 format!(
                     "{}\n{}\n{}",
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
                     tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
                     tree_sitter_typescript::HIGHLIGHTS_QUERY
                 )
             ),
