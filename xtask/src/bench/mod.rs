@@ -6,8 +6,8 @@ pub mod stats;
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-use std::time::Duration;
+use std::process::{Child, Command, ExitCode};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Platform {
@@ -287,22 +287,106 @@ fn run_once(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+    let timeout = run_timeout(&args.kind);
     if let Kind::Type {
         mode: KeyMode::Wtype,
         keys,
     } = args.kind
+        && let Err(e) = drive_wtype(&mut child, log, keys)
     {
-        std::thread::sleep(Duration::from_millis(1500));
-        let text = "a".repeat(keys);
-        let _ = Command::new("wtype").args(["-d", "5", &text]).status();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
     }
-    let status = child.wait().map_err(|e| e.to_string())?;
+    let status = wait_child(&mut child, timeout)?;
     if !status.success() {
         return Err(format!("launcher exited with {status}"));
     }
     let mut m = BTreeMap::new();
     parse_log(&std::fs::read_to_string(log).unwrap_or_default(), &mut m);
     Ok(m)
+}
+
+/// Cold-start runs: generous enough for a first run with a cold font cache.
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// Type runs: fixed allowance for start-up and shutdown.
+const TYPE_BASE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Type runs: extra allowance per key (wtype sends one every 5 ms).
+const TYPE_PER_KEY_TIMEOUT: Duration = Duration::from_millis(50);
+/// How long to wait for `first_frame` before typing into a window.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Wait limit for one run. `None` for `--manual`, where the wait is intentional.
+fn run_timeout(kind: &Kind) -> Option<Duration> {
+    match kind {
+        Kind::Start { .. } => Some(START_TIMEOUT),
+        Kind::Type {
+            mode: KeyMode::Manual,
+            ..
+        } => None,
+        Kind::Type { keys, .. } => Some(TYPE_BASE_TIMEOUT + TYPE_PER_KEY_TIMEOUT * *keys as u32),
+    }
+}
+
+/// True when the log holds a line for exactly this mark name.
+fn log_has_mark(text: &str, name: &str) -> bool {
+    text.lines()
+        .any(|l| l.split_once(',').is_some_and(|(n, _)| n.trim() == name))
+}
+
+/// Poll `try_wait` until the child exits. On timeout, kill and reap it.
+fn wait_child(
+    child: &mut Child,
+    timeout: Option<Duration>,
+) -> Result<std::process::ExitStatus, String> {
+    let start = Instant::now();
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            return Ok(st);
+        }
+        if let Some(t) = timeout
+            && start.elapsed() >= t
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "run timed out after {}s, child killed",
+                t.as_secs()
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Wait for the window's `first_frame` mark, then type `keys` characters with wtype.
+fn drive_wtype(child: &mut Child, log: &Path, keys: usize) -> Result<(), String> {
+    let start = Instant::now();
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if log_has_mark(&text, marks::names::FIRST_FRAME) {
+            break;
+        }
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            return Err(format!("launcher exited ({st}) before first_frame"));
+        }
+        if start.elapsed() >= READY_TIMEOUT {
+            return Err(format!(
+                "no first_frame mark within {}s",
+                READY_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    let text = "a".repeat(keys);
+    let status = Command::new("wtype")
+        .args(["-d", "5", &text])
+        .status()
+        .map_err(|e| format!("wtype: {e} (needs Linux Wayland and the wtype tool)"))?;
+    if !status.success() {
+        return Err(format!("wtype failed with {status}"));
+    }
+    Ok(())
 }
 
 fn stamp() -> String {
@@ -450,6 +534,48 @@ mod tests {
         assert_eq!(
             out_dir_name(Platform::Linux, "20261103-101500", "start-default"),
             "linux-20261103-101500-start-default"
+        );
+    }
+
+    #[test]
+    fn log_has_mark_matches_whole_names() {
+        let t = "window_main,40.0\nfirst_frame_glass,9.0\n";
+        assert!(log_has_mark(t, "window_main"));
+        assert!(!log_has_mark(t, "first_frame"));
+        assert!(!log_has_mark("", "first_frame"));
+    }
+
+    #[test]
+    fn timeouts_scale_with_keys_and_skip_manual() {
+        let start = Kind::Start {
+            runs: 1,
+            first_run: false,
+        };
+        assert_eq!(run_timeout(&start), Some(START_TIMEOUT));
+        let w = |keys| Kind::Type {
+            mode: KeyMode::Wtype,
+            keys,
+        };
+        assert_eq!(run_timeout(&w(0)), Some(TYPE_BASE_TIMEOUT));
+        assert!(run_timeout(&w(1000)) > run_timeout(&w(500)));
+        let m = Kind::Type {
+            mode: KeyMode::Manual,
+            keys: 500,
+        };
+        assert_eq!(run_timeout(&m), None);
+    }
+
+    #[test]
+    fn wait_child_kills_on_timeout() {
+        let mut c = Command::new("sleep").arg("30").spawn().unwrap();
+        let err = wait_child(&mut c, Some(Duration::from_millis(200))).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(c.try_wait().unwrap().is_some(), "child must be reaped");
+        let mut ok = Command::new("true").spawn().unwrap();
+        assert!(
+            wait_child(&mut ok, Some(Duration::from_secs(10)))
+                .unwrap()
+                .success()
         );
     }
 
