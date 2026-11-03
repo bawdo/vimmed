@@ -682,15 +682,20 @@ mod tests {
     }
 
     #[test]
-    fn redo_floors_the_saved_column_to_a_grapheme_boundary() {
-        // `d0` from column 5 leaves the cluster at the line start, so the
-        // saved column 5 falls inside it.
+    fn undo_clamps_the_saved_column_to_a_grapheme_boundary() {
+        // `A` saves the column past the line end; Normal mode rests on the
+        // start of the last cluster, never inside it.
         let fam = "👩\u{200d}👩\u{200d}👧";
+        let mut e = ed(&format!("a{fam}"));
+        keys(&mut e, "Axyz<Esc>0u");
+        assert_eq!(e.text(), format!("a{fam}"));
+        assert_eq!(e.cursor(), pos(0, 1));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 19));
+        // `d0` moves the cursor to the range start, which vim restores.
         let mut e = ed(&format!("abcde{fam}z"));
-        keys(&mut e, "llllld0");
-        assert_eq!(e.text(), format!("{fam}z"));
-        keys(&mut e, "u");
-        assert_eq!(e.cursor(), pos(0, 5));
+        keys(&mut e, "llllld0u");
+        assert_eq!(e.cursor(), pos(0, 0));
         keys(&mut e, "<C-r>");
         assert_eq!(e.text(), format!("{fam}z"));
         assert_eq!(e.cursor(), pos(0, 0));
@@ -820,6 +825,42 @@ mod tests {
     fn vim_golden_cc_undo() {
         // Vim: start (2,9), result [2,5].
         golden("j8l", "ccZZ<Esc>u", pos(1, 4));
+    }
+
+    #[test]
+    fn vim_golden_big_v_d_undo() {
+        // Vim: start (2,9), result [2,1].
+        golden("j8l", "Vdu", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_big_v_j_d_undo() {
+        // Vim: start (2,9), result [2,1].
+        golden("j8l", "Vjdu", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_big_v_k_d_undo() {
+        // Vim: start (3,10), result [2,10].
+        golden("jj9l", "Vkdu", pos(1, 9));
+    }
+
+    #[test]
+    fn vim_golden_big_v_j_c_undo() {
+        // Vim: start (2,9), result [3,1].
+        golden("j8l", "VjcZZ<Esc>u", pos(2, 0));
+    }
+
+    #[test]
+    fn vim_golden_v_j_d_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "vjdu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_v_k_d_undo() {
+        // Vim: start (3,10), result [2,10].
+        golden("jj9l", "vkdu", pos(1, 9));
     }
 
     #[test]

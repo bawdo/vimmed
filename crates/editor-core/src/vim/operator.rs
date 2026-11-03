@@ -352,6 +352,9 @@ fn charwise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
     match op {
         Operator::Yank => {}
         Operator::Delete | Operator::Change => {
+            // Vim moves the cursor to the start of the range first, which
+            // is where undo puts it back.
+            ctx.cursor = start;
             ctx.replace(start..end, "");
         }
     }
@@ -378,6 +381,12 @@ fn linewise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
             line: a,
             col: range.start.col,
         };
+        if op == Operator::Change && b > a {
+            // Vim's linewise change first deletes the lines after the
+            // first with the cursor moved down onto them, and that is the
+            // cursor undo restores.
+            ctx.cursor.line = a + 1;
+        }
         ctx.history.mark_linewise();
     }
     let line_end = |buf: &Buffer, line: usize| Pos {

@@ -68,10 +68,16 @@ pub fn forward(inverse: &Edit, inserted: &str) -> Edit {
 /// edits changed. On it, if it is the saved cursor's line, the saved
 /// column (clamped to a grapheme Normal mode rests on), else the first
 /// non-blank. A change that only adds or takes whole lines below a line
-/// (an `o`, a linewise `dd` on the last line) counts from the line below,
-/// and a top line just under the saved line falls back to it, as vim does
-/// for `o`. Redo of a linewise delete or change always goes to the first
-/// non-blank of the top line.
+/// (an `o`, a linewise `dd` on the last line) counts from the line below.
+///
+/// Vim's rule for using the saved cursor is that it lies in the changed
+/// block or the line either side of it (the "gwap" comment in
+/// `u_undoredo`), which also covers `o` and the multi-line linewise
+/// change: `Vjc` and `cj` first delete the lines after the first with the
+/// cursor moved onto them, so the saved cursor is on the second line and
+/// undo lands there (`[3,1]` in the golden case), unlike `cc`. Redo of a
+/// linewise delete or change always goes to the first non-blank of the top
+/// line.
 fn apply<'a>(
     buf: &mut Buffer,
     edits: impl Iterator<Item = &'a Edit>,
@@ -79,24 +85,44 @@ fn apply<'a>(
     redo: bool,
 ) -> Pos {
     let mut top = usize::MAX;
+    // How many lines the edit that set `top` leaves in its place.
+    let mut size = 0;
     for e in edits {
         let start = e.range.start;
         let at_end = start.line < buf.line_count() && buf.line(start.line).len() == start.col;
         let breaks = e.text.starts_with('\n') || buf.text_range(e.range.clone()).starts_with('\n');
-        top = top.min(start.line + usize::from(at_end && breaks));
+        let bumped = at_end && breaks;
+        let first = start.line + usize::from(bumped);
+        if first < top {
+            top = first;
+            let breaks_in = e.text.matches('\n').count();
+            size = match (bumped, e.text.starts_with('\n')) {
+                (false, _) => breaks_in + 1,
+                (true, true) => breaks_in,
+                (true, false) => 0,
+            };
+        }
         buf.replace(e.range.clone(), &e.text);
     }
     let saved = g.first_cursor;
-    let mut line = top.min(buf.line_count() - 1);
-    if saved.line + 1 == top && top > 0 {
-        line = saved.line.min(buf.line_count() - 1);
-    }
-    let col = if line == saved.line && !(redo && g.linewise) {
-        saved.col
+    let line = top.min(buf.line_count() - 1);
+    // Vim: a saved cursor within the changed block, or the line either
+    // side of it, is where the cursor goes back to.
+    let near = saved.line + 1 >= top && saved.line <= top + size;
+    let at = if redo && g.linewise {
+        Pos {
+            line,
+            col: vim::motion::caret_col(buf.line(line)),
+        }
+    } else if near {
+        saved
     } else {
-        vim::motion::caret_col(buf.line(line))
+        Pos {
+            line,
+            col: vim::motion::caret_col(buf.line(line)),
+        }
     };
-    vim::rest(buf, Pos { line, col })
+    vim::rest(buf, at)
 }
 
 impl History {
