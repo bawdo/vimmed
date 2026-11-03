@@ -8,7 +8,11 @@ use std::ops::Range;
 
 use crate::grapheme;
 
-/// A position: `line` index and `col` byte offset into that line, on a grapheme boundary.
+/// A position: `line` index and `col` byte offset into that line.
+///
+/// Positions produced by user motions (via `Buffer::clamp`, `grapheme::next`
+/// and `grapheme::prev`) sit on grapheme boundaries. `Edit` ranges need not:
+/// an inverse edit can end inside a cluster formed by the edit itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
     pub line: usize,
@@ -133,7 +137,14 @@ impl Buffer {
 
     /// Replaces `r` with `text` (`\n` and `\r\n` both split lines) and returns the
     /// inverse edit: its range covers the inserted text in the new buffer and its
-    /// text is what was removed. Positions are clamped, never panicking.
+    /// text is what was removed.
+    ///
+    /// This is the raw primitive that undo and redo need. Positions are snapped
+    /// only to char boundaries (and the line and column are bounded), so it never
+    /// panics, but it does NOT keep grapheme clusters whole: a position inside a
+    /// cluster is honoured as given. Positions that originate from the user must
+    /// go through `clamp` / `grapheme::next` / `grapheme::prev` first. `r` must
+    /// not be reversed (debug-asserted; release collapses it to empty at `start`).
     pub fn replace(&mut self, r: Range<Pos>, text: &str) -> Edit {
         let (start, end) = self.ordered(r);
         let removed = self.text_range(start..end);
@@ -166,6 +177,7 @@ impl Buffer {
     }
 
     fn ordered(&self, r: Range<Pos>) -> (Pos, Pos) {
+        debug_assert!(r.start <= r.end, "reversed range: {r:?}");
         let start = self.clamp_to_char(r.start);
         let end = self.clamp_to_char(r.end).max(start);
         (start, end)
@@ -255,8 +267,11 @@ mod tests {
         // Mid-char and out-of-range offsets are tolerated.
         b.replace(pos(0, 2)..pos(7, 400), "Z");
         assert_eq!(b.line_count(), 1);
+        // Raw-primitive behaviour: col 2 is mid-char, so it snaps to the char
+        // boundary at 1, which is inside the "e\u{301}" cluster. `replace` does
+        // not protect grapheme clusters; callers go through `clamp` first.
         assert_eq!(b.to_text(), "eZ");
-        let _ = b.text_range(pos(5, 5)..pos(1, 1));
+        let _ = b.text_range(pos(1, 1)..pos(5, 5));
     }
 
     #[test]
