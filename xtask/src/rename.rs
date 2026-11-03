@@ -6,6 +6,8 @@ use app_meta::derive::Names;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_NAME: &str = "zq_scribe";
 
@@ -69,6 +71,48 @@ fn tmp_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+/// A scratch directory owned by exactly one run. The name carries the process
+/// id, a nanosecond stamp and a per-process counter, and creation is
+/// exclusive (`create_dir`), so two runs, even with the same `TMPDIR`, never
+/// share or delete each other's tree. Dropping the guard removes the directory
+/// on success and on every error path. Stale directories left by a killed run
+/// are deliberately not swept, because they might belong to a live run.
+#[derive(Debug)]
+pub struct WorkDir {
+    path: PathBuf,
+}
+
+impl WorkDir {
+    pub fn create_in(base: &Path) -> Result<WorkDir, String> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        fs::create_dir_all(base).map_err(|e| format!("create {}: {e}", base.display()))?;
+        for _ in 0..100 {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = base.join(format!("rename-check-{}-{nanos}-{n}", std::process::id()));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(WorkDir { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("create {}: {e}", path.display())),
+            }
+        }
+        Err(format!("no free rename-check dir under {}", base.display()))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 fn capture(cmd: &mut Command) -> Result<String, String> {
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -84,11 +128,8 @@ pub fn run(root: &Path, new_slug: &str) -> Result<(), String> {
     let forms = name_forms(&old);
 
     // Copy the tracked tree.
-    let work = tmp_dir().join("rename-check");
-    let copy = work.join("src");
-    if work.exists() {
-        fs::remove_dir_all(&work).map_err(|e| format!("clean {}: {e}", work.display()))?;
-    }
+    let guard = WorkDir::create_in(&tmp_dir())?;
+    let copy = guard.path().join("src");
     fs::create_dir_all(&copy).map_err(|e| e.to_string())?;
     let listing = Command::new("git")
         .current_dir(root)
@@ -176,6 +217,70 @@ pub fn run(root: &Path, new_slug: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_base(tag: &str) -> PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("xtask-rename-test-{}-{tag}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn work_dirs_are_unique_per_run() {
+        let base = scratch_base("unique");
+        let a = WorkDir::create_in(&base).unwrap();
+        let b = WorkDir::create_in(&base).unwrap();
+        assert_ne!(a.path(), b.path());
+        assert!(a.path().is_dir() && b.path().is_dir());
+        drop((a, b));
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn work_dir_removed_on_drop() {
+        let base = scratch_base("drop");
+        let w = WorkDir::create_in(&base).unwrap();
+        let p = w.path().to_path_buf();
+        fs::create_dir_all(p.join("src/target")).unwrap();
+        fs::write(p.join("src/target/x"), b"x").unwrap();
+        drop(w);
+        assert!(!p.exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn work_dir_removed_on_error_path() {
+        fn failing(base: &Path) -> (Result<(), String>, PathBuf) {
+            let w = WorkDir::create_in(base).unwrap();
+            let p = w.path().to_path_buf();
+            fs::write(p.join("x"), b"x").unwrap();
+            let r = Err(format!("boom in {}", w.path().display()));
+            (r, p)
+        }
+        let base = scratch_base("err");
+        let (r, p) = failing(&base);
+        assert!(r.is_err());
+        assert!(!p.exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn concurrent_allocation_never_collides() {
+        let base = scratch_base("conc");
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let b = base.clone();
+                std::thread::spawn(move || WorkDir::create_in(&b).unwrap())
+            })
+            .collect();
+        let dirs: Vec<WorkDir> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let mut paths: Vec<_> = dirs.iter().map(|d| d.path().to_path_buf()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 8);
+        drop(dirs);
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn rewrite_manifest_changes_only_the_name_line() {
