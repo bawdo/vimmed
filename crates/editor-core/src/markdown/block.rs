@@ -108,12 +108,14 @@ fn is_code(kind: &LineKind) -> bool {
 
 /// Bookkeeping for one rescan: ids whose lines were rewritten (their infos
 /// are dropped or rebuilt), and the previous kind of every surviving line that
-/// was rewritten, which yields the range of lines whose kind changed.
+/// was rewritten, which yields the range of lines whose kind changed. `repaint`
+/// holds the lines of tables that kept their id but whose info changed.
 #[derive(Default)]
 struct Rescan {
     dead_blocks: Vec<BlockId>,
     dead_tables: Vec<TableId>,
     prev: HashMap<usize, LineKind>,
+    repaint: Vec<Range<usize>>,
 }
 
 impl Rescan {
@@ -147,7 +149,9 @@ impl Blocks {
     }
 
     /// Brings the classification up to date after an edit and returns the
-    /// lines (in `buf`) whose kind changed. The returned range always covers
+    /// lines (in `buf`) to repaint: every line whose kind changed, and every
+    /// line of a table whose info (extent or alignment) changed while it kept
+    /// its id, from header to last row. The returned range always covers
     /// `edited`.
     ///
     /// The contract: `buf` is the buffer after the edit. `edited` is the range
@@ -198,6 +202,10 @@ impl Blocks {
                 lo = lo.min(i);
                 hi = hi.max(i + 1);
             }
+        }
+        for lines in &r.repaint {
+            lo = lo.min(lines.start);
+            hi = hi.max(lines.end);
         }
         lo..hi
     }
@@ -289,7 +297,7 @@ impl Blocks {
                 );
                 LineKind::FenceOpen { block: id, lang }
             } else if let Some(id) = state {
-                if text == "```" {
+                if text.trim_end() == "```" {
                     if let Some(info) = self.code_blocks.get_mut(&id) {
                         info.close = Some(i);
                     }
@@ -350,8 +358,13 @@ impl Blocks {
             r.bury(&old);
             r.prev.insert(i, old);
         }
+        // Old infos (already shifted) of the tables being rebuilt, so a kept id
+        // whose extent or alignment changed can be repainted whole.
+        let mut old_infos = HashMap::new();
         for id in r.dead_tables.drain(..) {
-            self.tables.remove(&id);
+            if let Some(info) = self.tables.remove(&id) {
+                old_infos.insert(id, info);
+            }
         }
 
         let kinds = &self.kinds;
@@ -373,24 +386,26 @@ impl Blocks {
             for row in t.sep + 1..=t.last {
                 self.kinds[row] = LineKind::TableRow { table };
             }
-            self.tables.insert(
-                table,
-                TableInfo {
-                    header: t.header,
-                    sep: t.sep,
-                    last: t.last,
-                    aligns: t.aligns,
-                },
-            );
+            let info = TableInfo {
+                header: t.header,
+                sep: t.sep,
+                last: t.last,
+                aligns: t.aligns,
+            };
+            if reuse.is_some() && old_infos.get(&table) != Some(&info) {
+                r.repaint.push(info.header..info.last + 1);
+            }
+            self.tables.insert(table, info);
         }
     }
 }
 
 /// `Some(lang)` when `text` opens a fence: three backticks at column 0. Inside
-/// a block, exactly three backticks closes instead, so only a longer line
-/// (three backticks and more) opens a new block there.
+/// a block, three backticks with only trailing whitespace closes instead, so
+/// only three backticks plus a language opens a new block there. (moon_edit
+/// opens a new block on trailing whitespace; whitespace is not a language.)
 fn opening_fence(text: &str, inside: bool) -> Option<Option<String>> {
-    if !text.starts_with("```") || (inside && text.len() == 3) {
+    if !text.starts_with("```") || (inside && text.trim_end() == "```") {
         return None;
     }
     let lang = text[3..].trim();
@@ -1066,6 +1081,34 @@ mod tests {
     }
 
     #[test]
+    fn fence_close_ignores_trailing_whitespace() {
+        // Diverges from moon_edit, which opens a new block on "```  " inside
+        // one: whitespace is not a language, so the line closes the block.
+        let ks = kinds("```\ncode\n```  \nafter\n# h");
+        let id = block_of(&ks[0]).unwrap();
+        assert_eq!(ks[2], LineKind::FenceClose { block: id });
+        assert_eq!(ks[3], LineKind::Paragraph);
+        assert_eq!(ks[4], LineKind::Heading(1));
+        assert!(matches!(
+            kinds("```\na\n```\t")[2],
+            LineKind::FenceClose { .. }
+        ));
+        // A real language still opens a new block inside one.
+        assert!(matches!(
+            kinds("```\na\n``` rust ")[2],
+            LineKind::FenceOpen { .. }
+        ));
+
+        let (mut b, mut bl) = blocks("```\ncode\nx\nafter");
+        let changed = set_line(&mut b, &mut bl, 2, "``` ");
+        assert_eq!(bl.kind(2), &LineKind::FenceClose { block: id });
+        assert_eq!(bl.code_block(id).close, Some(2));
+        assert_eq!(bl.kind(3), &LineKind::Paragraph);
+        assert_eq!(changed, 2..4);
+        assert_fresh(&b, &bl);
+    }
+
+    #[test]
     fn fence_must_start_at_column_zero() {
         assert_eq!(k(" ```"), LineKind::Paragraph);
     }
@@ -1319,6 +1362,28 @@ mod tests {
     }
 
     #[test]
+    fn table_alignment_change_repaints_whole_table() {
+        let (mut b, mut bl) = blocks("intro\n| a | b |\n|---|---|\n| 1 | 2 |\nend");
+        let t = table_of(bl.kind(1)).unwrap();
+        let changed = set_line(&mut b, &mut bl, 2, "|:-:|--:|");
+        assert_eq!(table_of(bl.kind(1)), Some(t), "id kept");
+        assert_eq!(bl.table(t).aligns, [Align::Centre, Align::Right]);
+        assert_eq!(changed, 1..4);
+        assert_fresh(&b, &bl);
+    }
+
+    #[test]
+    fn table_gaining_a_row_repaints_whole_table() {
+        let (mut b, mut bl) = blocks("| a | b |\n|---|---|\n| 1 | 2 |\nx");
+        let t = table_of(bl.kind(0)).unwrap();
+        let changed = set_line(&mut b, &mut bl, 3, "| a much longer cell | 4 |");
+        assert_eq!(table_of(bl.kind(0)), Some(t), "id kept");
+        assert_eq!(bl.table(t).last, 3);
+        assert_eq!(changed, 0..4);
+        assert_fresh(&b, &bl);
+    }
+
+    #[test]
     fn update_line_becomes_table_separator() {
         let (mut b, mut bl) = blocks("intro\n| a | b |\ntext\n| 1 | 2 |\n| 3 | 4 |\nend");
         let changed = set_line(&mut b, &mut bl, 2, "|:--|--:|");
@@ -1361,7 +1426,8 @@ mod tests {
     fn update_matches_fresh_scan_after_edit_sequence() {
         const SEED: &str =
             "# t\n```\ncode\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- a\n  1. b\n> q\ntext\n";
-        const PIECES: [&str; 18] = [
+        const PIECES: [&str; 19] = [
+            "``` ",
             "```",
             "```rust",
             "| a | b |",
@@ -1387,6 +1453,7 @@ mod tests {
     }
 
     fn run_edit_sequence(mut seed: u64, start_text: &str, pieces: &[&str]) {
+        let label = seed;
         let mut next = |n: usize| {
             seed = seed
                 .wrapping_mul(6364136223846793005)
@@ -1422,6 +1489,7 @@ mod tests {
             };
 
             let old: Vec<LineKind> = (0..b.line_count()).map(|i| bl.kind(i).clone()).collect();
+            let old_tables = bl.tables.clone();
             let before = b.line_count();
             let e = b.replace(start..end, text);
             let delta = b.line_count() as isize - before as isize;
@@ -1431,7 +1499,7 @@ mod tests {
             assert_fresh(&b, &bl);
             assert!(
                 changed.start <= edited.start && changed.end >= edited.end,
-                "seed {seed} step {step}"
+                "seed {label} step {step}"
             );
             for i in (0..b.line_count()).filter(|i| !changed.contains(i)) {
                 let o = if i < edited.start {
@@ -1439,7 +1507,34 @@ mod tests {
                 } else {
                     (i as isize - delta) as usize
                 };
-                assert_eq!(bl.kind(i), &old[o], "seed {seed} step {step} line {i}");
+                assert_eq!(bl.kind(i), &old[o], "seed {label} step {step} line {i}");
+            }
+            // A table whose info changed (after mapping old lines into the new
+            // buffer) must be repainted whole, even when its id was kept.
+            let old_e = (edited.end as isize - delta) as usize;
+            let map = |x: usize| {
+                if x < edited.start {
+                    Some(x)
+                } else if x >= old_e {
+                    Some((x as isize + delta) as usize)
+                } else {
+                    None
+                }
+            };
+            for (id, info) in &bl.tables {
+                let Some(was) = old_tables.get(id) else {
+                    continue;
+                };
+                let same = map(was.header) == Some(info.header)
+                    && map(was.sep) == Some(info.sep)
+                    && map(was.last) == Some(info.last)
+                    && was.aligns == info.aligns;
+                if !same {
+                    assert!(
+                        changed.start <= info.header && changed.end > info.last,
+                        "seed {label} step {step}: table {info:?} was {was:?}, changed {changed:?}"
+                    );
+                }
             }
             with_code += usize::from(!bl.code_blocks.is_empty());
             with_table += usize::from(!bl.tables.is_empty());
@@ -1447,7 +1542,7 @@ mod tests {
         // The sequence must actually exercise fences and tables.
         assert!(
             with_code > 300 && with_table > 300,
-            "seed {seed}: {with_code} {with_table}"
+            "seed {label}: {with_code} {with_table}"
         );
     }
 }
