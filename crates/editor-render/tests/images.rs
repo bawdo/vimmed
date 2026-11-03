@@ -139,6 +139,66 @@ fn decode_completes_without_relayout() {
 }
 
 #[test]
+fn image_draw_changes_only_its_own_rect() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    write_png(dir.path(), "small.png", 40, 30);
+    let (w, _) = waker();
+    let src = Fake::new(&["alpha", "![pic](small.png)", "omega"], t.clone());
+    let mut v = view(&t, 2.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    let before: Vec<u8> = v.frame().pixmap.data().to_vec();
+    until("the image to decode", || v.poll_async());
+    let after = v.frame().pixmap.data();
+    let width = v.frame().width_px as usize;
+
+    let col_w = (t.px(TokenId::SpaceColumn) * 2.0).round();
+    let col_x = ((W_PT * 2.0 - col_w) / 2.0).floor() as usize;
+    let page_top = (t.px(TokenId::SpacePageTop) * 2.0).round();
+    let top = (page_top + v.line_height_px(0).unwrap()) as usize;
+    let (bw, bh) = (80, 60);
+    let changed: Vec<(usize, usize)> = (0..after.len() / 4)
+        .filter(|&i| after[i * 4..i * 4 + 4] != before[i * 4..i * 4 + 4])
+        .map(|i| (i % width, i / width))
+        .collect();
+    assert!(!changed.is_empty(), "the image was painted");
+    for (x, y) in changed {
+        assert!(
+            (col_x..col_x + bw).contains(&x) && (top..top + bh).contains(&y),
+            "pixel ({x},{y}) changed outside the image rect"
+        );
+    }
+    let inside = (top + bh / 2) * width + col_x + bw / 2;
+    assert!(after[inside * 4] > 150, "the rect's interior is the image");
+}
+
+#[test]
+fn translucent_image_blends_with_the_page() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 30, 30, 128]))
+        .save(dir.path().join("glass.png"))
+        .unwrap();
+    let (w, _) = waker();
+    let src = Fake::new(&["alpha", "![pic](glass.png)", "omega"], t.clone());
+    let mut v = view(&t, 2.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    until("the image to decode", || v.poll_async());
+    let col_x = ((W_PT * 2.0 - (t.px(TokenId::SpaceColumn) * 2.0).round()) / 2.0).floor() as usize;
+    let page_top = (t.px(TokenId::SpacePageTop) * 2.0).round();
+    let top = (page_top + v.line_height_px(0).unwrap()) as usize;
+    let px = pixel(&v, col_x + 40, top + 30);
+    let bg = t.color(TokenId::ColorBg);
+    assert!(px[1] > 30 && px[1] < bg.g - 40, "blended, got {px:?}");
+    assert!(
+        px[0] < bg.r && px[3] == 255,
+        "tinted red over an opaque page"
+    );
+}
+
+#[test]
 fn remote_url_never_fetches() {
     let dir = TempDir::new();
     let (w, woken) = waker();

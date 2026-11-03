@@ -27,7 +27,7 @@ use crate::frame::Frame;
 use crate::images::{ImageSlot, ImageState, Images};
 use crate::layout::{LaidLine, RectF, StyledSpan, TextLayout};
 use crate::paint::{
-    blend, content_offset, draw_scaled, fill, prefix_text, span_for, src_to_display_clamped,
+    blend, blit, content_offset, draw_scaled, fill, prefix_text, span_for, src_to_display_clamped,
     styled_line,
 };
 
@@ -39,6 +39,37 @@ struct ImageLine {
     w_px: f32,
     h_px: f32,
     state: ImageState,
+    /// The decoded image resampled once to the box, so a redraw is a plain
+    /// copy (a keystroke that moves the line redraws it).
+    scaled: Option<tiny_skia::Pixmap>,
+    /// Every pixel of `scaled` has full alpha.
+    opaque: bool,
+}
+
+impl ImageLine {
+    /// Resamples a decoded image to its box if that has not been done.
+    fn ensure_scaled(&mut self) {
+        let ImageState::Ready(px) = &self.state else {
+            return;
+        };
+        if self.scaled.is_some() {
+            return;
+        }
+        let (w, h) = (self.w_px as u32, self.h_px as u32);
+        if let Some(mut boxed) = tiny_skia::Pixmap::new(w, h) {
+            draw_scaled(
+                &mut boxed,
+                0.0,
+                0.0,
+                self.w_px,
+                self.h_px,
+                px,
+                &(0.0..self.h_px),
+            );
+            self.opaque = boxed.data().as_chunks::<4>().0.iter().all(|p| p[3] == 255);
+            self.scaled = Some(boxed);
+        }
+    }
 }
 
 /// Paints an image line's box (the page is already filled behind it): the
@@ -52,7 +83,10 @@ fn paint_image(
     clip: &Range<f32>,
 ) {
     match &img.state {
-        ImageState::Ready(px) => draw_scaled(p, x, top, img.w_px, img.h_px, px, clip),
+        ImageState::Ready(px) => match &img.scaled {
+            Some(s) => blit(p, x as i32, top as i32, s, img.opaque, clip),
+            None => draw_scaled(p, x, top, img.w_px, img.h_px, px, clip),
+        },
         ImageState::Pending | ImageState::Missing => {
             let c = t.color(TokenId::ColorImagePlaceholder);
             fill(p, x, top, img.w_px, img.h_px, c, clip);
@@ -406,6 +440,7 @@ impl DocView {
             };
             if let Some(img) = self.lines[i].image.as_mut() {
                 img.state = state;
+                img.ensure_scaled();
             }
             let h = self.lines[i].height;
             let top = self.line_top(i);
@@ -527,7 +562,7 @@ impl DocView {
             }
             None => slot.prefix = None,
         }
-        slot.image = None;
+        let old_image = slot.image.take();
         match (&d.deco, self.images.as_mut()) {
             (BlockDeco::Image { src, alt }, Some(images)) => {
                 images.set_limits(
@@ -567,12 +602,19 @@ impl DocView {
                     (width, slot.height.max(label_h))
                 };
                 slot.height = h_px;
-                slot.image = Some(ImageLine {
+                // Keep the resampled copy while the box and the image are unchanged.
+                let kept = old_image.filter(|o| o.src == *src && o.w_px == w_px && o.h_px == h_px);
+                let opaque = kept.as_ref().is_some_and(|o| o.opaque);
+                let mut line = ImageLine {
                     src: src.clone(),
                     w_px,
                     h_px,
                     state: r.state,
-                });
+                    scaled: kept.and_then(|o| o.scaled),
+                    opaque,
+                };
+                line.ensure_scaled();
+                slot.image = Some(line);
             }
             _ => slot.label = None,
         }
