@@ -67,7 +67,7 @@ pub fn parse_color(s: &str) -> Result<Rgba, String> {
     let hex = s
         .strip_prefix('#')
         .ok_or_else(|| format!("colour must start with #: {s}"))?;
-    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) || !(hex.len() == 6 || hex.len() == 8) {
         return Err(format!("colour must be #RRGGBB or #RRGGBBAA: {s}"));
     }
     let byte = |i: usize| {
@@ -331,7 +331,7 @@ mod tests {
             }
         );
         assert_eq!(parse_color("#10203040").unwrap().a, 0x40);
-        for bad in ["102030", "#12345", "#12345g", "#é23456", ""] {
+        for bad in ["102030", "#12345", "#12345g", "#é23456", "#+1+2+3", ""] {
             assert!(parse_color(bad).is_err(), "{bad}");
         }
     }
