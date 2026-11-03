@@ -89,12 +89,24 @@ pub struct Blocks {
 /// What `kind` returns for a line past the end, mirroring `Buffer::line`.
 static OUT_OF_RANGE: LineKind = LineKind::Blank;
 
+/// An old info line number whose line was deleted by an edit (see `shift`).
+const GONE: usize = usize::MAX;
+
 /// Fence state between two lines: `None` outside code, or the open block.
 type State = Option<BlockId>;
 
 fn state_after(kind: &LineKind) -> State {
     match kind {
         LineKind::FenceOpen { block, .. } | LineKind::Code { block } => Some(*block),
+        _ => None,
+    }
+}
+
+fn block_id(kind: &LineKind) -> Option<BlockId> {
+    match kind {
+        LineKind::FenceOpen { block, .. }
+        | LineKind::FenceClose { block }
+        | LineKind::Code { block } => Some(*block),
         _ => None,
     }
 }
@@ -149,10 +161,12 @@ impl Blocks {
     }
 
     /// Brings the classification up to date after an edit and returns the
-    /// lines (in `buf`) to repaint: every line whose kind changed, and every
-    /// line of a table whose info (extent or alignment) changed while it kept
-    /// its id, from header to last row. The returned range always covers
-    /// `edited`.
+    /// lines (in `buf`) to repaint: every line whose kind changed, plus every
+    /// line of a block or table whose info changed while it kept its id. A
+    /// table is covered from header to last row when its extent or alignment
+    /// changed; a code block from its opener to its last line (the closer, or
+    /// the end of the block when unclosed) when its open, close or lang
+    /// changed. The returned range always covers `edited`.
     ///
     /// The contract: `buf` is the buffer after the edit. `edited` is the range
     /// of lines in `buf` whose text changed (it may be empty for a pure
@@ -192,7 +206,7 @@ impl Blocks {
         for kind in &removed {
             r.bury(kind);
         }
-        self.shift(old_e, delta);
+        self.shift(old_e, e, delta);
         let f = self.scan_fences(buf, s, e, &mut r);
         self.scan_tables(buf, s, f, &mut r);
 
@@ -232,14 +246,20 @@ impl Blocks {
         &self.tables[&id]
     }
 
-    /// Moves info line numbers at or after old line `from` by `delta`.
-    fn shift(&mut self, from: usize, delta: isize) {
+    /// Maps info line numbers into the new buffer: lines at or after old line
+    /// `from` (the old end of the edit) move by `delta`; lines inside the edit
+    /// keep their offset while it is still inside `..to` (the new end of the
+    /// edit), and otherwise become `GONE`, so they never compare equal to a new
+    /// line. Only infos about to be rebuilt or compared hold such values.
+    fn shift(&mut self, from: usize, to: usize, delta: isize) {
         if delta == 0 {
             return;
         }
         let mv = |x: &mut usize| {
             if *x >= from {
                 *x = (*x as isize + delta) as usize;
+            } else if *x >= to {
+                *x = GONE;
             }
         };
         for info in self.code_blocks.values_mut() {
@@ -268,6 +288,9 @@ impl Blocks {
         let mut state = carried;
         let mut old_state: Option<State> = None;
         let mut agreed = false;
+        // The last line known to carry the carried block's id (its opener or
+        // code above `s` when the scan finds none).
+        let mut carried_last = s.saturating_sub(1);
         let mut i = s;
         while i < n {
             if old_state == Some(state) {
@@ -309,6 +332,9 @@ impl Blocks {
                 classify_line(text)
             };
             state = state_after(&kind);
+            if carried.is_some() && block_id(&kind) == carried {
+                carried_last = i;
+            }
             if i >= e {
                 let old = std::mem::replace(&mut self.kinds[i], kind);
                 old_state = Some(state_after(&old));
@@ -329,6 +355,17 @@ impl Blocks {
             && let Some(info) = self.code_blocks.get_mut(&id)
         {
             info.close = close;
+        }
+        // The carried block is the only one that keeps its id through a
+        // rescan (its open and lang lie above `s`), so only its close can
+        // change under a kept id. When it does, repaint the whole block. If
+        // the scan stopped by agreement inside it, the rest of its lines are
+        // unchanged and its close was restored above, so nothing is added.
+        if let (Some(id), Some(old_close)) = (carried, carried_close)
+            && let Some(info) = self.code_blocks.get(&id)
+            && info.close != old_close
+        {
+            r.repaint.push(info.open..carried_last + 1);
         }
         for id in r.dead_blocks.drain(..) {
             if Some(id) != carried {
@@ -1104,7 +1141,7 @@ mod tests {
         assert_eq!(bl.kind(2), &LineKind::FenceClose { block: id });
         assert_eq!(bl.code_block(id).close, Some(2));
         assert_eq!(bl.kind(3), &LineKind::Paragraph);
-        assert_eq!(changed, 2..4);
+        assert_eq!(changed, 0..4);
         assert_fresh(&b, &bl);
     }
 
@@ -1326,11 +1363,42 @@ mod tests {
         let first = block_of(bl.kind(0)).unwrap();
         let second = block_of(bl.kind(4)).unwrap();
         let changed = set_line(&mut b, &mut bl, 2, "x");
-        assert_eq!(changed, 2..4);
+        // The first block's close changed under its kept id: repaint all of it.
+        assert_eq!(changed, 0..4);
         assert_eq!(bl.kind(3), &LineKind::Code { block: first });
         assert_eq!(bl.code_block(first).close, None);
         assert_eq!(block_of(bl.kind(4)), Some(second));
         assert_eq!(bl.code_block(second).close, Some(6));
+        assert_fresh(&b, &bl);
+    }
+
+    #[test]
+    fn closing_unclosed_fence_far_below_repaints_block() {
+        let (mut b, mut bl) = blocks("para\n```\na\nb\nc\nd\ne\nf");
+        let id = block_of(bl.kind(1)).unwrap();
+        let changed = set_line(&mut b, &mut bl, 7, "```");
+        assert_eq!(bl.code_block(id).close, Some(7));
+        assert_eq!(changed, 1..8, "every line of the block, opener to closer");
+        assert_fresh(&b, &bl);
+    }
+
+    #[test]
+    fn removing_close_repaints_block_to_end() {
+        let (mut b, mut bl) = blocks("```\na\nb\n```\nc");
+        let id = block_of(bl.kind(0)).unwrap();
+        let changed = set_line(&mut b, &mut bl, 3, "x");
+        assert_eq!(bl.code_block(id).close, None);
+        assert_eq!(changed, 0..5);
+        assert_fresh(&b, &bl);
+    }
+
+    #[test]
+    fn changing_fence_language_repaints_block() {
+        let (mut b, mut bl) = blocks("x\n```rust\na\nb\n```\ny");
+        let changed = set_line(&mut b, &mut bl, 1, "```go");
+        let id = block_of(bl.kind(1)).unwrap();
+        assert_eq!(bl.code_block(id).lang.as_deref(), Some("go"));
+        assert_eq!(changed, 1..5);
         assert_fresh(&b, &bl);
     }
 
@@ -1341,7 +1409,7 @@ mod tests {
         assert!(matches!(bl.kind(3), LineKind::Code { .. }));
         let id = block_of(bl.kind(0)).unwrap();
         let changed = set_line(&mut b, &mut bl, 2, "```");
-        assert_eq!(changed, 2..5);
+        assert_eq!(changed, 0..5);
         assert_eq!(bl.kind(2), &LineKind::FenceClose { block: id });
         assert_eq!(bl.code_block(id).close, Some(2));
         assert_eq!(bl.kind(3), &LineKind::Heading(1));
@@ -1355,7 +1423,7 @@ mod tests {
         let id = block_of(bl.kind(0)).unwrap();
         let changed = edit(&mut b, &mut bl, p(1, 1)..p(2, 3), "");
         assert_eq!(b.to_text(), "```\nx\n# h\n- l");
-        assert_eq!(changed, 1..4);
+        assert_eq!(changed, 0..4);
         assert_eq!(bl.kind(2), &LineKind::Code { block: id });
         assert_eq!(bl.code_block(id).close, None);
         assert_fresh(&b, &bl);
@@ -1490,6 +1558,7 @@ mod tests {
 
             let old: Vec<LineKind> = (0..b.line_count()).map(|i| bl.kind(i).clone()).collect();
             let old_tables = bl.tables.clone();
+            let old_code = bl.code_blocks.clone();
             let before = b.line_count();
             let e = b.replace(start..end, text);
             let delta = b.line_count() as isize - before as isize;
@@ -1510,13 +1579,15 @@ mod tests {
                 assert_eq!(bl.kind(i), &old[o], "seed {label} step {step} line {i}");
             }
             // A table whose info changed (after mapping old lines into the new
-            // buffer) must be repainted whole, even when its id was kept.
+            // buffer) must be repainted whole, even when its id was kept. A
+            // line inside the edit keeps its offset while still inside
+            // `edited`, and is otherwise gone.
             let old_e = (edited.end as isize - delta) as usize;
             let map = |x: usize| {
-                if x < edited.start {
-                    Some(x)
-                } else if x >= old_e {
+                if x >= old_e {
                     Some((x as isize + delta) as usize)
+                } else if x < edited.end {
+                    Some(x)
                 } else {
                     None
                 }
@@ -1533,6 +1604,26 @@ mod tests {
                     assert!(
                         changed.start <= info.header && changed.end > info.last,
                         "seed {label} step {step}: table {info:?} was {was:?}, changed {changed:?}"
+                    );
+                }
+            }
+            // Likewise a code block whose open, close or lang changed under a
+            // kept id: every line carrying the id, opener to last, is in range.
+            for (id, info) in &bl.code_blocks {
+                let Some(was) = old_code.get(id) else {
+                    continue;
+                };
+                let same = map(was.open) == Some(info.open)
+                    && was.close.map(map) == info.close.map(Some)
+                    && was.lang == info.lang;
+                if !same {
+                    let mut last = info.open;
+                    while block_of(bl.kind(last + 1)) == Some(*id) {
+                        last += 1;
+                    }
+                    assert!(
+                        changed.start <= info.open && changed.end > last,
+                        "seed {label} step {step}: block {info:?} was {was:?}, changed {changed:?}"
                     );
                 }
             }
