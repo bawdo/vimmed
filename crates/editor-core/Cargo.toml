@@ -5,3 +5,5 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+unicode-segmentation = "1.12"
