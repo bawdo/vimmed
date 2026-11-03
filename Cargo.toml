@@ -8,6 +8,16 @@ members = [
     "crates/launcher",
     "crates/window",
     "xtask",
+    "crates/layout-bench",
+]
+default-members = [
+    "crates/app-meta",
+    "crates/editor-core",
+    "crates/editor-render",
+    "crates/marks",
+    "crates/launcher",
+    "crates/window",
+    "xtask",
 ]
 
 [workspace.package]

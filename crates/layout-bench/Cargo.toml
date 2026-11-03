@@ -1,0 +1,18 @@
+[package]
+name = "layout-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Head-to-head text layout benchmark (cosmic-text against parley); not shipped"
+
+[dependencies]
+cosmic-text = "0.19"
+parley = "0.12"
+# Already in the graph through fontdb. Used so that both libraries see the same font
+# files memory-mapped, rather than one reading them into the heap.
+memmap2 = "0.9"
+
+[features]
+# cosmic-text's stock opt-in shape-run cache, trimmed once per frame inside the timed region.
+run-cache = ["cosmic-text/shape-run-cache"]
