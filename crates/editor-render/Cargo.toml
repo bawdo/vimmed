@@ -11,3 +11,5 @@ editor-core = { path = "../editor-core" }
 # frame through `TextLayout::end_frame`. Default features (std, swash, fontconfig) are kept.
 cosmic-text = { version = "0.19", features = ["shape-run-cache"] }
 tiny-skia = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+marks = { path = "../marks" }

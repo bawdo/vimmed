@@ -13,18 +13,53 @@
 //! (see `layout_cosmic::RUN_CACHE_KEEP_AGES`).
 
 use std::ops::Range;
+use std::path::Path;
 
 use editor_core::buffer::Pos;
-use editor_core::markdown::{BlockDeco, LineDisplay, display_to_src};
+use editor_core::host::Waker;
+use editor_core::markdown::{BlockDeco, LineDisplay, SpanBase, SpanStyle, display_to_src};
+use editor_core::strings::IMAGE_NOT_FOUND;
 use editor_core::tokens::{TokenId, Tokens};
 use editor_core::view_model::{StatusModel, ViewSource};
 
 use crate::damage::Damage;
 use crate::frame::Frame;
+use crate::images::{ImageSlot, ImageState, Images};
 use crate::layout::{LaidLine, RectF, StyledSpan, TextLayout};
 use crate::paint::{
-    blend, content_offset, fill, prefix_text, span_for, src_to_display_clamped, styled_line,
+    blend, content_offset, draw_scaled, fill, prefix_text, span_for, src_to_display_clamped,
+    styled_line,
 };
+
+/// What an image line draws: its reserved box in pixels and the state to
+/// draw it in. The box never changes once the header is read.
+struct ImageLine {
+    src: String,
+    /// Zero when there is no known size (missing file, remote URL).
+    w_px: f32,
+    h_px: f32,
+    state: ImageState,
+}
+
+/// Paints an image line's box (the page is already filled behind it): the
+/// pixels when decoded, else the placeholder fill. Remote links have no box.
+fn paint_image(
+    p: &mut tiny_skia::Pixmap,
+    t: &Tokens,
+    x: f32,
+    top: f32,
+    img: &ImageLine,
+    clip: &Range<f32>,
+) {
+    match &img.state {
+        ImageState::Ready(px) => draw_scaled(p, x, top, img.w_px, img.h_px, px, clip),
+        ImageState::Pending | ImageState::Missing => {
+            let c = t.color(TokenId::ColorImagePlaceholder);
+            fill(p, x, top, img.w_px, img.h_px, c, clip);
+        }
+        ImageState::Remote(_) => {}
+    }
+}
 
 /// A rectangle in points, relative to the frame's top left.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,6 +115,12 @@ struct LineSlot {
     display: Option<LineDisplay>,
     /// The text's offset right of the column's left edge, in pixels.
     offset: f32,
+    /// Set while the line is an image line and images are on. Kept when the
+    /// layouts are forgotten, so a decode can still paint a line scrolled
+    /// back into view.
+    image: Option<ImageLine>,
+    /// The placeholder or link text of an image line that has no pixels yet.
+    label: Option<Cached>,
 }
 
 impl LineSlot {
@@ -90,6 +131,8 @@ impl LineSlot {
             prefix: None,
             display: None,
             offset: 0.0,
+            image: None,
+            label: None,
         }
     }
 
@@ -97,6 +140,7 @@ impl LineSlot {
         self.text = None;
         self.prefix = None;
         self.display = None;
+        self.label = None;
     }
 }
 
@@ -124,6 +168,10 @@ pub struct DocView {
     pub(crate) damage: Damage,
     /// The caret's line and its rectangle in frame pixels, as last painted.
     caret: Option<(usize, RectF)>,
+    /// Present once `set_images` is called.
+    images: Option<Images>,
+    /// True once the first decoded image has been painted (and marked).
+    image_marked: bool,
 }
 
 impl DocView {
@@ -144,6 +192,8 @@ impl DocView {
             last_status: None,
             damage: Damage::new(),
             caret: None,
+            images: None,
+            image_marked: false,
         };
         v.clear_frame();
         v
@@ -324,10 +374,59 @@ impl DocView {
         self.lines.get(i).map(|s| s.height)
     }
 
-    /// Finishes background work (images, Task 34). Returns true when
-    /// something finished and the view needs a repaint. Nothing runs yet.
+    /// Turns images on: local paths resolve against `base_dir`, and `waker`
+    /// is called (from the worker thread) after each decode. Call before the
+    /// first `paint_all`; lines painted earlier pick images up when next laid out.
+    pub fn set_images(&mut self, base_dir: &Path, waker: Waker) {
+        self.images = Some(Images::new(base_dir, waker));
+    }
+
+    /// Takes finished image decodes and paints them into the space their
+    /// lines already reserved: no relayout. Returns true when rows were
+    /// damaged; the shell then copies `take_damage()` to the screen.
     pub fn poll_async(&mut self) -> bool {
-        false
+        let changed = match self.images.as_mut() {
+            Some(images) => images.poll(),
+            None => return false,
+        };
+        let g = self.geo();
+        let mut any = false;
+        for i in changed {
+            let Some(src) = self
+                .lines
+                .get(i)
+                .and_then(|s| s.image.as_ref())
+                .map(|m| m.src.clone())
+            else {
+                continue;
+            };
+            let slot = self.images.as_ref().and_then(|im| im.slot_of(&src));
+            let Some(ImageSlot { state, .. }) = slot else {
+                continue;
+            };
+            if let Some(img) = self.lines[i].image.as_mut() {
+                img.state = state;
+            }
+            let h = self.lines[i].height;
+            let top = self.line_top(i);
+            if top >= g.text_bottom || top + h <= 0.0 {
+                continue;
+            }
+            let clip = top.max(0.0)..(top + h).min(g.text_bottom);
+            let bg = self.tokens.color(TokenId::ColorBg);
+            fill(&mut self.frame.pixmap, g.col_x, top, g.col_w, h, bg, &clip);
+            if let Some(img) = &self.lines[i].image {
+                let (pix, t) = (&mut self.frame.pixmap, &self.tokens);
+                paint_image(pix, t, g.col_x, top, img, &clip);
+                if matches!(img.state, ImageState::Ready(_)) && !self.image_marked {
+                    self.image_marked = true;
+                    marks::mark(marks::names::IMAGES_PAINTED);
+                }
+            }
+            self.damage.add(rows(top, h, g.text_bottom));
+            any = true;
+        }
+        any
     }
 
     pub(crate) fn geo(&self) -> Geo {
@@ -428,6 +527,55 @@ impl DocView {
             }
             None => slot.prefix = None,
         }
+        slot.image = None;
+        match (&d.deco, self.images.as_mut()) {
+            (BlockDeco::Image { src, alt }, Some(images)) => {
+                images.set_limits(
+                    t.px(TokenId::SpaceColumn),
+                    t.px(TokenId::SizeImageMaxHeight),
+                );
+                let r = images.reserve(i, src);
+                let known = r.w_pt > 0.0;
+                let mut link = false;
+                let label = match &r.state {
+                    ImageState::Ready(_) => None,
+                    ImageState::Pending => (!alt.is_empty()).then(|| alt.clone()),
+                    ImageState::Missing if alt.is_empty() => Some(IMAGE_NOT_FOUND.to_owned()),
+                    ImageState::Missing => Some(alt.clone()),
+                    ImageState::Remote(url) => {
+                        link = true;
+                        Some(if alt.is_empty() {
+                            url.clone()
+                        } else {
+                            format!("{alt} {url}")
+                        })
+                    }
+                };
+                match label {
+                    Some(text) => {
+                        let mut style = SpanStyle::plain(SpanBase::Body);
+                        style.link = link;
+                        let span = span_for(&style, 0..text.len(), t, s);
+                        lay(layout, &mut slot.label, text, vec![span], width);
+                    }
+                    None => slot.label = None,
+                }
+                let label_h = slot.label.as_ref().map_or(0.0, |c| c.laid.height.ceil());
+                let (w_px, h_px) = if known {
+                    ((r.w_pt * s).round(), (r.h_pt * s).ceil())
+                } else {
+                    (width, slot.height.max(label_h))
+                };
+                slot.height = h_px;
+                slot.image = Some(ImageLine {
+                    src: src.clone(),
+                    w_px,
+                    h_px,
+                    state: r.state,
+                });
+            }
+            _ => slot.label = None,
+        }
         slot.display = Some(d);
         slot.height
     }
@@ -526,10 +674,19 @@ impl DocView {
                 let y = (top + (h - w) / 2.0).round();
                 fill(pix, cx, y, cw, w, t.color(TokenId::ColorRule), &clip);
             }
-            BlockDeco::Image { .. } => {
-                let c = t.color(TokenId::ColorImagePlaceholder);
-                fill(pix, cx, top, cw, h, c, &clip);
-            }
+            BlockDeco::Image { .. } => match &slot.image {
+                Some(img) => {
+                    paint_image(pix, t, cx, top, img, &clip);
+                    if matches!(img.state, ImageState::Ready(_)) && !self.image_marked {
+                        self.image_marked = true;
+                        marks::mark(marks::names::IMAGES_PAINTED);
+                    }
+                }
+                None => {
+                    let c = t.color(TokenId::ColorImagePlaceholder);
+                    fill(pix, cx, top, cw, h, c, &clip);
+                }
+            },
             BlockDeco::None | BlockDeco::TableRow { .. } => {}
         }
 
@@ -557,6 +714,11 @@ impl DocView {
         }
         self.layout
             .draw(laid, &mut |m| blend(pix, ox, oy, &m, &rows));
+        if let Some(l) = &slot.label {
+            let lx = cx as i32;
+            self.layout
+                .draw(&l.laid, &mut |m| blend(pix, lx, oy, &m, &rows));
+        }
 
         if self.caret.is_some_and(|(l, _)| l == i) {
             self.caret = None;

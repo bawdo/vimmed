@@ -10,3 +10,6 @@ pub const UNTITLED: &str = "Untitled";
 
 /// Shown when a file exists but could not be read, so it opened empty.
 pub const READ_FAILED: &str = "Couldn't read the file, so it opened empty";
+
+/// Shown in an image placeholder when the file is missing and the image has no alt text.
+pub const IMAGE_NOT_FOUND: &str = "image not found";

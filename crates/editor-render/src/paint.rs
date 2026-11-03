@@ -6,7 +6,9 @@ use std::ops::Range;
 
 use editor_core::markdown::{LineDisplay, Prefix, SpanBase, SpanStyle};
 use editor_core::tokens::{Rgba, TokenId, Tokens};
-use tiny_skia::{Paint, Pixmap, Rect, Transform};
+use tiny_skia::{
+    FillRule, FilterQuality, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Transform,
+};
 
 use crate::layout::{FontRole, GlyphMask, MaskData, StyledSpan};
 
@@ -20,6 +22,49 @@ fn heading_size(n: u8) -> TokenId {
         5 => TokenId::FontSizeH5,
         _ => TokenId::FontSizeH6,
     }
+}
+
+/// Draws `src` scaled to the `w` by `h` pixel box at `x, y`, only inside the
+/// rows `clip`. The source is premultiplied, so transparency blends correctly.
+pub fn draw_scaled(
+    p: &mut Pixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    src: &Pixmap,
+    clip: &Range<f32>,
+) {
+    let (y0, y1) = (y.max(clip.start), (y + h).min(clip.end));
+    let (x0, x1) = (x.max(0.0), (x + w).min(p.width() as f32));
+    if y1 <= y0 || x1 <= x0 || src.width() == 0 || src.height() == 0 {
+        return;
+    }
+    let Some(rect) = Rect::from_ltrb(x0, y0, x1, y1) else {
+        return;
+    };
+    let Some(mut mask) = Mask::new(p.width(), p.height()) else {
+        return;
+    };
+    mask.fill_path(
+        &PathBuilder::from_rect(rect),
+        FillRule::Winding,
+        false,
+        Transform::identity(),
+    );
+    let paint = PixmapPaint {
+        quality: FilterQuality::Bilinear,
+        ..PixmapPaint::default()
+    };
+    let (sx, sy) = (w / src.width() as f32, h / src.height() as f32);
+    p.draw_pixmap(
+        0,
+        0,
+        src.as_ref(),
+        &paint,
+        Transform::from_row(sx, 0.0, 0.0, sy, x, y),
+        Some(&mask),
+    );
 }
 
 /// The styled span for `style` over display bytes `range`, at `scale`.
