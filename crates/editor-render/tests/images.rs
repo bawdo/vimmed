@@ -199,6 +199,36 @@ fn translucent_image_blends_with_the_page() {
 }
 
 #[test]
+fn scrolled_off_images_release_their_pixmaps_and_keep_heights() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    write_png(dir.path(), "img1.png", 1200, 700);
+    let (w, _) = waker();
+    let mut lines: Vec<String> = vec!["alpha".into(), "![pic](img1.png)".into()];
+    lines.extend((0..200).map(|i| format!("line {i}")));
+    let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    let src = Fake::new(&refs, t.clone());
+    let mut v = view(&t, 2.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    until("the image to decode", || v.poll_async());
+    assert!(v.has_scaled_image(1), "on screen and decoded");
+    let height = v.line_height_px(1).unwrap();
+
+    assert!(v.scroll_to_cursor(editor_core::buffer::Pos { line: 190, col: 0 }));
+    v.paint_all(&src);
+    assert!(!v.has_scaled_image(1), "off screen holds no resampled copy");
+    assert_eq!(v.line_height_px(1), Some(height), "measured height kept");
+
+    assert!(v.scroll_to_cursor(editor_core::buffer::Pos { line: 0, col: 0 }));
+    v.paint_all(&src);
+    assert!(v.has_scaled_image(1), "back on screen it is resampled");
+    let top = (t.px(TokenId::SpacePageTop) * 2.0).round() + v.line_height_px(0).unwrap();
+    let px = pixel(&v, W_PT as usize, (top + height / 2.0) as usize);
+    assert!(px[0] > 150 && px[1] < 80, "painted again, got {px:?}");
+}
+
+#[test]
 fn remote_url_never_fetches() {
     let dir = TempDir::new();
     let (w, woken) = waker();

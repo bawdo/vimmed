@@ -175,6 +175,12 @@ impl LineSlot {
         self.prefix = None;
         self.display = None;
         self.label = None;
+        // The resampled copy is box-sized: keep memory bounded by the screen.
+        // The image line itself stays, so its height and a later decode survive.
+        if let Some(img) = self.image.as_mut() {
+            img.scaled = None;
+            img.opaque = false;
+        }
     }
 }
 
@@ -403,6 +409,15 @@ impl DocView {
         self.lines.get(i).is_some_and(|s| s.text.is_some())
     }
 
+    /// True when image line `i` holds its resampled copy of the image (it is
+    /// on screen and decoded). Off-screen lines release it.
+    pub fn has_scaled_image(&self, i: usize) -> bool {
+        self.lines
+            .get(i)
+            .and_then(|s| s.image.as_ref())
+            .is_some_and(|m| m.scaled.is_some())
+    }
+
     /// Line `i`'s height in pixels: measured once shaped, estimated before.
     pub fn line_height_px(&self, i: usize) -> Option<f32> {
         self.lines.get(i).map(|s| s.height)
@@ -440,12 +455,14 @@ impl DocView {
             };
             if let Some(img) = self.lines[i].image.as_mut() {
                 img.state = state;
-                img.ensure_scaled();
             }
             let h = self.lines[i].height;
             let top = self.line_top(i);
             if top >= g.text_bottom || top + h <= 0.0 {
                 continue;
+            }
+            if let Some(img) = self.lines[i].image.as_mut() {
+                img.ensure_scaled();
             }
             let clip = top.max(0.0)..(top + h).min(g.text_bottom);
             let bg = self.tokens.color(TokenId::ColorBg);
