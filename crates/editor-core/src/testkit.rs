@@ -100,6 +100,22 @@ pub(crate) fn ed(text: &str) -> Editor {
     build(text, Config::default(), false)
 }
 
+/// A vim editor on `text` in reader mode.
+pub(crate) fn build_reader(text: &str) -> Editor {
+    Editor::build(
+        OpenRequest {
+            view: true,
+            ..req("notes.md")
+        },
+        text,
+        None,
+        Config::default(),
+        Platform::Mac,
+        Box::new(FakeHost::default()),
+        false,
+    )
+}
+
 /// Like `ed`, with a handle on the editor's host.
 pub(crate) fn ed_with_host(text: &str) -> (Editor, FakeHost) {
     build_with_host(text, Config::default(), false)

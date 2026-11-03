@@ -10,6 +10,11 @@
 //! typed or from an operator, goes through `EditCtx::replace`, which records
 //! it in the history.
 //!
+//! Undo groups: each Normal-mode command is one undo step, and an Insert
+//! session is one step from its entry key (with the line `o` opens or the
+//! text `c` deletes) to Esc. An arrow key inside the session ends the step
+//! and starts another, as in vim.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
@@ -35,6 +40,7 @@ use crate::undo::History;
 use crate::view_model::{Selection, StatusModel, ViewSource};
 use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator, Touched};
 use crate::vim::register::{Register, Registers};
+use crate::vim::repeat::Change;
 use crate::vim::{self, Cursor, Step, Vim, Want};
 
 /// What to open.
@@ -225,9 +231,14 @@ impl Editor {
         self.registers.get(name)
     }
 
-    /// Every change made so far.
+    /// The undo history.
     pub fn history(&self) -> &History {
         &self.history
+    }
+
+    /// The change `.` repeats.
+    pub fn last_change(&self) -> Option<&Change> {
+        self.vim.last_change()
     }
 
     pub fn dirty(&self) -> bool {
@@ -269,7 +280,15 @@ impl Editor {
         } else {
             k
         };
-        if k.mods.ctrl || self.platform.primary(k.mods) {
+        let redo = self.cfg.vim
+            && self.mode == Mode::Normal
+            && k.key == Key::Char('r')
+            && k.mods
+                == Mods {
+                    ctrl: true,
+                    ..Mods::default()
+                };
+        if (k.mods.ctrl || self.platform.primary(k.mods)) && !redo {
             // Shortcuts arrive with later tasks.
             return Effects::default();
         }
@@ -281,6 +300,17 @@ impl Editor {
                 // Later tasks build the other modes; nothing enters them yet.
                 _ => return Effects::default(),
             }
+        }
+        let arrow = matches!(
+            k.key,
+            Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End
+        );
+        if self.cfg.vim && arrow {
+            // Vim: moving in Insert ends the undo step and the change `.`
+            // repeats, and starts new ones.
+            self.history.end(self.cursor);
+            self.history.begin(self.cursor);
+            self.vim.arrowed();
         }
         let line = self.buf.line(self.cursor.line);
         let col = self.buf.clamp(self.cursor).col;
@@ -323,8 +353,25 @@ impl Editor {
         }
     }
 
-    /// Carries out what the vim engine makes of a Normal-mode key.
+    /// Carries out what the vim engine makes of a Normal-mode key, as one
+    /// undo step. A key that enters Insert leaves the step open until Esc,
+    /// and the change it starts waits for Esc to become the one `.`
+    /// repeats.
     fn normal_key(&mut self, k: KeyEvent) -> Effects {
+        self.history.begin(self.cursor);
+        let fx = self.normal_step(k);
+        if self.mode != Mode::Insert {
+            self.history.end(self.cursor);
+        }
+        if self.reader {
+            self.vim.discard();
+        } else if self.mode == Mode::Normal {
+            self.vim.commit();
+        }
+        fx
+    }
+
+    fn normal_step(&mut self, k: KeyEvent) -> Effects {
         let cur = Cursor {
             pos: self.cursor,
             want: self.goal.unwrap_or_else(|| {
@@ -349,25 +396,59 @@ impl Editor {
                 self.mode = Mode::Insert;
                 self.move_across(p)
             }
-            Step::Open { above } => {
-                let line = self.cursor.line;
-                let at = if above {
-                    Pos { line, col: 0 }
-                } else {
-                    self.line_end(line)
-                };
-                self.mode = Mode::Insert;
-                let fx = self.edit(at..at, "\n");
-                if above {
-                    // The edit leaves the cursor after the break.
-                    let back = self.move_to(Pos { line, col: 0 });
-                    return fx.merge(back);
-                }
-                fx
-            }
+            Step::Open { above } => self.run(|ctx| operator::open_line(ctx, above)),
             Step::Operate { op, range } => self.operate(op, range),
             Step::Put { before, count } => self.put(before, count),
+            Step::Undo { count } => self.undo(false, count),
+            Step::Redo { count } => self.undo(true, count),
+            Step::Repeat { count } => self.repeat(count),
         }
+    }
+
+    /// Undoes (or, with `redo`, redoes) up to `count` steps and puts the
+    /// cursor where the last one says, on a grapheme where Normal mode may
+    /// rest. With nothing to undo it does nothing.
+    fn undo(&mut self, redo: bool, count: usize) -> Effects {
+        if self.reader {
+            return Effects::default();
+        }
+        let mut at = None;
+        for _ in 0..count.max(1) {
+            let step = if redo {
+                self.history.redo(&mut self.buf)
+            } else {
+                self.history.undo(&mut self.buf)
+            };
+            match step {
+                Some(p) => at = Some(p),
+                None => break,
+            }
+        }
+        let Some(at) = at else {
+            return Effects::default();
+        };
+        // A step can touch many places, so rebuild and repaint it all.
+        self.blocks = Blocks::new(&self.buf);
+        self.cursor = vim::rest(&self.buf, at);
+        self.goal = None;
+        let was_dirty = std::mem::replace(&mut self.dirty, true);
+        Effects {
+            redraw: Redraw::All,
+            dirty: (!was_dirty).then_some(true),
+            scroll_to_cursor: true,
+            ..Effects::default()
+        }
+    }
+
+    /// `.`: replays the last change at the cursor.
+    fn repeat(&mut self, count: Option<usize>) -> Effects {
+        if self.reader {
+            return Effects::default();
+        }
+        let mut vim = std::mem::take(&mut self.vim);
+        let fx = self.run(|ctx| vim.repeat(ctx, count));
+        self.vim = vim;
+        fx
     }
 
     /// Applies an operator. Reader mode only yanks.
@@ -403,11 +484,15 @@ impl Editor {
         fx
     }
 
-    /// Esc in Insert: back to Normal, one grapheme left.
+    /// Esc in Insert: back to Normal, one grapheme left. The session's
+    /// undo step and change end here.
     fn leave_insert(&mut self) -> Effects {
         self.mode = Mode::Normal;
         self.vim.reset();
-        self.move_across(vim::leave_insert(&self.buf, self.cursor))
+        let fx = self.move_across(vim::leave_insert(&self.buf, self.cursor));
+        self.history.end(self.cursor);
+        self.vim.commit();
+        fx
     }
 
     /// A position on the cursor's line.
@@ -427,6 +512,9 @@ impl Editor {
 
     fn insert(&mut self, text: &str) -> Effects {
         let at = self.buf.clamp(self.cursor);
+        if !self.reader {
+            self.vim.typed(text);
+        }
         self.edit(at..at, text)
     }
 
@@ -442,6 +530,9 @@ impl Editor {
         } else {
             return Effects::default();
         };
+        if !self.reader {
+            self.vim.backspaced();
+        }
         self.edit(from..c, "")
     }
 
@@ -485,6 +576,7 @@ impl Editor {
     /// what changed.
     fn run(&mut self, f: impl FnOnce(&mut EditCtx) -> OpOutcome) -> Effects {
         let old = self.reveal_extent(self.cursor.line);
+        self.history.begin(self.cursor);
         let mut ctx = EditCtx::new(
             &mut self.buf,
             self.cursor,
@@ -497,7 +589,9 @@ impl Editor {
         if out.insert {
             self.mode = Mode::Insert;
         }
-        self.finish(old, &touched, out.cursor)
+        let fx = self.finish(old, &touched, out.cursor);
+        self.history.end(self.cursor);
+        fx
     }
 
     /// After the edits in `touched`: updates the blocks, puts the cursor at

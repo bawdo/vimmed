@@ -14,7 +14,7 @@ use std::ops::Range;
 use crate::buffer::{Buffer, Edit, Pos};
 use crate::grapheme;
 use crate::host::Host;
-use crate::undo::{Change, History};
+use crate::undo::{self, History};
 use crate::vim::motion::{self, Motion, MotionKind};
 use crate::vim::register::{Register, Registers};
 use crate::vim::{Cursor, rest};
@@ -273,13 +273,8 @@ impl<'a> EditCtx<'a> {
         let old_end_line = r.end.line.min(before - 1);
         let inverse = self.buf.replace(r, text);
         let delta = self.buf.line_count() as isize - before as isize;
-        self.history.record(Change {
-            range: inverse.range.clone(),
-            removed: inverse.text.clone(),
-            inserted: text.replace("\r\n", "\n"),
-            cursor_before: self.cursor,
-            cursor_after: inverse.range.end,
-        });
+        self.history
+            .record(inverse.clone(), undo::forward(&inverse, text));
         self.cursor = inverse.range.end;
         self.touched.push(Touched {
             start_line: inverse.range.start.line,
@@ -290,13 +285,9 @@ impl<'a> EditCtx<'a> {
         inverse
     }
 
-    /// Moves the cursor; after an edit, the history remembers it as where
-    /// that edit left the cursor.
+    /// Moves the cursor to where the command leaves it.
     pub fn place(&mut self, pos: Pos) {
         self.cursor = pos;
-        if !self.touched.is_empty() {
-            self.history.set_cursor_after(pos);
-        }
     }
 
     /// The edits made through this context, oldest first.
@@ -427,6 +418,34 @@ fn linewise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
     OpOutcome {
         cursor,
         insert: op == Operator::Change,
+    }
+}
+
+/// `o` (below the cursor's line) and `O` (above): opens a plain empty line
+/// and leaves the cursor on it, in Insert.
+pub fn open_line(ctx: &mut EditCtx, above: bool) -> OpOutcome {
+    let line = ctx.buf.clamp(ctx.cursor).line;
+    let at = if above {
+        Pos { line, col: 0 }
+    } else {
+        Pos {
+            line,
+            col: ctx.buf.line(line).len(),
+        }
+    };
+    ctx.replace(at..at, "\n");
+    let cursor = if above {
+        Pos { line, col: 0 }
+    } else {
+        Pos {
+            line: line + 1,
+            col: 0,
+        }
+    };
+    ctx.place(cursor);
+    OpOutcome {
+        cursor,
+        insert: true,
     }
 }
 
@@ -930,7 +949,7 @@ mod tests {
             assert_eq!(e.register(None).unwrap().text, "hello ");
             assert_eq!(e.text().lines().next(), Some(want), "{seq}");
             // The put went into the history (moon_edit: canUndo).
-            assert_eq!(e.history().changes().len(), 1);
+            assert_eq!(e.history().undo_len(), 1);
         }
     }
 
@@ -1042,11 +1061,10 @@ mod tests {
         keys(&mut e, "1<Esc>");
         assert_eq!(e.text(), "1 two");
         assert_eq!(e.mode(), Mode::Normal);
-        // The change and the typing are both in the history.
-        let h = e.history().changes();
-        assert_eq!(h.len(), 2);
-        assert_eq!(h[0].removed, "one");
-        assert_eq!(h[1].inserted, "1");
+        // The change and the typing are one undo step (owner decision 3).
+        assert_eq!(e.history().undo_len(), 1);
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "one two");
     }
 
     #[test]
@@ -1145,12 +1163,11 @@ mod tests {
     fn edits_are_recorded_in_the_history() {
         let mut e = ed("abc");
         keys(&mut e, "lx");
-        let h = e.history().changes();
-        assert_eq!(h.len(), 1);
-        assert_eq!(h[0].removed, "b");
-        assert_eq!(h[0].cursor_before, pos(0, 1));
-        assert_eq!(h[0].cursor_after, pos(0, 1));
+        assert_eq!(e.history().undo_len(), 1);
         keys(&mut e, "yy");
-        assert_eq!(e.history().changes().len(), 1);
+        assert_eq!(e.history().undo_len(), 1);
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "abc");
+        assert_eq!(e.cursor(), pos(0, 1));
     }
 }

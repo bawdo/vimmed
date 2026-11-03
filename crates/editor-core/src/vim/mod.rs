@@ -5,16 +5,20 @@
 //! command (count, operator, `g` prefix), decides what each key means, and
 //! hands back a `Step` for the editor to carry out on its buffer (operators
 //! through `operator::operate` and `operator::put`). Insert-mode typing
-//! stays on the editor's own path.
+//! stays on the editor's own path, which tells the engine what was typed so
+//! `.` can repeat it (`repeat`).
 
 pub mod count;
 pub mod motion;
 pub mod operator;
 pub mod register;
+pub mod repeat;
 
 use crate::buffer::{Buffer, Pos};
 use crate::grapheme;
 use crate::input::{Key, KeyEvent};
+use crate::vim::operator::{EditCtx, OpOutcome};
+use crate::vim::repeat::Change;
 
 pub use count::Count;
 pub use motion::{Motion, MotionKind, MotionResult};
@@ -75,6 +79,13 @@ pub enum Step {
     Operate { op: Operator, range: OpRange },
     /// Put the clipboard `count` times (`operator::put`): `P` before.
     Put { before: bool, count: usize },
+    /// Undo `count` steps (`u`).
+    Undo { count: usize },
+    /// Redo `count` steps (Ctrl+R).
+    Redo { count: usize },
+    /// Repeat the last change (`.`), with a new count if one was typed
+    /// (`Vim::repeat`).
+    Repeat { count: Option<usize> },
 }
 
 /// The Normal-mode command being typed.
@@ -85,6 +96,11 @@ pub struct Vim {
     op: Option<Operator>,
     /// `g`, waiting for its second key.
     prefix: Option<char>,
+    /// The change the latest command made, until it is done: an Insert
+    /// session's change is done at Esc.
+    pending: Option<Change>,
+    /// The change `.` repeats.
+    last: Option<Change>,
 }
 
 impl Vim {
@@ -106,9 +122,73 @@ impl Vim {
         s
     }
 
-    /// Forgets the pending command.
+    /// Forgets the pending command (not the change `.` repeats).
     pub fn reset(&mut self) {
-        *self = Vim::default();
+        self.count = Count::default();
+        self.op = None;
+        self.prefix = None;
+    }
+
+    /// The change `.` repeats.
+    pub fn last_change(&self) -> Option<&Change> {
+        self.last.as_ref()
+    }
+
+    /// The command that made the pending change is done: it becomes the
+    /// change `.` repeats.
+    pub fn commit(&mut self) {
+        if let Some(c) = self.pending.take() {
+            self.last = Some(c);
+        }
+    }
+
+    /// Forgets the pending change (the command made none, as in reader
+    /// mode).
+    pub fn discard(&mut self) {
+        self.pending = None;
+    }
+
+    /// Text typed in the Insert session of the pending change.
+    pub fn typed(&mut self, text: &str) {
+        if let Some(t) = self.pending.as_mut().and_then(Change::text_mut) {
+            t.push_str(&text.replace("\r\n", "\n"));
+        }
+    }
+
+    /// Backspace in the Insert session: the last grapheme typed goes. Text
+    /// from before the session is not the change's, so past its start
+    /// nothing changes.
+    pub fn backspaced(&mut self) {
+        if let Some(t) = self.pending.as_mut().and_then(Change::text_mut) {
+            t.truncate(grapheme::prev(t, t.len()));
+        }
+    }
+
+    /// An arrow key in the Insert session: as in vim, what is typed from
+    /// here is a fresh insert at the new position.
+    pub fn arrowed(&mut self) {
+        if self.pending.is_some() {
+            self.pending = Some(Change::Insert {
+                entry: 'i',
+                text: String::new(),
+            });
+        }
+    }
+
+    /// Replays the last change at `ctx.cursor`. A `count` replaces the
+    /// recorded one, for this and later repeats. With no change recorded
+    /// it does nothing.
+    pub fn repeat(&mut self, ctx: &mut EditCtx, count: Option<usize>) -> OpOutcome {
+        let Some(change) = self.last.as_mut() else {
+            return OpOutcome {
+                cursor: ctx.cursor,
+                insert: false,
+            };
+        };
+        if let Some(n) = count {
+            change.set_count(n);
+        }
+        repeat::replay(ctx, change)
     }
 
     /// Handles one Normal-mode key for a cursor at `cur` in `buf`. Esc (and
@@ -116,6 +196,7 @@ impl Vim {
     /// A key that completes nothing clears it too, count included.
     pub fn key(&mut self, k: &KeyEvent, buf: &Buffer, cur: Cursor) -> Step {
         let m = match k.key {
+            Key::Char(c) if k.mods.ctrl => return self.ctrl(c),
             Key::Char(c) => return self.char(c, buf, cur),
             Key::Left => Motion::Left,
             Key::Right => Motion::Right,
@@ -138,6 +219,18 @@ impl Vim {
             }
         };
         self.motion(m, buf, cur)
+    }
+
+    /// Ctrl and a char: Ctrl+R redoes; nothing else means anything yet.
+    fn ctrl(&mut self, c: char) -> Step {
+        let plain = self.op.is_none() && self.prefix.is_none();
+        let count = self.count.effective();
+        self.reset();
+        if c == 'r' && plain {
+            Step::Redo { count }
+        } else {
+            Step::Pending
+        }
     }
 
     fn char(&mut self, c: char, buf: &Buffer, cur: Cursor) -> Step {
@@ -177,20 +270,31 @@ impl Vim {
                 self.prefix = Some('g');
                 return Step::Pending;
             }
-            // `D` is `d$` and `C` is `c$`, counts and all.
+            // `D` is `d$` and `C` is `c$`, counts and all. Without a count
+            // they record as themselves.
             'D' | 'C' if !after_op => {
+                let given = self.count.given();
                 self.op = Some(if c == 'D' {
                     Operator::Delete
                 } else {
                     Operator::Change
                 });
-                Motion::LineEnd
+                let step = self.motion(Motion::LineEnd, buf, cur);
+                if !given && self.pending.is_some() {
+                    self.pending = Some(if c == 'D' {
+                        Change::CapD
+                    } else {
+                        Change::CapC(String::new())
+                    });
+                }
+                return step;
             }
             'd' | 'c' | 'y' => return self.operator_key(c, buf, cur),
             'x' if !after_op => {
                 let count = self.count.effective();
                 self.reset();
                 return OpRange::chars(buf, cur.pos, count).map_or(Step::Pending, |range| {
+                    self.pending = Some(Change::X(count));
                     Step::Operate {
                         op: Operator::Delete,
                         range,
@@ -200,6 +304,10 @@ impl Vim {
             'p' | 'P' if !after_op => {
                 let count = self.count.effective();
                 self.reset();
+                self.pending = Some(Change::Put {
+                    after: c == 'p',
+                    count,
+                });
                 return Step::Put {
                     before: c == 'P',
                     count,
@@ -208,7 +316,21 @@ impl Vim {
             'i' | 'a' | 'A' | 'I' | 'o' | 'O' if !after_op => {
                 // The count is not used: inserting it N times is not built.
                 self.reset();
+                self.pending = Some(Change::Insert {
+                    entry: c,
+                    text: String::new(),
+                });
                 return insert_entry(c, buf, cur.pos);
+            }
+            'u' if !after_op => {
+                let count = self.count.effective();
+                self.reset();
+                return Step::Undo { count };
+            }
+            '.' if !after_op => {
+                let count = self.count.given().then(|| self.count.effective());
+                self.reset();
+                return Step::Repeat { count };
             }
             _ => {
                 self.reset();
@@ -233,6 +355,13 @@ impl Vim {
             Some(pending) if pending == op => {
                 let count = self.count.effective();
                 self.reset();
+                if op != Operator::Yank {
+                    self.pending = Some(Change::Line {
+                        op,
+                        count,
+                        inserted: (op == Operator::Change).then(String::new),
+                    });
+                }
                 Step::Operate {
                     op,
                     range: OpRange::lines(buf, cur.pos.line, count),
@@ -251,8 +380,18 @@ impl Vim {
         self.reset();
         if let Some(op) = op {
             // A failed motion leaves the operator nothing to act on.
-            return OpRange::from_motion(op, m, buf, cur, count)
-                .map_or(Step::Pending, |range| Step::Operate { op, range });
+            let Some(range) = OpRange::from_motion(op, m, buf, cur, count) else {
+                return Step::Pending;
+            };
+            if op != Operator::Yank {
+                self.pending = Some(Change::Op {
+                    op,
+                    motion: m,
+                    count,
+                    inserted: (op == Operator::Change).then(String::new),
+                });
+            }
+            return Step::Operate { op, range };
         }
         let r = motion::apply(m, buf, cur, count);
         let pos = rest(buf, r.cursor.pos);
@@ -286,19 +425,26 @@ pub fn leave_insert(buf: &Buffer, pos: Pos) -> Pos {
 
 /// `i a A I o O`: where Insert starts.
 fn insert_entry(c: char, buf: &Buffer, pos: Pos) -> Step {
+    match c {
+        'o' => Step::Open { above: false },
+        'O' => Step::Open { above: true },
+        _ => Step::Insert(insert_at(c, buf, pos)),
+    }
+}
+
+/// Where `i`, `a`, `A` or `I` (any other char) starts Insert for a cursor
+/// at `pos`.
+pub fn insert_at(c: char, buf: &Buffer, pos: Pos) -> Pos {
     let p = buf.clamp(pos);
     let line = buf.line(p.line);
     let col = match c {
-        'i' => p.col,
         'a' => grapheme::next(line, p.col),
         'A' => line.len(),
         // On a blank line, after the blanks.
         'I' => motion::first_non_blank(line).unwrap_or(line.len()),
-        'o' => return Step::Open { above: false },
-        // `O`, the only key left.
-        _ => return Step::Open { above: true },
+        _ => p.col,
     };
-    Step::Insert(Pos { col, ..p })
+    Pos { col, ..p }
 }
 
 #[cfg(test)]
