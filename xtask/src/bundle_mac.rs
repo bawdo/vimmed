@@ -20,7 +20,7 @@ pub fn app_dir(root: &Path) -> PathBuf {
         .join(format!("{}.app", app_meta::BUNDLE_NAME))
 }
 
-fn target_dir(root: &Path) -> PathBuf {
+pub fn target_dir(root: &Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .map(|p| if p.is_absolute() { p } else { root.join(p) })

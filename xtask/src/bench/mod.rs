@@ -77,6 +77,8 @@ pub struct Args {
     pub renderer: Renderer,
     pub out: Option<PathBuf>,
     pub bin: Option<PathBuf>,
+    /// The document to open; `None` means the fixture.
+    pub file: Option<PathBuf>,
 }
 
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -84,6 +86,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut renderer = Renderer::Default;
     let mut out = None;
     let mut bin = None;
+    let mut file = None;
     let mut runs = 20usize;
     let mut keys = 500usize;
     let mut first_run = false;
@@ -102,6 +105,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             (_, "--out") => out = Some(PathBuf::from(val("--out")?)),
             (_, "--bin") => bin = Some(PathBuf::from(val("--bin")?)),
+            (_, "--file") => file = Some(PathBuf::from(val("--file")?)),
             ("start", "--runs") => {
                 runs = val("--runs")?
                     .parse()
@@ -137,6 +141,7 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
         renderer,
         out,
         bin,
+        file,
     })
 }
 
@@ -232,17 +237,36 @@ pub fn env_report(platform: Platform) -> String {
     s
 }
 
-/// The launcher to run: on macOS the one inside the bundle that
+/// The launcher to run, under the target directory (`CARGO_TARGET_DIR`
+/// honoured): on macOS the one inside the bundle that
 /// `cargo xtask bundle-mac --release` writes, so the window it starts is the
 /// bundle executable. `--bin PATH` overrides it.
-fn default_launcher(platform: Platform) -> PathBuf {
+fn default_launcher(platform: Platform, root: &Path) -> PathBuf {
     match platform {
-        Platform::Linux => PathBuf::from("target/release/launcher"),
-        Platform::Macos => PathBuf::from("target/dist")
-            .join(format!("{}.app", app_meta::BUNDLE_NAME))
+        Platform::Linux => crate::bundle_mac::target_dir(root).join("release/launcher"),
+        Platform::Macos => crate::bundle_mac::app_dir(root)
             .join("Contents/MacOS")
             .join(app_meta::SLUG),
     }
+}
+
+/// The fixture the bench opens unless `--file` names another document.
+pub const FIXTURE: &str = "target/fixture/test.md";
+
+/// The document a run opens: `over`, or the fixture under `root`. Fails
+/// before anything is spawned when it doesn't exist.
+pub fn bench_file(root: &Path, over: Option<&Path>) -> Result<PathBuf, String> {
+    let file = over.map_or_else(|| root.join(FIXTURE), Path::to_path_buf);
+    if file.is_file() {
+        return Ok(file);
+    }
+    Err(match over {
+        Some(_) => format!("--file {}: no such file", file.display()),
+        None => format!(
+            "{} not found: run `cargo xtask fixture` first, or pass --file PATH",
+            file.display()
+        ),
+    })
 }
 
 /// Seam: the font path cache location, deleted by `--first-run`. Must match the
@@ -262,6 +286,7 @@ fn run_once(
     args: &Args,
     platform: Platform,
     bin: &Path,
+    file: &Path,
     log: &Path,
 ) -> Result<BTreeMap<String, Vec<f64>>, String> {
     let _ = std::fs::remove_file(log);
@@ -278,6 +303,7 @@ fn run_once(
         let _ = std::io::stdin().lock().read_line(&mut line);
     }
     let mut cmd = Command::new(bin);
+    cmd.arg(file);
     cmd.env(env_name("MARKS"), log)
         .env(env_name("BENCH"), args.bench_env());
     if platform == Platform::Linux {
@@ -400,10 +426,10 @@ fn stamp() -> String {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask bench start [--runs 20] [--renderer default|gl|cairo] [--first-run] [--out DIR] [--bin PATH]"
+        "usage: cargo xtask bench start [--runs 20] [--renderer default|gl|cairo] [--first-run] [--out DIR] [--bin PATH] [--file PATH]"
     );
     eprintln!(
-        "       cargo xtask bench type (--manual | --wtype | --synthetic) [--keys 500] [--renderer ...] [--out DIR] [--bin PATH]"
+        "       cargo xtask bench type (--manual | --wtype | --synthetic) [--keys 500] [--renderer ...] [--out DIR] [--bin PATH] [--file PATH]"
     );
 }
 
@@ -420,7 +446,14 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     let bin = args
         .bin
         .clone()
-        .unwrap_or_else(|| default_launcher(platform));
+        .unwrap_or_else(|| default_launcher(platform, &crate::root()));
+    let file = match bench_file(&crate::root(), args.file.as_deref()) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("xtask bench: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let dir = args.out.clone().unwrap_or_else(|| {
         Path::new("bench-results").join(out_dir_name(platform, &stamp(), &args.label()))
     });
@@ -447,7 +480,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         }
     } else if !manual {
         eprintln!("warm-up run (discarded)");
-        if let Err(e) = run_once(&args, platform, &bin, &log) {
+        if let Err(e) = run_once(&args, platform, &bin, &file, &log) {
             eprintln!("xtask bench: {e}");
             return ExitCode::FAILURE;
         }
@@ -459,7 +492,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             std::thread::sleep(Duration::from_millis(400));
         }
         eprintln!("run {}/{runs}", i + 1);
-        match run_once(&args, platform, &bin, &log) {
+        match run_once(&args, platform, &bin, &file, &log) {
             Ok(m) => {
                 for (k, mut v) in m {
                     samples.entry(k).or_default().append(&mut v);
@@ -532,6 +565,44 @@ mod tests {
         assert!(parse_args(&a("start --bogus")).is_err());
         assert!(parse_args(&a("start --runs 0")).is_err());
         assert!(parse_args(&a("start --renderer x")).is_err());
+    }
+
+    #[test]
+    fn parses_file_override() {
+        assert_eq!(parse_args(&a("start")).unwrap().file, None);
+        let x = parse_args(&a("start --file docs/x.md")).unwrap();
+        assert_eq!(x.file, Some(PathBuf::from("docs/x.md")));
+        let x = parse_args(&a("type --wtype --file y.md")).unwrap();
+        assert_eq!(x.file, Some(PathBuf::from("y.md")));
+        assert!(parse_args(&a("start --file")).is_err());
+    }
+
+    #[test]
+    fn bench_file_defaults_to_the_fixture_under_root() {
+        let root = std::env::temp_dir().join(format!("bench-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let err = bench_file(&root, None).unwrap_err();
+        assert!(err.contains("cargo xtask fixture"), "{err}");
+        assert!(err.contains(FIXTURE), "{err}");
+        let fixture = root.join(FIXTURE);
+        std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+        std::fs::write(&fixture, "# x\n").unwrap();
+        assert_eq!(bench_file(&root, None).unwrap(), fixture);
+        let other = root.join("other.md");
+        assert!(bench_file(&root, Some(&other)).is_err());
+        std::fs::write(&other, "").unwrap();
+        assert_eq!(bench_file(&root, Some(&other)).unwrap(), other);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mac_launcher_is_inside_the_bundle() {
+        let root = Path::new("/w");
+        let got = default_launcher(Platform::Macos, root);
+        let want = crate::bundle_mac::app_dir(root)
+            .join("Contents/MacOS")
+            .join(app_meta::SLUG);
+        assert_eq!(got, want);
     }
 
     #[test]

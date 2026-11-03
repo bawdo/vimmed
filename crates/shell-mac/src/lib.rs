@@ -9,6 +9,7 @@ pub mod fonts_ct;
 pub mod glass;
 pub mod input;
 pub mod present;
+pub mod startup;
 
 #[cfg(target_os = "macos")]
 mod app;

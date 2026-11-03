@@ -18,6 +18,7 @@ use editor_core::input::Input;
 use editor_core::platform::Platform;
 use editor_core::tokens::TokenId;
 use editor_core::view_model::ViewSource;
+use editor_render::damage::Damage;
 use editor_render::fonts::{FontPaths, FontSet};
 use editor_render::layout_cosmic::CosmicLayout;
 use editor_render::view::DocView;
@@ -28,7 +29,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSWindow, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -38,11 +39,14 @@ use crate::displaylink::Link;
 use crate::fonts_ct::MacFonts;
 use crate::glass::{KeyTimes, Tick, key_values};
 use crate::present::{IoSurface, Presenter};
+use crate::startup::{FirstFrame, fit_content};
 use crate::view::{Delegate, DocumentView};
 use crate::{clipboard, input};
 
 /// The window's content size in points. It is the bench protocol's size
-/// (Task 4), used for every window until window-size tokens exist.
+/// (Task 4), used for every window, clamped to the screen's visible frame.
+/// TODO(config task): replace with `size.window.width` and
+/// `size.window.height` tokens.
 const WINDOW_PT: (f64, f64) = (900.0, 1000.0);
 /// Exit code when the window cannot start (as the launcher's).
 const EXIT_NOT_STARTED: i32 = 220;
@@ -59,8 +63,7 @@ struct State {
     keys: Vec<KeyTimes>,
     /// Size in points and scale the frame was last built for.
     geometry: (f64, f64, f64),
-    committed: bool,
-    first_frame: bool,
+    first: FirstFrame,
     /// A decoded image was staged and waits for its commit.
     image_staged: bool,
     bench: Option<BenchPlan>,
@@ -227,14 +230,21 @@ pub fn launch(delegate: &Delegate) {
     else {
         return;
     };
-    let rect = NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(WINDOW_PT.0, WINDOW_PT.1),
-    );
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
         | NSWindowStyleMask::Resizable;
+    // Fit inside the visible frame less the title bar, so AppKit doesn't
+    // constrain (resize) the window as it goes on screen.
+    let size = match NSScreen::mainScreen(mtm) {
+        Some(screen) => {
+            let max =
+                NSWindow::contentRectForFrameRect_styleMask(screen.visibleFrame(), style, mtm);
+            fit_content(WINDOW_PT, (max.size.width, max.size.height))
+        }
+        None => WINDOW_PT,
+    };
+    let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(size.0, size.1));
     // SAFETY: the designated initialiser with valid arguments.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -260,7 +270,7 @@ pub fn launch(delegate: &Delegate) {
     let scale = window.backingScaleFactor();
     layer.setContentsScale(scale);
     let layout = CosmicLayout::new(fonts, &tokens);
-    let (w, h) = (WINDOW_PT.0 as f32, WINDOW_PT.1 as f32);
+    let (w, h) = (size.0 as f32, size.1 as f32);
     let mut doc = DocView::new(Box::new(layout), &tokens, w, h, scale as f32);
     doc.set_images(&base_dir, waker);
     doc.paint_all(&editor);
@@ -281,9 +291,8 @@ pub fn launch(delegate: &Delegate) {
         layer,
         link,
         keys: Vec::new(),
-        geometry: (WINDOW_PT.0, WINDOW_PT.1, scale),
-        committed: false,
-        first_frame: false,
+        geometry: (size.0, size.1, scale),
+        first: FirstFrame::default(),
         image_staged: false,
         bench: BenchPlan::from_env(),
         progress: Progress {
@@ -297,11 +306,19 @@ pub fn launch(delegate: &Delegate) {
     window.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     window.makeKeyAndOrderFront(None);
     window.makeFirstResponder(Some(&view));
-    NSApplication::sharedApplication(mtm).activate();
+    // The deprecated call on purpose: macOS 14's cooperative `activate()`
+    // never takes focus from the active app, so a window the launcher
+    // starts from a terminal would never come forward or become key (and
+    // `first_frame` waits for key). winit and OpenJFX make the same call.
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     if let Some(screen) = window.screen() {
         marks::value(names::REFRESH_HZ, screen.maximumFramesPerSecond() as f64);
     }
     with_state(|st| st.link.resume());
+    if window.isKeyWindow() {
+        on_became_key();
+    }
     if bench {
         schedule_bench_check();
     }
@@ -377,9 +394,10 @@ pub fn on_tick() {
         let done_s = now_s();
         let now_ns = marks::now_ns();
         let mut changed = false;
-        if committed && !st.committed {
-            st.committed = true;
-            changed |= mark_first_frame(st);
+        if committed && st.first.tick_committed() {
+            marks::mark(names::FIRST_FRAME);
+            st.progress.first_frame_ns = Some(now_ns);
+            changed = true;
         }
         if !st.keys.is_empty() {
             let t = Tick {
@@ -397,10 +415,8 @@ pub fn on_tick() {
             st.progress.last_key_ns = Some(now_ns);
             changed = true;
         }
-        if committed && st.image_staged {
-            st.image_staged = false;
-            st.progress.image_shown_ns.get_or_insert(now_ns);
-            changed = true;
+        if committed {
+            changed |= image_shown(st, now_ns);
         }
         if !st.presenter.has_staged() {
             st.link.pause();
@@ -412,22 +428,29 @@ pub fn on_tick() {
     }
 }
 
-/// Marks `first_frame` once something has been committed and the window is
-/// key. Returns true when it marked.
-fn mark_first_frame(st: &mut State) -> bool {
-    if st.first_frame || !st.committed || !st.window.isKeyWindow() {
+/// After any commit: a staged decoded image is now on screen. Returns true
+/// when that is news for the bench.
+fn image_shown(st: &mut State, now_ns: u64) -> bool {
+    if !st.image_staged {
         return false;
     }
-    st.first_frame = true;
-    marks::mark(names::FIRST_FRAME);
-    st.progress.first_frame_ns = Some(marks::now_ns());
+    st.image_staged = false;
+    st.progress.image_shown_ns.get_or_insert(now_ns);
     true
 }
 
+/// The window became key. While `first_frame` is still owed, stage the
+/// whole frame so the next tick commits and can mark it.
 pub fn on_became_key() {
-    if with_state(|st| mark_first_frame(st) && st.bench.is_some()) == Some(true) {
-        schedule_bench_check();
-    }
+    with_state(|st| {
+        if st.first.became_key() {
+            let frame = st.doc.frame();
+            let mut all = Damage::new();
+            all.add(0..frame.height_px);
+            st.presenter.stage(frame, &all);
+            st.link.resume();
+        }
+    });
 }
 
 /// A background worker finished: let the editor and the view take results.
@@ -451,12 +474,12 @@ fn on_wake() {
 /// surfaces at the new size, and commit at once so the contents keep up
 /// with a live resize.
 pub fn on_geometry() {
-    with_state(|st| {
+    let changed = with_state(|st| {
         let size = st.view.bounds().size;
         let scale = st.window.backingScaleFactor();
         let g = (size.width, size.height, scale);
         if g == st.geometry {
-            return;
+            return false;
         }
         st.geometry = g;
         st.doc
@@ -465,10 +488,15 @@ pub fn on_geometry() {
         let frame = st.doc.frame();
         st.presenter = Presenter::new(frame.width_px, frame.height_px);
         st.layer.setContentsScale(scale);
+        // Committed outside a tick: never marks `first_frame`.
         if stage(st) && st.presenter.commit(&st.layer) {
-            st.committed = true;
+            return image_shown(st, marks::now_ns()) && st.bench.is_some();
         }
+        false
     });
+    if changed == Some(true) {
+        schedule_bench_check();
+    }
 }
 
 pub fn request_close() {
@@ -525,12 +553,12 @@ fn schedule_bench_check() {
 /// A bench run exits by itself at its deadline (see `marks::bench`).
 pub fn on_bench_check() {
     let due = with_state(|st| {
-        st.bench
-            .is_some_and(|plan| marks::now_ns() >= plan.deadline(&st.progress))
+        let plan = st.bench?;
+        (marks::now_ns() >= plan.deadline(&st.progress)).then(|| plan.exit_code(&st.progress))
     });
     match due {
-        Some(true) => finish(0),
-        Some(false) => schedule_bench_check(),
+        Some(Some(code)) => finish(code),
+        Some(None) => schedule_bench_check(),
         None => {}
     }
 }

@@ -3,7 +3,9 @@
 //!
 //! The bench can only kill the launcher, and the window runs in its own
 //! session, so a benched window must never wait for a person to close it.
-//! It exits with code 0 at `BenchPlan::deadline`:
+//! It exits at `BenchPlan::deadline` with `BenchPlan::exit_code`: 0, except
+//! after the startup cap (no `first_frame` at all), which exits
+//! `EXIT_NO_FIRST_FRAME` so the bench reports the run as failed.
 //!
 //! - `start`: `IMAGE_SETTLE` after the first decoded image is on screen, so
 //!   `images_painted` is logged. With no image on screen, `START_LINGER`
@@ -56,6 +58,12 @@ pub const MANUAL_CAP: u64 = 600 * S;
 pub const AUTO_CAP_BASE: u64 = 30 * S;
 pub const AUTO_CAP_PER_KEY: u64 = 50 * MS;
 
+/// Exit code when a benched window reaches the startup cap without ever
+/// marking `first_frame`. Chosen to sit beside the launcher's 220 (window
+/// not started) and the window's 221 (protocol mismatch), clear of 0, 1
+/// (`:cq`), 2 (usage) and 128 + n (signals).
+pub const EXIT_NO_FIRST_FRAME: i32 = 222;
+
 impl BenchPlan {
     /// Parses a `<P>BENCH` value: `start`, or `type-manual:N`,
     /// `type-wtype:N`, `type-synthetic:N`.
@@ -87,6 +95,16 @@ impl BenchPlan {
         match self {
             BenchPlan::Start => 0,
             BenchPlan::Type { keys, .. } => keys,
+        }
+    }
+
+    /// The code to exit with at the deadline.
+    pub fn exit_code(self, p: &Progress) -> i32 {
+        let _ = self;
+        if p.first_frame_ns.is_some() {
+            0
+        } else {
+            EXIT_NO_FIRST_FRAME
         }
     }
 
@@ -153,6 +171,20 @@ mod tests {
             ..Progress::default()
         };
         assert_eq!(BenchPlan::Start.deadline(&p), 7 + STARTUP_CAP);
+    }
+
+    #[test]
+    fn exit_is_non_zero_only_without_a_first_frame() {
+        let mut p = Progress::default();
+        assert_eq!(BenchPlan::Start.exit_code(&p), EXIT_NO_FIRST_FRAME);
+        let plan = BenchPlan::Type {
+            source: KeySource::Wtype,
+            keys: 1,
+        };
+        assert_eq!(plan.exit_code(&p), EXIT_NO_FIRST_FRAME);
+        p.first_frame_ns = Some(1);
+        assert_eq!(BenchPlan::Start.exit_code(&p), 0);
+        assert_eq!(plan.exit_code(&p), 0);
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //!
 //! Exit codes: the shell's own (0, or 128 + n after signal n); 2 for bad
 //! arguments; 220 when no shell exists for this platform yet; 221 when the
-//! launcher speaks a different protocol.
+//! launcher speaks a different protocol; 222 when a bench run never marked
+//! `first_frame` (`marks::bench::EXIT_NO_FIRST_FRAME`).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
