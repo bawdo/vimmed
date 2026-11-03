@@ -12,7 +12,12 @@
 //!    The child times only its own construction, never process start.
 //! 2. Shaping the first visible screen (the first 60 source lines): cold in each child process,
 //!    and warm in this process (warm-up excluded).
-//! 3. Per-keystroke relayout: one character typed into the first `**` paragraph 500 times.
+//! 3. Per-keystroke relayout: one character typed into the first `**` paragraph 500 times,
+//!    once with ordinary English prose (`src/prose.txt`, the representative case) and once
+//!    with a pangram (short words, kept to show how sensitive the result is to the text).
+//!
+//! Build with `--features run-cache` to measure cosmic-text with its stock opt-in
+//! `shape-run-cache`, trimmed once per frame inside the timed region.
 //! 4. Fallback quality: `.notdef` glyphs for a fixed probe string, with the two faces only and
 //!    again with the small fixed fallback set.
 //!
@@ -43,7 +48,7 @@ const WIDTH_PX: f32 = COLUMN_PT * SCALE;
 const HEADING_SCALE: [f32; 6] = [2.0, 1.5, 1.25, 1.1, 1.0, 1.0];
 
 const SCREEN_LINES: usize = 60;
-const COLD_PROCESSES: usize = 10;
+const COLD_PROCESSES: usize = 30;
 const WARM_SCREEN_WARMUP: usize = 20;
 const WARM_SCREEN_ITERS: usize = 200;
 const KEY_WARMUP: usize = 50;
@@ -52,7 +57,16 @@ const ROUNDS: usize = 5;
 const SCREEN_SLOT_BASE: usize = 0;
 const KEY_SLOT: usize = SCREEN_LINES;
 const FALLBACK_PROBE: &str = "☐ ☑ ◦ → 😀 中文 ü é";
-const TYPED_PROSE: &[u8] = b"the quick brown fox jumps over the lazy dog ";
+/// Representative typing: a passage of ordinary English prose (average word 5.3 letters).
+const TYPED_PROSE: &str = include_str!("prose.txt");
+/// Secondary typing, kept to show sensitivity: the pangram's short words (3.9 letters on
+/// average) mean more words per character, which costs cosmic-text more (it shapes per word).
+const TYPED_PANGRAM: &str = "the quick brown fox jumps over the lazy dog ";
+/// With the `run-cache` feature, cosmic-text's shape-run cache is trimmed once per frame
+/// (per keystroke, or per full screen) inside the timed region, keeping entries used in the
+/// current or previous frame.
+#[cfg(feature = "run-cache")]
+const RUN_CACHE_KEEP_AGES: u64 = 1;
 
 // ---------------------------------------------------------------------------------------------
 // Fonts
@@ -208,6 +222,9 @@ trait Engine: Sized {
     fn layout(&mut self, slot: usize, text: &str, spans: &[Span]) -> (u32, f32);
     /// Lays out `text` plainly and returns the text of every `.notdef` glyph (glyph id 0).
     fn notdef(&mut self, text: &str) -> Vec<String>;
+    /// Per-frame housekeeping, called inside the timed region after each keystroke and each
+    /// full screen. Only cosmic-text with the `run-cache` feature does anything here.
+    fn end_frame(&mut self) {}
     /// Diagnostic: (text range, width px) of every visual row in a slot's last layout.
     fn rows(&self, slot: usize) -> Vec<(Range<usize>, f32)>;
 }
@@ -235,7 +252,15 @@ impl Cosmic {
 }
 
 impl Engine for Cosmic {
+    #[cfg(not(feature = "run-cache"))]
     const NAME: &'static str = "cosmic-text";
+    #[cfg(feature = "run-cache")]
+    const NAME: &'static str = "cosmic-text + shape-run-cache";
+
+    #[cfg(feature = "run-cache")]
+    fn end_frame(&mut self) {
+        self.fs.shape_run_cache.trim(RUN_CACHE_KEEP_AGES);
+    }
 
     fn construct(faces: &Faces, with_fallback: bool) -> Self {
         use cosmic_text::fontdb::{Database, Source};
@@ -576,10 +601,11 @@ struct Typing {
     line: String,
     cursor: usize,
     typed: usize,
+    source: Vec<char>,
 }
 
 impl Typing {
-    fn new(doc: &Doc) -> (Self, usize) {
+    fn new(doc: &Doc, source: &str) -> (Self, usize) {
         let idx = doc
             .lines
             .iter()
@@ -593,6 +619,14 @@ impl Typing {
                 line,
                 cursor: close + 2,
                 typed: 0,
+                // A space first, so the typed words don't run onto the closing `**`.
+                source: std::iter::once(' ')
+                    .chain(
+                        source
+                            .split_whitespace()
+                            .flat_map(|w| w.chars().chain([' '])),
+                    )
+                    .collect(),
             },
             idx,
         )
@@ -600,10 +634,10 @@ impl Typing {
 
     /// Inserts one character and returns the new spans (outside the timed region).
     fn step(&mut self) -> Vec<Span> {
-        // Prose with spaces, so both libraries break at words as they would for real typing.
-        let c = char::from(TYPED_PROSE[self.typed % TYPED_PROSE.len()]);
+        // Text with spaces, so both libraries break at words as they would for real typing.
+        let c = self.source[self.typed % self.source.len()];
         self.line.insert(self.cursor, c);
-        self.cursor += 1;
+        self.cursor += c.len_utf8();
         self.typed += 1;
         spans_for(&self.line, false)
     }
@@ -618,6 +652,7 @@ fn child<E: Engine>(doc_path: &Path, faces: &Faces) {
     let mut engine = E::construct(faces, false);
     let t1 = Instant::now();
     let (rows, height) = shape_screen(&mut engine, &doc);
+    engine.end_frame();
     let t2 = Instant::now();
     black_box((rows, height));
     println!(
@@ -671,6 +706,8 @@ struct Results {
     screen_height: f32,
     keys: Dist,
     key_rows_end: u32,
+    keys_pangram: Dist,
+    pangram_rows_end: u32,
     notdef_two: Vec<String>,
     notdef_fallback: Vec<String>,
 }
@@ -686,6 +723,8 @@ impl Results {
             screen_height: 0.0,
             keys: Dist::default(),
             key_rows_end: 0,
+            keys_pangram: Dist::default(),
+            pangram_rows_end: 0,
             notdef_two: Vec::new(),
             notdef_fallback: Vec::new(),
         }
@@ -694,26 +733,33 @@ impl Results {
 
 struct Lane<E: Engine> {
     engine: E,
-    typing: Typing,
+    prose: Typing,
+    pangram: Typing,
     res: Results,
 }
+
+const PANGRAM_SLOT: usize = KEY_SLOT + 1;
 
 impl<E: Engine> Lane<E> {
     fn new(faces: &Faces, doc: &Doc) -> Self {
         let mut engine = E::construct(faces, false);
-        // Warm-up, excluded: the first screen, then typing on a throwaway copy of the line.
+        // Warm-up, excluded: the first screen, then typing on throwaway copies of the line.
         for _ in 0..WARM_SCREEN_WARMUP {
             black_box(shape_screen(&mut engine, doc));
+            engine.end_frame();
         }
-        let (mut warm, _) = Typing::new(doc);
-        for _ in 0..KEY_WARMUP {
-            let spans = warm.step();
-            black_box(engine.layout(KEY_SLOT, &warm.line, &spans));
+        for (source, slot) in [(TYPED_PROSE, KEY_SLOT), (TYPED_PANGRAM, PANGRAM_SLOT)] {
+            let (mut warm, _) = Typing::new(doc, source);
+            for _ in 0..KEY_WARMUP {
+                let spans = warm.step();
+                black_box(engine.layout(slot, &warm.line, &spans));
+                engine.end_frame();
+            }
         }
-        let (typing, _) = Typing::new(doc);
         Self {
             engine,
-            typing,
+            prose: Typing::new(doc, TYPED_PROSE).0,
+            pangram: Typing::new(doc, TYPED_PANGRAM).0,
             res: Results::new(),
         }
     }
@@ -722,19 +768,36 @@ impl<E: Engine> Lane<E> {
         for _ in 0..n {
             let t = Instant::now();
             let (rows, height) = shape_screen(&mut self.engine, doc);
+            self.engine.end_frame();
             self.res.warm_screen.0.push(t.elapsed().as_nanos() as u64);
             self.res.screen_rows = rows;
             self.res.screen_height = height;
         }
     }
 
-    fn keys(&mut self, n: usize) {
+    fn keys(&mut self, n: usize, pangram: bool) {
+        let (typing, slot, dist, rows_end) = if pangram {
+            (
+                &mut self.pangram,
+                PANGRAM_SLOT,
+                &mut self.res.keys_pangram,
+                &mut self.res.pangram_rows_end,
+            )
+        } else {
+            (
+                &mut self.prose,
+                KEY_SLOT,
+                &mut self.res.keys,
+                &mut self.res.key_rows_end,
+            )
+        };
         for _ in 0..n {
-            let spans = self.typing.step();
+            let spans = typing.step();
             let t = Instant::now();
-            let (rows, _) = self.engine.layout(KEY_SLOT, &self.typing.line, &spans);
-            self.res.keys.0.push(t.elapsed().as_nanos() as u64);
-            self.res.key_rows_end = black_box(rows);
+            let (rows, _) = self.engine.layout(slot, &typing.line, &spans);
+            self.engine.end_frame();
+            dist.0.push(t.elapsed().as_nanos() as u64);
+            *rows_end = black_box(rows);
         }
     }
 }
@@ -757,6 +820,8 @@ fn report(c: &Results, p: &Results, faces: &Faces, typed_line: usize) {
     let pw = p.warm_screen.sorted();
     let ck = c.keys.sorted();
     let pk = p.keys.sorted();
+    let ckp = c.keys_pangram.sorted();
+    let pkp = p.keys_pangram.sorted();
 
     println!("## Layout benchmark: {} vs {}", Cosmic::NAME, Parley::NAME);
     println!();
@@ -773,23 +838,18 @@ fn report(c: &Results, p: &Results, faces: &Faces, typed_line: usize) {
     println!();
     println!("| Measure | {} | {} |", Cosmic::NAME, Parley::NAME);
     println!("|---|---|---|");
-    let trio = |v: &[u64]| {
-        format!(
-            "{} (min {}, max {})",
-            ms(pct(v, 50.0)),
-            ms(v[0]),
-            ms(v[v.len() - 1])
-        )
+    let trio = |v: &[u64], f: fn(u64) -> String| {
+        format!("{} / {} / {}", f(v[0]), f(pct(v, 50.0)), f(v[v.len() - 1]))
     };
     row(
-        &format!("Construction, cold process, p50 of {COLD_PROCESSES}"),
-        trio(&cc),
-        trio(&pc),
+        &format!("Construction, cold process, min / p50 / max of {COLD_PROCESSES}"),
+        trio(&cc, us),
+        trio(&pc, us),
     );
     row(
-        &format!("First screen ({SCREEN_LINES} lines), cold, p50 of {COLD_PROCESSES}"),
-        trio(&cs),
-        trio(&ps),
+        &format!("First screen ({SCREEN_LINES} lines), cold, min / p50 / max of {COLD_PROCESSES}"),
+        trio(&cs, ms),
+        trio(&ps, ms),
     );
     let three = |v: &[u64], f: fn(u64) -> String| {
         format!(
@@ -805,14 +865,19 @@ fn report(c: &Results, p: &Results, faces: &Faces, typed_line: usize) {
         three(&pw, ms),
     );
     row(
-        &format!("Keystroke relayout, p50 / p95 / p99 of {KEY_ITERS}"),
+        &format!("Keystroke relayout, prose, p50 / p95 / p99 of {KEY_ITERS}"),
         three(&ck, us),
         three(&pk, us),
     );
     row(
-        "Keystroke relayout, max",
+        "Keystroke relayout, prose, max",
         us(ck[ck.len() - 1]),
         us(pk[pk.len() - 1]),
+    );
+    row(
+        &format!("Keystroke relayout, pangram, p50 / p95 / p99 of {KEY_ITERS}"),
+        three(&ckp, us),
+        three(&pkp, us),
     );
     row(
         "First screen visual rows (cold / warm), total height px",
@@ -826,9 +891,9 @@ fn report(c: &Results, p: &Results, faces: &Faces, typed_line: usize) {
         ),
     );
     row(
-        "Typed line visual rows after the last keystroke",
-        c.key_rows_end.to_string(),
-        p.key_rows_end.to_string(),
+        "Typed line visual rows after the last keystroke (prose / pangram)",
+        format!("{} / {}", c.key_rows_end, c.pangram_rows_end),
+        format!("{} / {}", p.key_rows_end, p.pangram_rows_end),
     );
     let nd = |v: &[String]| {
         if v.is_empty() {
@@ -855,9 +920,15 @@ fn report(c: &Results, p: &Results, faces: &Faces, typed_line: usize) {
     let p95 = pct(&pk, 95.0) as f64;
     let faster = p95 <= 0.75 * c95;
     let not_worse = pct(&pc, 50.0) <= pct(&cc, 50.0);
+    // Positive: parley is that much lower than cosmic-text; negative: that much higher.
+    let lead = |c: f64, p: f64| (1.0 - p / c) * 100.0;
     println!(
-        "Rule on this platform: parley p95 is {:.1}% lower ({}), cold construction p50 {} ({}).",
-        (1.0 - p95 / c95) * 100.0,
+        "Pangram keystroke p95: parley lead {:+.1}% (positive means parley is lower).",
+        lead(pct(&ckp, 95.0) as f64, pct(&pkp, 95.0) as f64)
+    );
+    println!(
+        "Rule on this platform (prose): parley p95 lead {:+.1}% ({}), cold construction p50 {} ({}).",
+        lead(c95, p95),
         if faster { "meets 25%" } else { "short of 25%" },
         if not_worse { "not worse" } else { "worse" },
         if faster && not_worse {
@@ -904,16 +975,22 @@ fn main() {
                 );
             }
         }
-        let (mut typing, _) = Typing::new(&doc);
-        for k in 1..=KEY_ITERS {
-            let spans = typing.step();
-            let a = c.layout(KEY_SLOT, &typing.line, &spans);
-            let b = p.layout(KEY_SLOT, &typing.line, &spans);
-            if a != b {
-                println!("keystroke {k}: cosmic {a:?} parley {b:?}");
-                println!("  cosmic rows {:?}", c.rows(KEY_SLOT));
-                println!("  parley rows {:?}", p.rows(KEY_SLOT));
+        for (name, source) in [("prose", TYPED_PROSE), ("pangram", TYPED_PANGRAM)] {
+            let (mut typing, _) = Typing::new(&doc, source);
+            let mut differ = 0;
+            for k in 1..=KEY_ITERS {
+                let spans = typing.step();
+                let a = c.layout(KEY_SLOT, &typing.line, &spans);
+                c.end_frame();
+                let b = p.layout(KEY_SLOT, &typing.line, &spans);
+                if a != b {
+                    differ += 1;
+                    println!("{name} keystroke {k}: cosmic {a:?} parley {b:?}");
+                    println!("  cosmic rows {:?}", c.rows(KEY_SLOT));
+                    println!("  parley rows {:?}", p.rows(KEY_SLOT));
+                }
             }
+            println!("{name}: {differ} of {KEY_ITERS} keystrokes differ");
         }
         return;
     }
@@ -945,15 +1022,17 @@ fn main() {
         cosmic.screens(&doc, WARM_SCREEN_ITERS / ROUNDS);
         parley.screens(&doc, WARM_SCREEN_ITERS / ROUNDS);
     }
-    for _ in 0..ROUNDS {
-        cosmic.keys(KEY_ITERS / ROUNDS);
-        parley.keys(KEY_ITERS / ROUNDS);
+    for pangram in [false, true] {
+        for _ in 0..ROUNDS {
+            cosmic.keys(KEY_ITERS / ROUNDS, pangram);
+            parley.keys(KEY_ITERS / ROUNDS, pangram);
+        }
     }
 
     // 4: fallback quality.
     fallback_counts::<Cosmic>(&faces, &mut cosmic.res);
     fallback_counts::<Parley>(&faces, &mut parley.res);
 
-    let (_, typed_line) = Typing::new(&doc);
+    let (_, typed_line) = Typing::new(&doc, TYPED_PROSE);
     report(&cosmic.res, &parley.res, &faces, typed_line + 1);
 }

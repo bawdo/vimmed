@@ -12,3 +12,7 @@ parley = "0.12"
 # Already in the graph through fontdb. Used so that both libraries see the same font
 # files memory-mapped, rather than one reading them into the heap.
 memmap2 = "0.9"
+
+[features]
+# cosmic-text's stock opt-in shape-run cache, trimmed once per frame inside the timed region.
+run-cache = ["cosmic-text/shape-run-cache"]
