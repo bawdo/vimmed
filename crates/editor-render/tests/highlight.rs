@@ -263,3 +263,82 @@ fn every_class_has_a_distinct_syntax_token() {
     }
     assert_eq!(seen.len(), 13);
 }
+
+#[test]
+fn language_for_resolves_every_alias() {
+    use editor_render::highlight::language_for;
+    let table: &[(&[&str], &str)] = &[
+        (&["rust", "rs"], "rust"),
+        (&["go", "golang"], "go"),
+        (&["javascript", "js", "jsx"], "javascript"),
+        (&["typescript", "ts"], "typescript"),
+        (&["tsx"], "tsx"),
+        (&["ruby", "rb"], "ruby"),
+        (&["sql"], "sql"),
+        (&["html"], "html"),
+        (&["css"], "css"),
+        (&["bash", "sh", "shell", "zsh"], "bash"),
+        (&["hcl", "tf", "terraform"], "hcl"),
+        (&["md", "markdown"], "markdown"),
+    ];
+    for (tags, name) in table {
+        let first = language_for(tags[0]).unwrap_or_else(|| panic!("{} unresolved", tags[0]));
+        assert_eq!(format!("{first:?}").to_lowercase(), *name);
+        for t in *tags {
+            assert_eq!(language_for(t), Some(first), "{t}");
+            assert_eq!(language_for(&t.to_uppercase()), Some(first), "{t} upper");
+        }
+    }
+    assert_eq!(language_for("cobol"), None);
+    assert_eq!(language_for(""), None);
+}
+
+#[test]
+fn each_language_highlights_a_keyword() {
+    let samples: &[(&str, &str)] = &[
+        ("rust", "fn main() { let x = 1; }"),
+        ("go", "package main\n\nfunc main() {\n\treturn\n}"),
+        ("javascript", "const x = function () { return 1; };"),
+        (
+            "typescript",
+            "interface A { b: string }\nconst x: number = 1;",
+        ),
+        ("tsx", "const A = () => <div className=\"a\">hi</div>;"),
+        ("ruby", "def foo\n  return 1\nend"),
+        ("sql", "SELECT a FROM t WHERE b = 1;"),
+        ("html", "<div class=\"a\">hi</div>"),
+        ("css", "a { color: red; }"),
+        ("bash", "if [ -f x ]; then echo hi; fi"),
+        ("hcl", "resource \"a\" \"b\" {\n  c = 1\n}"),
+        ("md", "# Title\n\n- item\n\n```\ncode\n```"),
+    ];
+    for (i, (lang, text)) in samples.iter().enumerate() {
+        let (waker, _) = counting_waker();
+        let mut h = Highlighter::new(waker);
+        let b = BlockId(100 + i as u32);
+        h.request(b, lang, text);
+        wait_for(&mut h, b);
+        let lines = text.split('\n').count();
+        let any = (0..lines).any(|l| !h.spans(b, l).is_empty());
+        assert!(any, "{lang}: no non-plain span for {text:?}");
+    }
+}
+
+#[test]
+fn markdown_inline_grammar_is_injected() {
+    let (waker, _) = counting_waker();
+    let mut h = Highlighter::new(waker);
+    let b = BlockId(300);
+    // Inline emphasis and code spans exist only in the inline grammar.
+    let text = "plain *emph* and `code` here";
+    h.request(b, "md", text);
+    wait_for(&mut h, b);
+    let spans = h.spans(b, 0);
+    let covers = |needle: &str| {
+        let at = text.find(needle).unwrap();
+        spans.iter().any(|(r, _)| r.start <= at && at < r.end)
+    };
+    assert!(covers("emph"), "emphasis not coloured: {spans:?}");
+    assert!(covers("code"), "code span not coloured: {spans:?}");
+    assert!(!covers("plain"), "plain text coloured: {spans:?}");
+}

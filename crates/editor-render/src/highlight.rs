@@ -78,21 +78,34 @@ impl SyntaxClass {
     /// Map a tree-sitter capture name (`function.method`, `punctuation.bracket`)
     /// by its leading segment. Unmapped captures stay plain.
     pub fn from_capture(name: &str) -> Option<SyntaxClass> {
-        let head = name.split('.').next().unwrap_or(name);
+        let mut parts = name.split('.');
+        let head = parts.next().unwrap_or(name);
         Some(match head {
-            "keyword" => SyntaxClass::Keyword,
+            // `conditional`, `storageclass` and the CSS at-rule names are
+            // keyword-like captures used by the SQL and CSS grammars.
+            "keyword" | "conditional" | "storageclass" | "charset" | "import" | "keyframes"
+            | "media" | "namespace" | "supports" => SyntaxClass::Keyword,
             "string" | "escape" => SyntaxClass::String,
             "comment" => SyntaxClass::Comment,
             "function" => SyntaxClass::Function,
             "type" | "constructor" => SyntaxClass::Type,
-            "number" => SyntaxClass::Number,
-            "constant" => SyntaxClass::Constant,
+            "number" | "float" => SyntaxClass::Number,
+            "constant" | "boolean" => SyntaxClass::Constant,
             "operator" => SyntaxClass::Operator,
             "punctuation" => SyntaxClass::Punctuation,
-            "variable" => SyntaxClass::Variable,
-            "property" => SyntaxClass::Property,
+            "variable" | "parameter" => SyntaxClass::Variable,
+            "property" | "field" => SyntaxClass::Property,
             "attribute" => SyntaxClass::Attribute,
             "tag" => SyntaxClass::Tag,
+            // The markdown grammars' prose captures.
+            "text" => match parts.next() {
+                Some("title") => SyntaxClass::Keyword,
+                Some("literal") => SyntaxClass::String,
+                Some("uri") => SyntaxClass::Constant,
+                Some("reference") => SyntaxClass::Function,
+                Some("emphasis") | Some("strong") => SyntaxClass::Variable,
+                _ => return None,
+            },
             _ => return None,
         })
     }
@@ -111,21 +124,79 @@ pub struct ReparseInfo {
     pub changed_bytes: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lang {
+/// A language a code block can be highlighted as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
     Rust,
+    Go,
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Ruby,
+    Sql,
+    Html,
+    Css,
+    Bash,
+    Hcl,
+    /// Block grammar plus the inline grammar injected over its `inline` nodes.
+    /// Used only to colour code blocks tagged `md`/`markdown`, never to render
+    /// the document itself.
+    Markdown,
 }
 
-impl Lang {
-    fn from_name(name: &str) -> Option<Lang> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "rust" | "rs" => Some(Lang::Rust),
-            _ => None,
-        }
-    }
+/// Resolve a fenced-code info tag (case-insensitive) to a language.
+pub fn language_for(tag: &str) -> Option<Lang> {
+    Some(match tag.trim().to_ascii_lowercase().as_str() {
+        "rust" | "rs" => Lang::Rust,
+        "go" | "golang" => Lang::Go,
+        "javascript" | "js" | "jsx" => Lang::JavaScript,
+        "typescript" | "ts" => Lang::TypeScript,
+        "tsx" => Lang::Tsx,
+        "ruby" | "rb" => Lang::Ruby,
+        "sql" => Lang::Sql,
+        "html" => Lang::Html,
+        "css" => Lang::Css,
+        "bash" | "sh" | "shell" | "zsh" => Lang::Bash,
+        "hcl" | "tf" | "terraform" => Lang::Hcl,
+        "md" | "markdown" => Lang::Markdown,
+        _ => return None,
+    })
+}
 
+/// A lazily compiled, process-lifetime configuration. Injections and locals
+/// are empty: only markdown needs injection, and it is handled in
+/// `inline_caps`.
+macro_rules! lazy_config {
+    ($name:literal, $language:expr, $highlights:expr) => {{
+        static CONFIG: OnceLock<HighlightConfiguration> = OnceLock::new();
+        CONFIG.get_or_init(|| {
+            HighlightConfiguration::new($language.into(), $name, &$highlights, "", "")
+                .expect(concat!("the bundled ", $name, " highlights query compiles"))
+        })
+    }};
+}
+
+/// The highlights query for HCL. The grammar crate ships none, so this is a
+/// small one covering the constructs a code block shows.
+const HCL_HIGHLIGHTS: &str = r#"
+(comment) @comment
+(block . (identifier) @keyword)
+(attribute (identifier) @property)
+(string_lit) @string
+(quoted_template) @string
+(heredoc_template) @string
+(numeric_lit) @number
+(bool_lit) @constant
+(null_lit) @constant
+(function_call (identifier) @function)
+["for" "in" "if" "else" "endfor" "endif"] @keyword
+["=" "==" "!=" "<" "<=" ">" ">=" "+" "-" "*" "/" "%" "!" "&&" "||" "?" "=>"] @operator
+["{" "}" "[" "]" "(" ")" "," "."] @punctuation
+"#;
+
+impl Lang {
     /// The compiled configuration, built on first use (so on the worker) and
-    /// kept for the life of the process. Locals are empty.
+    /// kept for the life of the process.
     fn config(self) -> &'static HighlightConfiguration {
         match self {
             Lang::Rust => {
@@ -141,6 +212,83 @@ impl Lang {
                     .expect("the bundled Rust highlights query compiles")
                 })
             }
+            Lang::Go => lazy_config!(
+                "go",
+                tree_sitter_go::LANGUAGE,
+                tree_sitter_go::HIGHLIGHTS_QUERY
+            ),
+            Lang::JavaScript => lazy_config!(
+                "javascript",
+                tree_sitter_javascript::LANGUAGE,
+                format!(
+                    "{}\n{}",
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+                )
+            ),
+            // The TypeScript query only adds to the JavaScript one.
+            Lang::TypeScript => lazy_config!(
+                "typescript",
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                format!(
+                    "{}\n{}",
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY
+                )
+            ),
+            Lang::Tsx => lazy_config!(
+                "tsx",
+                tree_sitter_typescript::LANGUAGE_TSX,
+                format!(
+                    "{}\n{}\n{}",
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY
+                )
+            ),
+            Lang::Ruby => lazy_config!(
+                "ruby",
+                tree_sitter_ruby::LANGUAGE,
+                tree_sitter_ruby::HIGHLIGHTS_QUERY
+            ),
+            Lang::Sql => lazy_config!(
+                "sql",
+                tree_sitter_sequel::LANGUAGE,
+                tree_sitter_sequel::HIGHLIGHTS_QUERY
+            ),
+            Lang::Html => lazy_config!(
+                "html",
+                tree_sitter_html::LANGUAGE,
+                tree_sitter_html::HIGHLIGHTS_QUERY
+            ),
+            Lang::Css => lazy_config!(
+                "css",
+                tree_sitter_css::LANGUAGE,
+                tree_sitter_css::HIGHLIGHTS_QUERY
+            ),
+            Lang::Bash => lazy_config!(
+                "bash",
+                tree_sitter_bash::LANGUAGE,
+                tree_sitter_bash::HIGHLIGHT_QUERY
+            ),
+            Lang::Hcl => lazy_config!("hcl", tree_sitter_hcl::LANGUAGE, HCL_HIGHLIGHTS),
+            Lang::Markdown => lazy_config!(
+                "markdown",
+                tree_sitter_md::LANGUAGE,
+                tree_sitter_md::HIGHLIGHT_QUERY_BLOCK
+            ),
+        }
+    }
+
+    /// The injected inline grammar's configuration (markdown only).
+    fn inline_config(self) -> Option<&'static HighlightConfiguration> {
+        match self {
+            Lang::Markdown => Some(lazy_config!(
+                "markdown_inline",
+                tree_sitter_md::INLINE_LANGUAGE,
+                tree_sitter_md::HIGHLIGHT_QUERY_INLINE
+            )),
+            _ => None,
         }
     }
 }
@@ -211,7 +359,7 @@ impl Highlighter {
     /// wake, tree untouched), so it is safe to call for every on-screen block
     /// on every paint. Changed text or language re-highlights from scratch.
     pub fn request(&mut self, block: BlockId, lang: &str, text: &str) {
-        let Some(lang) = Lang::from_name(lang) else {
+        let Some(lang) = language_for(lang) else {
             return;
         };
         if let Some(s) = self.blocks.get(&block)
@@ -404,26 +552,102 @@ fn reparse(
         incremental: old.is_some(),
         changed_bytes,
     };
-    let lines = spans_for(config, &tree, text);
+    let lines = spans_for(lang, config, &tree, text);
     trees.insert(block, Parsed { lang, tree });
     Some((lines, info))
 }
 
-/// Run the highlights query over `tree` and cut the result into per-line spans.
-fn spans_for(config: &HighlightConfiguration, tree: &Tree, text: &str) -> Vec<LineSpans> {
+/// (start byte, end byte, pattern index, class)
+type Cap = (usize, usize, usize, SyntaxClass);
+
+/// Run `config`'s highlights query over `tree` and push the mapped captures.
+/// `pattern_base` offsets pattern indices so a second grammar's patterns
+/// rank after the first's.
+fn collect_caps(
+    config: &HighlightConfiguration,
+    tree: &Tree,
+    text: &str,
+    pattern_base: usize,
+    caps: &mut Vec<Cap>,
+) {
     let names = config.query.capture_names();
-    // Paint widest captures first so the narrowest wins; for equal ranges the
-    // earliest pattern wins (it is painted last).
-    let mut caps: Vec<(usize, usize, usize, SyntaxClass)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&config.query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         for c in m.captures() {
             if let Some(class) = SyntaxClass::from_capture(names[c.index as usize]) {
                 let n = c.node;
-                caps.push((n.start_byte(), n.end_byte(), m.pattern_index, class));
+                caps.push((
+                    n.start_byte(),
+                    n.end_byte(),
+                    pattern_base + m.pattern_index,
+                    class,
+                ));
             }
         }
+    }
+}
+
+/// Markdown injection: the block parse reports each `inline` node's range;
+/// parse exactly those ranges with the inline grammar and run its query.
+/// (Task 14's loop does not run injection queries, so this is the one
+/// injection we do by hand.) A failed inline parse leaves the block colours.
+fn inline_caps(
+    block: &HighlightConfiguration,
+    inline: &HighlightConfiguration,
+    tree: &Tree,
+    text: &str,
+    caps: &mut Vec<Cap>,
+) {
+    let mut ranges = Vec::new();
+    let mut cursor = tree.walk();
+    'walk: loop {
+        let node = cursor.node();
+        if node.kind() == "inline" {
+            ranges.push(node.range());
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    if ranges.is_empty() {
+        return;
+    }
+    let mut parser = Parser::new();
+    if parser.set_language(&inline.language).is_err()
+        || parser.set_included_ranges(&ranges).is_err()
+    {
+        return;
+    }
+    let Some(inline_tree) = parser.parse(text, None) else {
+        return;
+    };
+    collect_caps(
+        inline,
+        &inline_tree,
+        text,
+        block.query.pattern_count(),
+        caps,
+    );
+}
+
+/// Run the highlights query over `tree` and cut the result into per-line spans.
+fn spans_for(
+    lang: Lang,
+    config: &HighlightConfiguration,
+    tree: &Tree,
+    text: &str,
+) -> Vec<LineSpans> {
+    // Paint widest captures first so the narrowest wins; for equal ranges the
+    // earliest pattern wins (it is painted last).
+    let mut caps: Vec<Cap> = Vec::new();
+    collect_caps(config, tree, text, 0, &mut caps);
+    if let Some(inline) = lang.inline_config() {
+        inline_caps(config, inline, tree, text, &mut caps);
     }
     caps.sort_by(|a, b| {
         (b.1 - b.0)

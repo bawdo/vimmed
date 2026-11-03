@@ -12,7 +12,17 @@ editor-core = { path = "../editor-core" }
 cosmic-text = { version = "0.19", features = ["shape-run-cache"] }
 tiny-skia = "0.12"
 marks = { path = "../marks" }
-# Code-block highlighting (Task 14). Rust grammar only; Task 28 adds the others.
+# Code-block highlighting: the tree-sitter runtime and one grammar per supported language.
 tree-sitter = "0.27"
 tree-sitter-highlight = "0.27"
 tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-sequel = "0.3.11"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25.0"
+tree-sitter-bash = "0.25.1"
+tree-sitter-hcl = "1.1.0"
+tree-sitter-md = "0.5.4"
