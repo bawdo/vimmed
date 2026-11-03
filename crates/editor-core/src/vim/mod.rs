@@ -1,12 +1,16 @@
-//! The vim engine: modes, counts, motions and the keys that enter Insert.
+//! The vim engine: modes, counts, motions, operators and the keys that
+//! enter Insert.
 //!
 //! `Editor` routes Normal-mode keys here. The engine keeps the pending
 //! command (count, operator, `g` prefix), decides what each key means, and
-//! hands back a `Step` for the editor to carry out on its buffer. Insert-mode
-//! typing stays on the editor's own path.
+//! hands back a `Step` for the editor to carry out on its buffer (operators
+//! through `operator::operate` and `operator::put`). Insert-mode typing
+//! stays on the editor's own path.
 
 pub mod count;
 pub mod motion;
+pub mod operator;
+pub mod register;
 
 use crate::buffer::{Buffer, Pos};
 use crate::grapheme;
@@ -14,6 +18,7 @@ use crate::input::{Key, KeyEvent};
 
 pub use count::Count;
 pub use motion::{Motion, MotionKind, MotionResult};
+pub use operator::{OpRange, Operator};
 
 /// The editing mode. Only Normal and Insert have behaviour yet; later tasks
 /// build the rest.
@@ -66,6 +71,10 @@ pub enum Step {
     /// Open a plain empty line below (`o`) or above (`O`) the cursor's line
     /// and enter Insert on it.
     Open { above: bool },
+    /// Apply an operator (`operator::operate`).
+    Operate { op: Operator, range: OpRange },
+    /// Put the clipboard `count` times (`operator::put`): `P` before.
+    Put { before: bool, count: usize },
 }
 
 /// The Normal-mode command being typed.
@@ -73,7 +82,7 @@ pub enum Step {
 pub struct Vim {
     count: Count,
     /// `d`, `c` or `y`, waiting for its motion.
-    op: Option<char>,
+    op: Option<Operator>,
     /// `g`, waiting for its second key.
     prefix: Option<char>,
 }
@@ -89,7 +98,7 @@ impl Vim {
         if let Some(n) = self.count.pre {
             s.push_str(&n.to_string());
         }
-        s.extend(self.op);
+        s.extend(self.op.map(Operator::key));
         if let Some(n) = self.count.post {
             s.push_str(&n.to_string());
         }
@@ -168,16 +177,39 @@ impl Vim {
                 self.prefix = Some('g');
                 return Step::Pending;
             }
-            'd' | 'c' | 'y' if !after_op => {
-                self.op = Some(c);
-                return Step::Pending;
+            // `D` is `d$` and `C` is `c$`, counts and all.
+            'D' | 'C' if !after_op => {
+                self.op = Some(if c == 'D' {
+                    Operator::Delete
+                } else {
+                    Operator::Change
+                });
+                Motion::LineEnd
+            }
+            'd' | 'c' | 'y' => return self.operator_key(c, buf, cur),
+            'x' if !after_op => {
+                let count = self.count.effective();
+                self.reset();
+                return OpRange::chars(buf, cur.pos, count).map_or(Step::Pending, |range| {
+                    Step::Operate {
+                        op: Operator::Delete,
+                        range,
+                    }
+                });
+            }
+            'p' | 'P' if !after_op => {
+                let count = self.count.effective();
+                self.reset();
+                return Step::Put {
+                    before: c == 'P',
+                    count,
+                };
             }
             'i' | 'a' | 'A' | 'I' | 'o' | 'O' if !after_op => {
                 // The count is not used: inserting it N times is not built.
                 self.reset();
                 return insert_entry(c, buf, cur.pos);
             }
-            // TODO(Task 20): `dd`, `cc` and `yy`.
             _ => {
                 self.reset();
                 return Step::Pending;
@@ -186,13 +218,41 @@ impl Vim {
         self.motion(m, buf, cur)
     }
 
+    /// `d`, `c` or `y`: starts an operator, or doubled (`dd cc yy`) acts
+    /// on `count` lines. Another operator's key cancels.
+    fn operator_key(&mut self, c: char, buf: &Buffer, cur: Cursor) -> Step {
+        let Some(op) = Operator::from_key(c) else {
+            self.reset();
+            return Step::Pending;
+        };
+        match self.op {
+            None => {
+                self.op = Some(op);
+                Step::Pending
+            }
+            Some(pending) if pending == op => {
+                let count = self.count.effective();
+                self.reset();
+                Step::Operate {
+                    op,
+                    range: OpRange::lines(buf, cur.pos.line, count),
+                }
+            }
+            Some(_) => {
+                self.reset();
+                Step::Pending
+            }
+        }
+    }
+
     fn motion(&mut self, m: Motion, buf: &Buffer, cur: Cursor) -> Step {
         let count = self.count.effective();
         let op = self.op;
         self.reset();
-        if op.is_some() {
-            // TODO(Task 20): apply the operator over the motion's range.
-            return Step::Pending;
+        if let Some(op) = op {
+            // A failed motion leaves the operator nothing to act on.
+            return OpRange::from_motion(op, m, buf, cur, count)
+                .map_or(Step::Pending, |range| Step::Operate { op, range });
         }
         let r = motion::apply(m, buf, cur, count);
         let pos = rest(buf, r.cursor.pos);

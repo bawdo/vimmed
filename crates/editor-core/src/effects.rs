@@ -51,6 +51,21 @@ pub struct Effects {
     pub reader: Option<bool>,
 }
 
+impl Effects {
+    /// Two results as one, `other` after `self`: the redraws merge, the
+    /// later value of each option wins and the scroll requests combine.
+    pub fn merge(self, other: Effects) -> Effects {
+        Effects {
+            redraw: self.redraw.merge(other.redraw),
+            title: other.title.or(self.title),
+            dirty: other.dirty.or(self.dirty),
+            close: other.close.or(self.close),
+            scroll_to_cursor: self.scroll_to_cursor || other.scroll_to_cursor,
+            reader: other.reader.or(self.reader),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +94,34 @@ mod tests {
             Redraw::Lines(1..2)
         );
         assert_eq!(Redraw::Status.merge(Redraw::Status), Redraw::Status);
+    }
+
+    #[test]
+    fn effects_merge_keeps_the_later_values() {
+        let a = Effects {
+            redraw: Redraw::Lines(1..2),
+            title: Some("a".into()),
+            dirty: Some(true),
+            scroll_to_cursor: true,
+            ..Effects::default()
+        };
+        let b = Effects {
+            redraw: Redraw::Status,
+            title: Some("b".into()),
+            close: Some(0),
+            reader: Some(false),
+            ..Effects::default()
+        };
+        assert_eq!(
+            a.merge(b),
+            Effects {
+                redraw: Redraw::Lines(1..2),
+                title: Some("b".into()),
+                dirty: Some(true),
+                close: Some(0),
+                scroll_to_cursor: true,
+                reader: Some(false),
+            }
+        );
     }
 }

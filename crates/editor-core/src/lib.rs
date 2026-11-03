@@ -11,5 +11,6 @@ pub mod strings;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod tokens;
+pub mod undo;
 pub mod view_model;
 pub mod vim;

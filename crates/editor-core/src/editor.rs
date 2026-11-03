@@ -6,7 +6,9 @@
 //! the arrows, Home and End, and dirty tracking. With `Config::vim` the
 //! editor starts in Normal and routes Normal-mode keys to the vim engine
 //! (`crate::vim`), which decides what they mean; this file only carries out
-//! the `Step` it returns.
+//! the `Step` it returns. Operators live in `vim::operator`; every edit,
+//! typed or from an operator, goes through `EditCtx::replace`, which records
+//! it in the history.
 //!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
@@ -29,7 +31,10 @@ use crate::platform::Platform;
 use crate::status::{self, Mode};
 use crate::strings;
 use crate::tokens::{Theme, Tokens};
+use crate::undo::History;
 use crate::view_model::{Selection, StatusModel, ViewSource};
+use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator, Touched};
+use crate::vim::register::{Register, Registers};
 use crate::vim::{self, Cursor, Step, Vim, Want};
 
 /// What to open.
@@ -94,6 +99,8 @@ pub struct Editor {
     goal: Option<Want>,
     mode: Mode,
     vim: Vim,
+    registers: Registers,
+    history: History,
     dirty: bool,
     reader: bool,
     title: String,
@@ -156,6 +163,8 @@ impl Editor {
                 Mode::Insert
             },
             vim: Vim::new(),
+            registers: Registers::new(),
+            history: History::new(),
             dirty: false,
             reader: req.view,
             title,
@@ -209,6 +218,16 @@ impl Editor {
     /// The pending count and keys, for the status line (Task 26).
     pub fn showcmd(&self) -> String {
         self.vim.showcmd()
+    }
+
+    /// What register `name` holds (`None` is the unnamed register).
+    pub fn register(&self, name: Option<char>) -> Option<Register> {
+        self.registers.get(name)
+    }
+
+    /// Every change made so far.
+    pub fn history(&self) -> &History {
+        &self.history
     }
 
     pub fn dirty(&self) -> bool {
@@ -342,11 +361,28 @@ impl Editor {
                 if above {
                     // The edit leaves the cursor after the break.
                     let back = self.move_to(Pos { line, col: 0 });
-                    return combine(fx, back);
+                    return fx.merge(back);
                 }
                 fx
             }
+            Step::Operate { op, range } => self.operate(op, range),
+            Step::Put { before, count } => self.put(before, count),
         }
+    }
+
+    /// Applies an operator. Reader mode only yanks.
+    fn operate(&mut self, op: Operator, range: OpRange) -> Effects {
+        if self.reader && op != Operator::Yank {
+            return Effects::default();
+        }
+        self.run(|ctx| operator::operate(ctx, op, range))
+    }
+
+    fn put(&mut self, before: bool, count: usize) -> Effects {
+        if self.reader {
+            return Effects::default();
+        }
+        self.run(|ctx| operator::put(ctx, before, count))
     }
 
     /// Committed text in Normal mode is a run of keys. Once one of them
@@ -355,14 +391,14 @@ impl Editor {
         let mut fx = Effects::default();
         for (i, c) in text.char_indices() {
             if self.mode != Mode::Normal {
-                return combine(fx, self.insert(&text[i..]));
+                return fx.merge(self.insert(&text[i..]));
             }
             let k = KeyEvent {
                 key: Key::Char(c),
                 mods: Mods::default(),
                 time_ns: 0,
             };
-            fx = combine(fx, self.normal_key(k));
+            fx = fx.merge(self.normal_key(k));
         }
         fx
     }
@@ -435,35 +471,76 @@ impl Editor {
         if self.reader {
             return Effects::default();
         }
-        let old = self.reveal_extent(self.cursor.line);
-        let before = self.buf.line_count();
-        let inverse = self.buf.replace(r.clone(), text);
-        let delta = self.buf.line_count() as isize - before as isize;
-        let changed =
-            self.blocks
-                .update(&self.buf, r.start.line..inverse.range.end.line + 1, delta);
+        self.run(|ctx| {
+            let inverse = ctx.replace(r, text);
+            OpOutcome {
+                cursor: inverse.range.end,
+                insert: false,
+            }
+        })
+    }
 
-        // The old extent, in the new buffer: lines after the replaced range
-        // moved by `delta`.
-        let shift = |i: usize| {
-            if i > r.end.line {
-                i.saturating_add_signed(delta)
-            } else {
-                i
+    /// Runs `f` over an `EditCtx` on this editor's buffer, then brings the
+    /// block structure, cursor, mode and dirty state up to date and redraws
+    /// what changed.
+    fn run(&mut self, f: impl FnOnce(&mut EditCtx) -> OpOutcome) -> Effects {
+        let old = self.reveal_extent(self.cursor.line);
+        let mut ctx = EditCtx::new(
+            &mut self.buf,
+            self.cursor,
+            &mut self.history,
+            &mut self.registers,
+            self.host.as_mut(),
+        );
+        let out = f(&mut ctx);
+        let touched = ctx.touched().to_vec();
+        if out.insert {
+            self.mode = Mode::Insert;
+        }
+        self.finish(old, &touched, out.cursor)
+    }
+
+    /// After the edits in `touched`: updates the blocks, puts the cursor at
+    /// `cursor` and redraws the changed lines, the reveal extent the cursor
+    /// had (`old`, in the buffer before) and the one it has now.
+    fn finish(&mut self, old: Range<usize>, touched: &[Touched], cursor: Pos) -> Effects {
+        let n = self.buf.line_count();
+        let redraw = match touched {
+            [] => Redraw::Lines(old),
+            [t] => {
+                let changed =
+                    self.blocks
+                        .update(&self.buf, t.start_line..t.new_end_line + 1, t.delta);
+                // The old extent, in the new buffer: lines after the
+                // replaced range moved by `delta`.
+                let shift = |i: usize| {
+                    if i > t.old_end_line {
+                        i.saturating_add_signed(t.delta)
+                    } else {
+                        i
+                    }
+                };
+                let old = shift(old.start).min(n)..(shift(old.end - 1) + 1).min(n);
+                Redraw::Lines(changed).merge(Redraw::Lines(old))
+            }
+            // No command makes more than one edit yet; rebuild to be safe.
+            _ => {
+                self.blocks = Blocks::new(&self.buf);
+                Redraw::All
             }
         };
-        let n = self.buf.line_count();
-        let old = shift(old.start).min(n)..(shift(old.end - 1) + 1).min(n);
-
-        self.cursor = self.buf.clamp(inverse.range.end);
+        self.cursor = self.buf.clamp(cursor);
         self.goal = None;
         let new = self.reveal_extent(self.cursor.line);
-        let was_dirty = std::mem::replace(&mut self.dirty, true);
+        let dirty = if touched.is_empty() {
+            None
+        } else {
+            let was_dirty = std::mem::replace(&mut self.dirty, true);
+            (!was_dirty).then_some(true)
+        };
         Effects {
-            redraw: Redraw::Lines(changed)
-                .merge(Redraw::Lines(old))
-                .merge(Redraw::Lines(new)),
-            dirty: (!was_dirty).then_some(true),
+            redraw: redraw.merge(Redraw::Lines(new)),
+            dirty,
             scroll_to_cursor: true,
             ..Effects::default()
         }
@@ -560,18 +637,6 @@ impl Editor {
         } else {
             Reveal::None
         }
-    }
-}
-
-/// Two results as one: the redraws merge and the flags carry over.
-fn combine(a: Effects, b: Effects) -> Effects {
-    Effects {
-        redraw: a.redraw.merge(b.redraw),
-        title: b.title.or(a.title),
-        dirty: b.dirty.or(a.dirty),
-        close: b.close.or(a.close),
-        scroll_to_cursor: a.scroll_to_cursor || b.scroll_to_cursor,
-        reader: b.reader.or(a.reader),
     }
 }
 
