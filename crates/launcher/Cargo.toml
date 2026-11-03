@@ -7,3 +7,5 @@ publish = false
 
 [dependencies]
 app-meta = { path = "../app-meta" }
+marks = { path = "../marks" }
+libc = "0.2"
