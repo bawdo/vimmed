@@ -11,3 +11,8 @@ editor-core = { path = "../editor-core" }
 # frame through `TextLayout::end_frame`. Default features (std, swash, fontconfig) are kept.
 cosmic-text = { version = "0.19", features = ["shape-run-cache"] }
 tiny-skia = "0.12"
+marks = { path = "../marks" }
+# Code-block highlighting (Task 14). Rust grammar only; Task 28 adds the others.
+tree-sitter = "0.27"
+tree-sitter-highlight = "0.27"
+tree-sitter-rust = "0.24"
