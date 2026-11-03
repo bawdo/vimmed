@@ -354,8 +354,8 @@ impl Editor {
         if self.cfg.vim && arrow {
             // Vim: moving in Insert ends the undo step and the change `.`
             // repeats, and starts new ones.
-            self.history.end(self.cursor);
-            self.history.begin(self.cursor);
+            self.history.end();
+            self.history.begin();
             self.vim.arrowed();
         }
         let line = self.buf.line(self.cursor.line);
@@ -408,10 +408,10 @@ impl Editor {
     /// are repainted.
     fn normal_key(&mut self, k: KeyEvent) -> Effects {
         let before = self.selection_lines();
-        self.history.begin(self.cursor);
+        self.history.begin();
         let fx = self.normal_step(k);
         if self.mode != Mode::Insert {
-            self.history.end(self.cursor);
+            self.history.end();
         }
         if self.reader {
             self.vim.discard();
@@ -664,7 +664,7 @@ impl Editor {
         // session goes on after it. Its text joins what `.` repeats.
         let session = self.cfg.vim && insert;
         if session {
-            self.history.end(self.cursor);
+            self.history.end();
             self.vim.typed(&text);
         }
         let fx = self.run(|ctx| {
@@ -686,7 +686,7 @@ impl Editor {
             }
         });
         if session {
-            self.history.begin(self.cursor);
+            self.history.begin();
         }
         fx.merge(self.selection_redraw(before))
     }
@@ -780,7 +780,7 @@ impl Editor {
         self.mode = Mode::Normal;
         self.vim.reset();
         let fx = self.move_across(vim::leave_insert(&self.buf, self.cursor));
-        self.history.end(self.cursor);
+        self.history.end();
         self.vim.commit();
         fx
     }
@@ -866,7 +866,7 @@ impl Editor {
     /// what changed.
     fn run(&mut self, f: impl FnOnce(&mut EditCtx) -> OpOutcome) -> Effects {
         let old = self.reveal_extent(self.cursor.line);
-        self.history.begin(self.cursor);
+        self.history.begin();
         let mut ctx = EditCtx::new(
             &mut self.buf,
             self.cursor,
@@ -880,7 +880,7 @@ impl Editor {
             self.mode = Mode::Insert;
         }
         let fx = self.finish(old, &touched, out.cursor);
-        self.history.end(self.cursor);
+        self.history.end();
         fx
     }
 

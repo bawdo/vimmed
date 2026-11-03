@@ -40,10 +40,13 @@ pub fn op_range(buf: &Buffer, sel: Selection) -> OpRange {
     let (a, b) = sel.ordered();
     let (a, b) = (buf.clamp(a), buf.clamp(b));
     if sel.linewise {
+        // `start` is also the cursor undo restores: the head where it
+        // moved up, else column 0 of the first line.
+        let backward = sel.head < sel.anchor;
         return OpRange {
             start: Pos {
                 line: a.line,
-                col: 0,
+                col: if backward { a.col } else { 0 },
             },
             end: Pos {
                 line: b.line,
@@ -80,7 +83,11 @@ pub fn register(buf: &Buffer, sel: Selection) -> Register {
             line: r.end.line,
             col: buf.line(r.end.line).len(),
         };
-        let mut text = buf.text_range(r.start..end);
+        let from = Pos {
+            line: r.start.line,
+            col: 0,
+        };
+        let mut text = buf.text_range(from..end);
         text.push('\n');
         Register::lines(text)
     } else {
@@ -136,7 +143,7 @@ pub fn shape(buf: &Buffer, sel: Selection) -> Shape {
 pub fn region(buf: &Buffer, at: Pos, shape: Shape) -> OpRange {
     let at = buf.clamp(at);
     let head = match shape {
-        Shape::Lines(n) => return OpRange::lines(buf, at.line, n),
+        Shape::Lines(n) => return OpRange::lines(buf, at.line, at.col, n),
         Shape::Chars(n) => {
             let line = buf.line(at.line);
             let mut col = at.col;

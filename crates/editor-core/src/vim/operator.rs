@@ -52,7 +52,9 @@ impl Operator {
 
 /// The text an operator acts on. Charwise, `start..end` with `end`
 /// exclusive. Linewise, every line from `start.line` to `end.line`; the
-/// columns are not used.
+/// columns are not used to cut, but `start` is the cursor vim has at the
+/// change (what undo restores): the motion's landing for `k` and `gg`, the
+/// first non-blank for `dd`, the cursor for forward motions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpRange {
     pub start: Pos,
@@ -61,14 +63,23 @@ pub struct OpRange {
 }
 
 impl OpRange {
-    /// `count` whole lines from `line`, as far as the buffer goes (`dd cc
-    /// yy`).
-    pub fn lines(buf: &Buffer, line: usize, count: usize) -> OpRange {
+    /// `count` whole lines from the cursor's `line` and `col`, as far as
+    /// the buffer goes (`dd cc yy`). As in vim, where the operator's range
+    /// starts at the lesser of the cursor and where `dd` leaves it (the
+    /// first non-blank of the last line), `start.col` is the first
+    /// non-blank for one line (or the cursor's column if that is less), and
+    /// the cursor's column for more.
+    pub fn lines(buf: &Buffer, line: usize, col: usize, count: usize) -> OpRange {
         let last = buf.line_count() - 1;
         let line = line.min(last);
         let end = line.saturating_add(count.max(1) - 1).min(last);
+        let col = if end == line {
+            col.min(motion::caret_col(buf.line(line)))
+        } else {
+            col
+        };
         OpRange {
-            start: Pos { line, col: 0 },
+            start: Pos { line, col },
             end: Pos { line: end, col: 0 },
             linewise: true,
         }
@@ -181,10 +192,7 @@ fn span(buf: &Buffer, from: Pos, to: Pos, kind: MotionKind) -> OpRange {
     let (a, b) = if to < from { (to, from) } else { (from, to) };
     match kind {
         MotionKind::Linewise => OpRange {
-            start: Pos {
-                line: a.line,
-                col: 0,
-            },
+            start: a,
             end: Pos {
                 line: b.line,
                 col: 0,
@@ -274,7 +282,7 @@ impl<'a> EditCtx<'a> {
         let inverse = self.buf.replace(r, text);
         let delta = self.buf.line_count() as isize - before as isize;
         self.history
-            .record(inverse.clone(), undo::forward(&inverse, text));
+            .record(self.cursor, inverse.clone(), undo::forward(&inverse, text));
         self.cursor = inverse.range.end;
         self.touched.push(Touched {
             start_line: inverse.range.start.line,
@@ -350,6 +358,9 @@ fn charwise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
     match op {
         Operator::Yank => {}
         Operator::Delete | Operator::Change => {
+            // Vim moves the cursor to the start of the range first, which
+            // is where undo puts it back.
+            ctx.cursor = start;
             ctx.replace(start..end, "");
         }
     }
@@ -369,6 +380,19 @@ fn linewise(ctx: &mut EditCtx, op: Operator, range: OpRange) -> OpOutcome {
     let last = ctx.buf.line_count() - 1;
     let a = range.start.line.min(last);
     let b = range.end.line.min(last).max(a);
+    if op != Operator::Yank {
+        // Undo and redo restore the cursor vim had at the change.
+        ctx.cursor = Pos {
+            line: a,
+            col: range.start.col,
+        };
+        if op == Operator::Change && b > a {
+            // Vim's linewise change first deletes the lines after the
+            // first with the cursor moved down onto them, and that is the
+            // cursor undo restores.
+            ctx.cursor.line = a + 1;
+        }
+    }
     let line_end = |buf: &Buffer, line: usize| Pos {
         line,
         col: buf.line(line).len(),

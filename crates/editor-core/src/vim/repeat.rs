@@ -129,7 +129,7 @@ pub fn replay(ctx: &mut EditCtx, change: &Change) -> OpOutcome {
             count,
             inserted,
         } => {
-            let r = OpRange::lines(ctx.buf, cur.pos.line, *count);
+            let r = OpRange::lines(ctx.buf, cur.pos.line, cur.pos.col, *count);
             let out = operator::operate(ctx, *op, r);
             type_in(ctx, out, inserted.as_deref())
         }
@@ -472,7 +472,7 @@ mod tests {
     // Owned carry-overs.
 
     #[test]
-    fn big_o_redo_lands_where_the_session_ended() {
+    fn big_o_redo_lands_on_the_opened_line_at_the_saved_column() {
         let mut e = ed("abc");
         keys(&mut e, "lOfoo<Esc>");
         assert_eq!(e.text(), "foo\nabc");
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(e.cursor(), pos(0, 1));
         keys(&mut e, "<C-r>");
         assert_eq!(e.text(), "foo\nabc");
-        assert_eq!(e.cursor(), pos(0, 2));
+        assert_eq!(e.cursor(), pos(0, 1));
         // With nothing typed, redo lands on the opened line, not after it.
         let mut e = ed("abc");
         keys(&mut e, "O<Esc>u<C-r>");
@@ -610,7 +610,9 @@ mod tests {
     // Undo and redo.
 
     #[test]
-    fn undo_restores_the_cursor_before_and_redo_the_cursor_after() {
+    fn undo_and_redo_land_on_the_top_changed_line_as_vim_does() {
+        // Decision D12 (vim's `u_undoredo`): the saved column is the
+        // cursor at the group's first change.
         let mut e = ed("one two three");
         keys(&mut e, "wdw");
         assert_eq!(e.cursor(), pos(0, 4));
@@ -618,12 +620,334 @@ mod tests {
         assert_eq!(e.cursor(), pos(0, 4));
         keys(&mut e, "$<C-r>");
         assert_eq!(e.cursor(), pos(0, 4));
+        // `A` moves to the end before it changes anything: column 3, which
+        // Normal mode clamps to 2 on `abc`, and 3 on `abcxyz` after redo.
         let mut e = ed("abc");
         keys(&mut e, "Axyz<Esc>");
         keys(&mut e, "0u");
+        assert_eq!(e.cursor(), pos(0, 2));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 3));
+    }
+
+    #[test]
+    fn undo_of_dk_and_dgg_land_where_the_motion_put_the_cursor() {
+        let mut e = ed("x\n  yy\nzzzz");
+        keys(&mut e, "jj$dk");
+        assert_eq!(e.text(), "x");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "x\n  yy\nzzzz");
+        assert_eq!(e.cursor(), pos(1, 3));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 0));
+        let mut e = ed("  a\nbb\ncc");
+        keys(&mut e, "jj$dgg");
+        assert_eq!(e.text(), "");
+        keys(&mut e, "u");
+        assert_eq!(e.cursor(), pos(0, 2));
+    }
+
+    #[test]
+    fn undo_of_dj_keeps_the_saved_column() {
+        let mut e = ed("abcdef\nghijkl\nmno");
+        keys(&mut e, "lllllldj");
+        assert_eq!(e.text(), "mno");
+        keys(&mut e, "u");
+        assert_eq!(e.cursor(), pos(0, 5));
+        keys(&mut e, "<C-r>");
+        // Vim reports [1,6], past the end of "mno"; ours clamps.
+        assert_eq!(e.cursor(), pos(0, 2));
+    }
+
+    #[test]
+    fn undo_and_redo_of_o_land_on_the_line_it_was_opened_from() {
+        let mut e = ed("abc\ndef");
+        keys(&mut e, "lofoo<Esc>u");
+        assert_eq!(e.text(), "abc\ndef");
+        assert_eq!(e.cursor(), pos(0, 1));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.text(), "abc\nfoo\ndef");
+        assert_eq!(e.cursor(), pos(0, 1));
+    }
+
+    #[test]
+    fn undo_of_dd_on_the_last_line_lands_on_it() {
+        let mut e = ed("ab\n  cd");
+        keys(&mut e, "jdd");
+        assert_eq!(e.text(), "ab");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "ab\n  cd");
+        assert_eq!(e.cursor(), pos(1, 0));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 0));
+    }
+
+    #[test]
+    fn undo_clamps_the_saved_column_to_a_grapheme_boundary() {
+        // `A` saves the column past the line end; Normal mode rests on the
+        // start of the last cluster, never inside it.
+        let fam = "👩\u{200d}👩\u{200d}👧";
+        let mut e = ed(&format!("a{fam}"));
+        keys(&mut e, "Axyz<Esc>0u");
+        assert_eq!(e.text(), format!("a{fam}"));
+        assert_eq!(e.cursor(), pos(0, 1));
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.cursor(), pos(0, 19));
+        // `d0` moves the cursor to the range start, which vim restores.
+        let mut e = ed(&format!("abcde{fam}z"));
+        keys(&mut e, "llllld0u");
         assert_eq!(e.cursor(), pos(0, 0));
         keys(&mut e, "<C-r>");
-        assert_eq!(e.cursor(), pos(0, 5));
+        assert_eq!(e.text(), format!("{fam}z"));
+        assert_eq!(e.cursor(), pos(0, 0));
+    }
+
+    // Golden cases from real vim (VIM 9.1, headless), owner ruling R29.
+    // Positions here are 0-based; each test notes vim's 1-based ones.
+
+    const GOLDEN: &str = "  alpha one\n    bravo two\n      charlie three\n delta four";
+
+    fn golden(start: &str, typed: &str, want: crate::buffer::Pos) {
+        let mut e = ed(GOLDEN);
+        keys(&mut e, start);
+        keys(&mut e, typed);
+        assert_eq!(e.cursor(), want, "{typed:?} from {start:?}");
+    }
+
+    #[test]
+    fn vim_golden_a_xyz_then_undo() {
+        // Vim: start (2,9), result [2,13].
+        golden("j8l", "Axyz<Esc>0u", pos(1, 12));
+    }
+
+    #[test]
+    fn vim_golden_dd_undo() {
+        // Vim: start (2,9), result [2,5].
+        golden("j8l", "ddu", pos(1, 4));
+    }
+
+    #[test]
+    fn vim_golden_dd_undo_redo() {
+        // Vim: start (2,9), result [2,5] (each step its own undo block).
+        golden("j8l", "ddu<C-r>", pos(1, 4));
+    }
+
+    #[test]
+    fn vim_golden_dk_undo() {
+        // Vim: start (3,10), result [2,10].
+        golden("jj9l", "dku", pos(1, 9));
+    }
+
+    #[test]
+    fn vim_golden_dk_undo_redo() {
+        // Vim: start (3,10), result [2,10] (each step its own undo block).
+        golden("jj9l", "dku<C-r>", pos(1, 9));
+    }
+
+    #[test]
+    fn vim_golden_dj_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dju", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_dgg_undo() {
+        // Vim: start (4,8), result [1,3].
+        golden("jjj7l", "dggu", pos(0, 2));
+    }
+
+    #[test]
+    fn vim_golden_big_g_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dGu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_x_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "xu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_dw_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dwu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_dw_undo_redo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "dwu<C-r>", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_cw_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "cwZZ<Esc>u", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_o_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "oNEW<Esc>u", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_big_o_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "ONEW<Esc>u", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_o_undo_redo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "oNEW<Esc>u<C-r>", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_yyjp_undo() {
+        // Vim: start (2,9), result [3,9].
+        golden("j8l", "yyjpu", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_yykp_undo() {
+        // Vim: start (2,9), result [1,9].
+        golden("j8l", "yykPu", pos(0, 8));
+    }
+
+    // `J` is not implemented in vim/mod.rs yet, so this passes without
+    // testing anything: ignored until a task adds `J`, then enable it.
+    #[test]
+    #[ignore = "J is not implemented yet"]
+    fn vim_golden_j_join_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "Ju", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_cc_undo() {
+        // Vim: start (2,9), result [2,5].
+        golden("j8l", "ccZZ<Esc>u", pos(1, 4));
+    }
+
+    #[test]
+    fn vim_golden_big_v_d_undo() {
+        // Vim: start (2,9), result [2,1].
+        golden("j8l", "Vdu", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_big_v_j_d_undo() {
+        // Vim: start (2,9), result [2,1].
+        golden("j8l", "Vjdu", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_big_v_k_d_undo() {
+        // Vim: start (3,10), result [2,10].
+        golden("jj9l", "Vkdu", pos(1, 9));
+    }
+
+    #[test]
+    fn vim_golden_big_v_j_c_undo() {
+        // Vim: start (2,9), result [3,1].
+        golden("j8l", "VjcZZ<Esc>u", pos(2, 0));
+    }
+
+    #[test]
+    fn vim_golden_v_j_d_undo() {
+        // Vim: start (2,9), result [2,9].
+        golden("j8l", "vjdu", pos(1, 8));
+    }
+
+    #[test]
+    fn vim_golden_v_k_d_undo() {
+        // Vim: start (3,10), result [2,10].
+        golden("jj9l", "vkdu", pos(1, 9));
+    }
+
+    #[test]
+    fn vim_golden_cj_undo() {
+        // Vim: start (2,9), result [3,9].
+        golden("j8l", "cjZZ<Esc>u", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_two_cc_undo() {
+        // Vim: start (2,9), result [3,9].
+        golden("j8l", "2ccZZ<Esc>u", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_ck_undo() {
+        // Vim: start (3,10), result [3,10].
+        golden("jj9l", "ckZZ<Esc>u", pos(2, 9));
+    }
+
+    #[test]
+    fn vim_golden_cc_undo_redo() {
+        // Vim: start (2,9), result [2,2] (each step its own undo block).
+        golden("j8l", "ccZZ<Esc>u<C-r>", pos(1, 1));
+    }
+
+    #[test]
+    fn vim_golden_big_v_d_undo_redo() {
+        // Vim: start (2,9), result [2,1] (each step its own undo block).
+        golden("j8l", "Vdu<C-r>", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_dd_undo_redo_on_line_3() {
+        // Vim: start (3,10), result [3,7] (each step its own undo block).
+        golden("jj9l", "ddu<C-r>", pos(2, 6));
+    }
+
+    #[test]
+    fn vim_golden_big_v_j_d_undo_redo() {
+        // Vim: start (2,9), result [2,1] (each step its own undo block).
+        golden("j8l", "Vjdu<C-r>", pos(1, 0));
+    }
+
+    #[test]
+    fn vim_golden_big_v_k_c_undo_redo() {
+        // Vim: start (3,10), result [3,10] (each step its own undo block).
+        golden("jj9l", "VkcZZ<Esc>u<C-r>", pos(2, 9));
+    }
+
+    #[test]
+    fn vim_golden_cj_undo_redo() {
+        // Vim: start (2,9), result [3,9] (each step its own undo block).
+        golden("j8l", "cjZZ<Esc>u<C-r>", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_two_cc_undo_redo() {
+        // Vim: start (2,9), result [3,9] (each step its own undo block).
+        golden("j8l", "2ccZZ<Esc>u<C-r>", pos(2, 8));
+    }
+
+    #[test]
+    fn vim_golden_a_xyz_undo_redo() {
+        // Vim: start (2,9), result [2,14] (each step its own undo block).
+        golden("j8l", "Axyz<Esc>0u<C-r>", pos(1, 13));
+    }
+
+    #[test]
+    fn undo_lands_on_a_cluster_start_when_the_saved_column_is_inside_one() {
+        // R12. `cj` from (3,10) saves column 9 of line 4, which is inside
+        // the cluster. Vim works on codepoints and lands on byte column 10;
+        // we land on the cluster start.
+        let fam = "👩\u{200d}👩\u{200d}👧";
+        let mut e = ed(&format!(
+            "  alpha one\n    bravo two\n      charlie three\nab{fam}cd"
+        ));
+        keys(&mut e, "jj9lcjZZ<Esc>u");
+        assert_eq!(e.cursor(), pos(3, 2));
+        keys(&mut e, "<C-r>");
+        let text = e.text();
+        let line = text.lines().nth(e.cursor().line).unwrap_or("");
+        assert_eq!(crate::grapheme::floor(line, e.cursor().col), e.cursor().col);
     }
 
     #[test]
