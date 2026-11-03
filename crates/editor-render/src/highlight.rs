@@ -170,6 +170,10 @@ struct Done {
 struct BlockState {
     /// Latest generation sent to the worker; older results are dropped.
     gen_: u64,
+    /// The language and text last sent to the worker (by `request` or `edit`),
+    /// so an unchanged `request` can be skipped.
+    lang: Lang,
+    text: String,
     lines: Vec<LineSpans>,
     info: Option<ReparseInfo>,
 }
@@ -201,17 +205,32 @@ impl Highlighter {
     /// The caller must request only blocks that are on screen. The highlighter
     /// does no work for blocks nobody requested, and none for an unknown
     /// language (which stays plain).
+    ///
+    /// Idempotent: a request whose language and text match the last request
+    /// or `edit` for this block does nothing (no job, no new generation, no
+    /// wake, tree untouched), so it is safe to call for every on-screen block
+    /// on every paint. Changed text or language re-highlights from scratch.
     pub fn request(&mut self, block: BlockId, lang: &str, text: &str) {
         let Some(lang) = Lang::from_name(lang) else {
             return;
         };
+        if let Some(s) = self.blocks.get(&block)
+            && s.lang == lang
+            && s.text == text
+        {
+            return;
+        }
         let gen_ = self.bump();
-        self.blocks.entry(block).or_insert(BlockState {
+        let state = self.blocks.entry(block).or_insert(BlockState {
             gen_,
+            lang,
+            text: String::new(),
             lines: Vec::new(),
             info: None,
         });
-        self.blocks.get_mut(&block).unwrap().gen_ = gen_;
+        state.gen_ = gen_;
+        state.lang = lang;
+        state.text = text.to_owned();
         self.send(Job::Request {
             block,
             gen_,
@@ -263,7 +282,9 @@ impl Highlighter {
             return;
         }
         let gen_ = self.bump();
-        self.blocks.get_mut(&block).unwrap().gen_ = gen_;
+        let state = self.blocks.get_mut(&block).unwrap();
+        state.gen_ = gen_;
+        state.text = new_text.to_owned();
         self.send(Job::Edit {
             block,
             gen_,

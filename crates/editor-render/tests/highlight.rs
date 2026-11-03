@@ -180,6 +180,80 @@ fn incremental_edit_keeps_tree() {
     );
 }
 
+/// Poll for a bounded window and report whether anything was ever returned.
+fn quiet_for(h: &mut Highlighter, window: Duration) -> bool {
+    let start = Instant::now();
+    let mut quiet = true;
+    while start.elapsed() < window {
+        quiet &= h.poll().is_empty();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    quiet
+}
+
+#[test]
+fn repeat_request_with_same_lang_and_text_is_a_no_op() {
+    let (waker, wakes) = counting_waker();
+    let mut h = Highlighter::new(waker);
+    let b = BlockId(5);
+    h.request(b, "rust", "fn main() {}");
+    wait_for(&mut h, b);
+    let wakes_before = wakes.load(Ordering::SeqCst);
+    let info_before = h.last_reparse(b);
+
+    // A host that requests on every paint must not cause work or wakes.
+    for _ in 0..5 {
+        h.request(b, "rust", "fn main() {}");
+    }
+    assert!(quiet_for(&mut h, Duration::from_millis(150)), "a job ran");
+    assert_eq!(wakes.load(Ordering::SeqCst), wakes_before, "a wake fired");
+    assert_eq!(h.last_reparse(b), info_before);
+    // The colour is still there.
+    assert!(
+        h.spans(b, 0)
+            .iter()
+            .any(|(r, c)| *r == (0..2) && *c == SyntaxClass::Keyword)
+    );
+
+    // Changed text still re-highlights.
+    h.request(b, "rust", "let x = 1;");
+    wait_for(&mut h, b);
+    assert!(
+        h.spans(b, 0)
+            .iter()
+            .any(|(r, c)| *r == (0..3) && *c == SyntaxClass::Keyword)
+    );
+    assert!(wakes.load(Ordering::SeqCst) > wakes_before);
+}
+
+#[test]
+fn request_after_edit_with_matching_text_is_a_no_op() {
+    let (waker, wakes) = counting_waker();
+    let mut h = Highlighter::new(waker);
+    let b = BlockId(6);
+    h.request(b, "rust", "fn a() {}");
+    wait_for(&mut h, b);
+
+    let edit = InputEdit {
+        start_byte: 3,
+        old_end_byte: 4,
+        new_end_byte: 4,
+        start_position: Point { row: 0, column: 3 },
+        old_end_position: Point { row: 0, column: 4 },
+        new_end_position: Point { row: 0, column: 4 },
+    };
+    h.edit(b, edit, "fn b() {}");
+    wait_for(&mut h, b);
+    let wakes_before = wakes.load(Ordering::SeqCst);
+    let info_before = h.last_reparse(b);
+    assert!(info_before.unwrap().incremental);
+
+    h.request(b, "rust", "fn b() {}");
+    assert!(quiet_for(&mut h, Duration::from_millis(150)), "a job ran");
+    assert_eq!(wakes.load(Ordering::SeqCst), wakes_before, "a wake fired");
+    assert_eq!(h.last_reparse(b), info_before);
+}
+
 #[test]
 fn every_class_has_a_distinct_syntax_token() {
     let mut seen = std::collections::HashSet::new();
