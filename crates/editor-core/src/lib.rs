@@ -8,5 +8,8 @@ pub mod markdown;
 pub mod platform;
 pub mod status;
 pub mod strings;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod tokens;
 pub mod view_model;
+pub mod vim;

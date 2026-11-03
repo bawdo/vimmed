@@ -2,9 +2,11 @@
 //! block structure, the cursor and the mode, turns `Input` into edits and
 //! `Effects`, and implements `ViewSource` for the renderer.
 //!
-//! This is the insert-only skeleton: typing, Backspace, Delete, Enter (a
-//! plain line split), the arrows, Home and End, and dirty tracking. The vim
-//! engine (Task 19 onward) grows inside it.
+//! The insert path: typing, Backspace, Delete, Enter (a plain line split),
+//! the arrows, Home and End, and dirty tracking. With `Config::vim` the
+//! editor starts in Normal and routes Normal-mode keys to the vim engine
+//! (`crate::vim`), which decides what they mean; this file only carries out
+//! the `Step` it returns.
 //!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
@@ -18,7 +20,7 @@ use crate::buffer::{Buffer, Pos};
 use crate::effects::{Effects, Redraw};
 use crate::grapheme;
 use crate::host::Host;
-use crate::input::{Input, Key, KeyEvent};
+use crate::input::{Input, Key, KeyEvent, Mods};
 use crate::markdown::{
     BlockId, Blocks, InlineKind, LineDisplay, LineKind, Prefix, Reveal, SpanBase, TableId, code_bg,
     line_display, ordered_display, parse_line,
@@ -28,6 +30,7 @@ use crate::status::{self, Mode};
 use crate::strings;
 use crate::tokens::{Theme, Tokens};
 use crate::view_model::{Selection, StatusModel, ViewSource};
+use crate::vim::{self, Cursor, Step, Vim, Want};
 
 /// What to open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,9 +89,11 @@ pub struct Editor {
     blocks: Blocks,
     tokens: Tokens,
     cursor: Pos,
-    /// The column (in graphemes) Up and Down aim for while they repeat.
-    goal: Option<usize>,
+    /// The column Up and Down (and `j`, `k`) aim for while they repeat.
+    /// `None` means the cursor's own display column.
+    goal: Option<Want>,
     mode: Mode,
+    vim: Vim,
     dirty: bool,
     reader: bool,
     title: String,
@@ -116,7 +121,7 @@ impl Editor {
         editor
     }
 
-    fn build(
+    pub(crate) fn build(
         req: OpenRequest,
         text: &str,
         message: Option<&'static str>,
@@ -144,9 +149,13 @@ impl Editor {
             tokens: Tokens::defaults(Theme::Light),
             cursor,
             goal: None,
-            // TODO(Task 19): start in Normal when `cfg.vim` is set (bench
-            // mode still starts in Insert). The skeleton is insert-only.
-            mode: Mode::Insert,
+            // Bench mode types straight away, so it starts in Insert.
+            mode: if cfg.vim && !bench {
+                Mode::Normal
+            } else {
+                Mode::Insert
+            },
+            vim: Vim::new(),
             dirty: false,
             reader: req.view,
             title,
@@ -160,6 +169,9 @@ impl Editor {
     pub fn handle(&mut self, input: Input) -> Effects {
         match input {
             Input::Key(k) => self.key(k),
+            Input::Text(text) if self.cfg.vim && self.mode == Mode::Normal => {
+                self.normal_text(&text)
+            }
             Input::Text(text) => self.insert(&text),
             // TODO(later tasks): ask before closing with unsaved changes.
             Input::CloseRequested => Effects {
@@ -194,6 +206,11 @@ impl Editor {
         self.mode
     }
 
+    /// The pending count and keys, for the status line (Task 26).
+    pub fn showcmd(&self) -> String {
+        self.vim.showcmd()
+    }
+
     pub fn dirty(&self) -> bool {
         self.dirty
     }
@@ -216,9 +233,35 @@ impl Editor {
     }
 
     fn key(&mut self, k: KeyEvent) -> Effects {
+        let ctrl_c = k.key == Key::Char('c')
+            && k.mods
+                == Mods {
+                    ctrl: true,
+                    ..Mods::default()
+                };
+        // Ctrl+C is Esc in vim. TODO(Task 22): not while Visual has a
+        // selection.
+        let k = if self.cfg.vim && ctrl_c {
+            KeyEvent {
+                key: Key::Esc,
+                mods: Mods::default(),
+                ..k
+            }
+        } else {
+            k
+        };
         if k.mods.ctrl || self.platform.primary(k.mods) {
             // Shortcuts arrive with later tasks.
             return Effects::default();
+        }
+        if self.cfg.vim {
+            match self.mode {
+                Mode::Normal => return self.normal_key(k),
+                Mode::Insert if k.key == Key::Esc => return self.leave_insert(),
+                Mode::Insert => {}
+                // Later tasks build the other modes; nothing enters them yet.
+                _ => return Effects::default(),
+            }
         }
         let line = self.buf.line(self.cursor.line);
         let col = self.buf.clamp(self.cursor).col;
@@ -255,9 +298,80 @@ impl Editor {
             Key::End => self.move_across(self.line_end(self.cursor.line)),
             Key::Up => self.vertical(false),
             Key::Down => self.vertical(true),
-            // TODO(Task 19 onward): Esc, Tab and paging.
+            // TODO(later tasks): Tab and paging. Esc only means something
+            // in vim, which handles it above.
             Key::Esc | Key::Tab | Key::PageUp | Key::PageDown => Effects::default(),
         }
+    }
+
+    /// Carries out what the vim engine makes of a Normal-mode key.
+    fn normal_key(&mut self, k: KeyEvent) -> Effects {
+        let cur = Cursor {
+            pos: self.cursor,
+            want: self.goal.unwrap_or_else(|| {
+                Want::Col(grapheme::display_col(
+                    self.buf.line(self.cursor.line),
+                    self.cursor.col,
+                ))
+            }),
+        };
+        match self.vim.key(&k, &self.buf, cur) {
+            Step::Pending => Effects {
+                redraw: Redraw::Status,
+                ..Effects::default()
+            },
+            Step::Move(c) => {
+                let fx = self.move_to(c.pos);
+                self.goal = Some(c.want);
+                fx
+            }
+            Step::Insert(_) | Step::Open { .. } if self.reader => Effects::default(),
+            Step::Insert(p) => {
+                self.mode = Mode::Insert;
+                self.move_across(p)
+            }
+            Step::Open { above } => {
+                let line = self.cursor.line;
+                let at = if above {
+                    Pos { line, col: 0 }
+                } else {
+                    self.line_end(line)
+                };
+                self.mode = Mode::Insert;
+                let fx = self.edit(at..at, "\n");
+                if above {
+                    // The edit leaves the cursor after the break.
+                    let back = self.move_to(Pos { line, col: 0 });
+                    return combine(fx, back);
+                }
+                fx
+            }
+        }
+    }
+
+    /// Committed text in Normal mode is a run of keys. Once one of them
+    /// enters Insert, the rest is typed.
+    fn normal_text(&mut self, text: &str) -> Effects {
+        let mut fx = Effects::default();
+        for (i, c) in text.char_indices() {
+            if self.mode != Mode::Normal {
+                return combine(fx, self.insert(&text[i..]));
+            }
+            let k = KeyEvent {
+                key: Key::Char(c),
+                mods: Mods::default(),
+                time_ns: 0,
+            };
+            fx = combine(fx, self.normal_key(k));
+        }
+        fx
+    }
+
+    /// Esc in Insert: back to Normal, one grapheme left.
+    fn leave_insert(&mut self) -> Effects {
+        self.mode = Mode::Normal;
+        self.vim.reset();
+        self.move_across(vim::leave_insert(&self.buf, self.cursor))
     }
 
     /// A position on the cursor's line.
@@ -374,19 +488,24 @@ impl Editor {
             };
             up
         };
-        let goal = match self.goal {
-            Some(g) => g,
-            None => grapheme::display_col(self.buf.line(line), self.cursor.col),
-        };
+        let goal = self.goal.unwrap_or_else(|| {
+            Want::Col(grapheme::display_col(self.buf.line(line), self.cursor.col))
+        });
         self.goal = Some(goal);
         let text = self.buf.line(target);
-        let mut col = 0;
-        for _ in 0..goal {
-            if col >= text.len() {
-                break;
+        let col = match goal {
+            Want::End => text.len(),
+            Want::Col(g) => {
+                let mut col = 0;
+                for _ in 0..g {
+                    if col >= text.len() {
+                        break;
+                    }
+                    col = grapheme::next(text, col);
+                }
+                col
             }
-            col = grapheme::next(text, col);
-        }
+        };
         self.move_to(Pos { line: target, col })
     }
 
@@ -441,6 +560,18 @@ impl Editor {
         } else {
             Reveal::None
         }
+    }
+}
+
+/// Two results as one: the redraws merge and the flags carry over.
+fn combine(a: Effects, b: Effects) -> Effects {
+    Effects {
+        redraw: a.redraw.merge(b.redraw),
+        title: b.title.or(a.title),
+        dirty: b.dirty.or(a.dirty),
+        close: b.close.or(a.close),
+        scroll_to_cursor: a.scroll_to_cursor || b.scroll_to_cursor,
+        reader: b.reader.or(a.reader),
     }
 }
 
@@ -510,43 +641,16 @@ impl ViewSource for Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::fake::FakeHost;
-    use crate::input::{Mods, SignalKind};
+    use crate::input::SignalKind;
     use crate::markdown::{
         BlockDeco, Prefix, Reveal, SpanBase, line_display, parse_inline, parse_line,
     };
     use crate::strings;
+    use crate::testkit::{FakeHost, build, key, req};
 
-    fn req(path: &str) -> OpenRequest {
-        OpenRequest {
-            path: PathBuf::from(path),
-            view: false,
-            display_name: None,
-        }
-    }
-
-    fn build(text: &str, bench: bool) -> Editor {
-        Editor::build(
-            req("notes.md"),
-            text,
-            None,
-            Config::default(),
-            Platform::Mac,
-            Box::new(FakeHost::default()),
-            bench,
-        )
-    }
-
+    /// The insert path on its own: vim off.
     fn ed(text: &str) -> Editor {
-        build(text, false)
-    }
-
-    fn key(k: Key) -> Input {
-        Input::Key(KeyEvent {
-            key: k,
-            mods: Mods::default(),
-            time_ns: 0,
-        })
+        build(text, Config { vim: false }, false)
     }
 
     fn at(e: &mut Editor, line: usize, col: usize) {
@@ -754,7 +858,7 @@ mod tests {
     #[test]
     fn bench_mode_starts_at_first_bold_paragraph() {
         let text = "# **Heading** bold\n\n- **item**\n\nplain\nsome **bold** text";
-        let e = build(text, true);
+        let e = build(text, Config::default(), true);
         assert_eq!(e.mode(), Mode::Insert);
         assert_eq!(e.cursor(), Pos { line: 5, col: 7 });
         assert_eq!(e.status().mode, "INSERT");
@@ -762,7 +866,7 @@ mod tests {
 
     #[test]
     fn bench_mode_without_bold_starts_at_the_document_start() {
-        let e = build("plain\ntext", true);
+        let e = build("plain\ntext", Config::default(), true);
         assert_eq!(e.mode(), Mode::Insert);
         assert_eq!(e.cursor(), Pos::default());
     }

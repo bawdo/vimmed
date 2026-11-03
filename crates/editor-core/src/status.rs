@@ -4,12 +4,7 @@ use crate::buffer::{Buffer, Pos};
 use crate::grapheme;
 use crate::strings;
 
-/// The editing mode. The vim engine (Task 19 onward) adds the rest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Normal,
-    Insert,
-}
+pub use crate::vim::Mode;
 
 impl Mode {
     /// The name shown in the status bar.
@@ -17,6 +12,14 @@ impl Mode {
         match self {
             Mode::Normal => strings::MODE_NORMAL,
             Mode::Insert => strings::MODE_INSERT,
+            // TODO(Task 26): names for the modes later tasks build. Until
+            // then nothing enters them.
+            Mode::Visual
+            | Mode::VisualLine
+            | Mode::Search
+            | Mode::Command
+            | Mode::Confirm
+            | Mode::Prompt => "",
         }
     }
 }
