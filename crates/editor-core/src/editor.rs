@@ -10,7 +10,12 @@
 //! typed or from an operator, goes through `EditCtx::replace`, which records
 //! it in the history.
 //!
-//! Undo groups: each Normal-mode command is one undo step, and an Insert
+//! Visual and Visual Line route their keys to the engine the same way; the
+//! editor keeps the selection's anchor. The clipboard keys (Primary+C, X
+//! and V, and Ctrl+C) are handled here before any mode sees the key.
+//!
+//! Undo groups: each Normal- or Visual-mode command is one undo step, a
+//! paste is one, and an Insert
 //! session is one step from its entry key (with the line `o` opens or the
 //! text `c` deletes) to Esc. An arrow key inside the session ends the step
 //! and starts another, as in vim.
@@ -41,7 +46,7 @@ use crate::view_model::{Selection, StatusModel, ViewSource};
 use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator, Touched};
 use crate::vim::register::{Register, Registers};
 use crate::vim::repeat::Change;
-use crate::vim::{self, Cursor, Step, Vim, Want};
+use crate::vim::{self, Cursor, Step, Vim, Want, textobj, visual};
 
 /// What to open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +109,14 @@ pub struct Editor {
     /// `None` means the cursor's own display column.
     goal: Option<Want>,
     mode: Mode,
+    /// The selection's anchor while Visual is up; the cursor is its head.
+    anchor: Option<Pos>,
+    /// The command line's text (Command mode).
+    cmdline: String,
+    /// The selection `:` left Visual with.
+    last_visual: Option<Selection>,
+    /// The Visual mode `/` left, to come back to when the search ends.
+    search_return: Option<Mode>,
     vim: Vim,
     registers: Registers,
     history: History,
@@ -168,6 +181,10 @@ impl Editor {
             } else {
                 Mode::Insert
             },
+            anchor: None,
+            cmdline: String::new(),
+            last_visual: None,
+            search_return: None,
             vim: Vim::new(),
             registers: Registers::new(),
             history: History::new(),
@@ -184,10 +201,13 @@ impl Editor {
     pub fn handle(&mut self, input: Input) -> Effects {
         match input {
             Input::Key(k) => self.key(k),
-            Input::Text(text) if self.cfg.vim && self.mode == Mode::Normal => {
-                self.normal_text(&text)
-            }
-            Input::Text(text) => self.insert(&text),
+            // Committed text types only in Insert. In Normal and Visual it
+            // is a run of keys, so an input method never types into the
+            // buffer there.
+            Input::Text(text) if !self.cfg.vim || self.mode == Mode::Insert => self.insert(&text),
+            Input::Text(text) if self.takes_keys() => self.normal_text(&text),
+            // TODO(Tasks 24 and 25): text on the search and command lines.
+            Input::Text(_) => Effects::default(),
             // TODO(later tasks): ask before closing with unsaved changes.
             Input::CloseRequested => Effects {
                 close: Some(0),
@@ -231,6 +251,21 @@ impl Editor {
         self.registers.get(name)
     }
 
+    /// The command line's text: `'<,'>` once `:` is pressed in Visual.
+    /// TODO(Task 25): editing and running it.
+    pub fn cmdline(&self) -> &str {
+        &self.cmdline
+    }
+
+    /// The selection Visual had when `:` left it, for the `'<,'>` range.
+    pub fn last_visual(&self) -> Option<Selection> {
+        self.last_visual
+    }
+
+    pub fn buffer(&self) -> &Buffer {
+        &self.buf
+    }
+
     /// The undo history.
     pub fn history(&self) -> &History {
         &self.history
@@ -263,15 +298,23 @@ impl Editor {
     }
 
     fn key(&mut self, k: KeyEvent) -> Effects {
-        let ctrl_c = k.key == Key::Char('c')
+        let ctrl_c = self.cfg.vim
+            && k.key == Key::Char('c')
             && k.mods
                 == Mods {
                     ctrl: true,
                     ..Mods::default()
                 };
-        // Ctrl+C is Esc in vim. TODO(Task 22): not while Visual has a
-        // selection.
-        let k = if self.cfg.vim && ctrl_c {
+        let primary = self.platform.primary(k.mods);
+        // The clipboard keys. Ctrl+C copies a Visual selection too; with
+        // none it is Esc, as in vim.
+        match k.key {
+            Key::Char('c') if (primary || ctrl_c) && self.visual() => return self.copy(),
+            Key::Char('x') if primary => return self.cut(),
+            Key::Char('v') if primary => return self.paste(),
+            _ => {}
+        }
+        let k = if ctrl_c {
             KeyEvent {
                 key: Key::Esc,
                 mods: Mods::default(),
@@ -288,17 +331,20 @@ impl Editor {
                     ctrl: true,
                     ..Mods::default()
                 };
+        // The modifiers after Ctrl+C became Esc.
         if (k.mods.ctrl || self.platform.primary(k.mods)) && !redo {
             // Shortcuts arrive with later tasks.
             return Effects::default();
         }
         if self.cfg.vim {
             match self.mode {
-                Mode::Normal => return self.normal_key(k),
+                Mode::Normal | Mode::Visual | Mode::VisualLine => return self.normal_key(k),
                 Mode::Insert if k.key == Key::Esc => return self.leave_insert(),
                 Mode::Insert => {}
+                Mode::Command => return self.command_key(k),
+                Mode::Search => return self.search_key(k),
                 // Later tasks build the other modes; nothing enters them yet.
-                _ => return Effects::default(),
+                Mode::Confirm | Mode::Prompt => return Effects::default(),
             }
         }
         let arrow = matches!(
@@ -357,7 +403,11 @@ impl Editor {
     /// undo step. A key that enters Insert leaves the step open until Esc,
     /// and the change it starts waits for Esc to become the one `.`
     /// repeats.
+    ///
+    /// Visual keys come here too: the selection's lines, before and after,
+    /// are repainted.
     fn normal_key(&mut self, k: KeyEvent) -> Effects {
+        let before = self.selection_lines();
         self.history.begin(self.cursor);
         let fx = self.normal_step(k);
         if self.mode != Mode::Insert {
@@ -368,7 +418,7 @@ impl Editor {
         } else if self.mode == Mode::Normal {
             self.vim.commit();
         }
-        fx
+        fx.merge(self.selection_redraw(before))
     }
 
     fn normal_step(&mut self, k: KeyEvent) -> Effects {
@@ -381,11 +431,44 @@ impl Editor {
                 ))
             }),
         };
-        match self.vim.key(&k, &self.buf, cur) {
-            Step::Pending => Effects {
-                redraw: Redraw::Status,
-                ..Effects::default()
-            },
+        let step = match self.shown_selection().filter(|_| self.visual()) {
+            Some(sel) => self.vim.visual_key(&k, &self.buf, cur, sel),
+            None => self.vim.key(&k, &self.buf, cur),
+        };
+        let status = Effects {
+            redraw: Redraw::Status,
+            ..Effects::default()
+        };
+        match step {
+            Step::Pending => status,
+            Step::Visual { linewise } => {
+                if !self.visual() {
+                    self.anchor = Some(self.cursor);
+                }
+                self.mode = if linewise {
+                    Mode::VisualLine
+                } else {
+                    Mode::Visual
+                };
+                status
+            }
+            Step::Leave => {
+                self.leave_visual();
+                status
+            }
+            Step::Cmdline => {
+                self.last_visual = self.shown_selection();
+                self.leave_visual();
+                self.mode = Mode::Command;
+                self.cmdline = "'<,'>".to_owned();
+                status
+            }
+            Step::Search => {
+                self.search_return = Some(self.mode);
+                self.mode = Mode::Search;
+                status
+            }
+            Step::InnerCode { op } => self.inner_code(op),
             Step::Move(c) => {
                 let fx = self.move_to(c.pos);
                 self.goal = Some(c.want);
@@ -397,12 +480,215 @@ impl Editor {
                 self.move_across(p)
             }
             Step::Open { above } => self.run(|ctx| operator::open_line(ctx, above)),
-            Step::Operate { op, range } => self.operate(op, range),
+            Step::Operate { op, range } => {
+                self.leave_visual();
+                self.operate(op, range)
+            }
             Step::Put { before, count } => self.put(before, count),
             Step::Undo { count } => self.undo(false, count),
             Step::Redo { count } => self.undo(true, count),
-            Step::Repeat { count } => self.repeat(count),
+            Step::Repeat { count } => {
+                self.leave_visual();
+                self.repeat(count)
+            }
         }
+    }
+
+    /// The selection, while Visual is up or a search from Visual is.
+    fn shown_selection(&self) -> Option<Selection> {
+        let linewise = match self.mode {
+            Mode::Visual => false,
+            Mode::VisualLine => true,
+            Mode::Search => self.search_return? == Mode::VisualLine,
+            _ => return None,
+        };
+        self.anchor.map(|anchor| Selection {
+            anchor,
+            head: self.cursor,
+            linewise,
+        })
+    }
+
+    /// True in Visual or Visual Line.
+    fn visual(&self) -> bool {
+        matches!(self.mode, Mode::Visual | Mode::VisualLine)
+    }
+
+    /// True in the modes where a key, or committed text, is a vim command.
+    fn takes_keys(&self) -> bool {
+        self.mode == Mode::Normal || self.visual()
+    }
+
+    /// Back to Normal from Visual, with the cursor where it is. Outside
+    /// Visual it does nothing.
+    fn leave_visual(&mut self) {
+        if self.visual() {
+            self.mode = Mode::Normal;
+            self.anchor = None;
+            self.cursor = vim::rest(&self.buf, self.cursor);
+        }
+    }
+
+    /// The lines the selection covers, if one shows.
+    fn selection_lines(&self) -> Option<Range<usize>> {
+        let (a, b) = self.shown_selection()?.ordered();
+        Some(a.line..b.line + 1)
+    }
+
+    /// Repaints the lines the selection covered (`before`, clamped to the
+    /// buffer now) and covers now.
+    fn selection_redraw(&self, before: Option<Range<usize>>) -> Effects {
+        let n = self.buf.line_count();
+        let redraw = [before, self.selection_lines()]
+            .into_iter()
+            .flatten()
+            .map(|r| r.start.min(n)..r.end.min(n))
+            .filter(|r| !r.is_empty())
+            .fold(Redraw::None, |acc, r| acc.merge(Redraw::Lines(r)));
+        Effects {
+            redraw,
+            ..Effects::default()
+        }
+    }
+
+    /// A key on the command line: Esc and Enter close it, back to Normal.
+    /// TODO(Task 25): editing and running the command.
+    fn command_key(&mut self, k: KeyEvent) -> Effects {
+        if !matches!(k.key, Key::Esc | Key::Enter) {
+            return Effects::default();
+        }
+        self.mode = Mode::Normal;
+        self.cmdline.clear();
+        Effects {
+            redraw: Redraw::Status,
+            ..Effects::default()
+        }
+    }
+
+    /// A key on the search line: Esc and Enter end the search, back in the
+    /// Visual mode it started from (or Normal).
+    /// TODO(Task 24): typing and running the search.
+    fn search_key(&mut self, k: KeyEvent) -> Effects {
+        if !matches!(k.key, Key::Esc | Key::Enter) {
+            return Effects::default();
+        }
+        let before = self.selection_lines();
+        self.mode = self.search_return.take().unwrap_or(Mode::Normal);
+        if !self.visual() {
+            self.anchor = None;
+        }
+        Effects {
+            redraw: Redraw::Status,
+            ..Effects::default()
+        }
+        .merge(self.selection_redraw(before))
+    }
+
+    /// `yic dic cic`: the operator over the inner code block at the cursor.
+    /// Outside a block, or on an empty one (but for `cic`), nothing.
+    fn inner_code(&mut self, op: Operator) -> Effects {
+        let block = textobj::code_block(&self.blocks, self.cursor.line);
+        let block = match block {
+            Some(b) if textobj::acts(op, Some(&b)) && (!self.reader || op == Operator::Yank) => b,
+            _ => {
+                self.vim.discard();
+                return Effects {
+                    redraw: Redraw::Status,
+                    ..Effects::default()
+                };
+            }
+        };
+        self.run(|ctx| textobj::operate(ctx, op, block))
+    }
+
+    /// Primary+C, and Ctrl+C, in Visual: copies the selection's raw text
+    /// to the clipboard (and the unnamed register), staying in Visual.
+    fn copy(&mut self) -> Effects {
+        let Some(sel) = self.shown_selection() else {
+            return Effects::default();
+        };
+        let reg = visual::register(&self.buf, sel);
+        if !reg.text.is_empty() {
+            operator::write_register(self.host.as_mut(), &mut self.registers, reg);
+        }
+        Effects::default()
+    }
+
+    /// Primary+X in Visual: copies the selection, then deletes it, as `d`
+    /// does. Without a selection, or in reader mode, nothing.
+    fn cut(&mut self) -> Effects {
+        if !self.visual() || self.reader {
+            return Effects::default();
+        }
+        self.vim.reset();
+        self.normal_key(KeyEvent {
+            key: Key::Char('d'),
+            mods: Mods::default(),
+            time_ns: 0,
+        })
+    }
+
+    /// Primary+V: puts the clipboard's text in literally (no list
+    /// continuation, no linewise put) as one undo step. In Visual it
+    /// replaces the selection, leaving the clipboard as it is, and returns
+    /// to Normal. In Insert the cursor ends after the text; in Normal on
+    /// its last grapheme.
+    fn paste(&mut self) -> Effects {
+        let active = self.takes_keys() || self.mode == Mode::Insert;
+        if self.reader || !active {
+            return Effects::default();
+        }
+        let Some(mut text) = self
+            .host
+            .clipboard_get()
+            .filter(|t| !t.is_empty())
+            .map(|t| t.replace("\r\n", "\n"))
+        else {
+            return Effects::default();
+        };
+        let before = self.selection_lines();
+        self.vim.reset();
+        let range = match self.shown_selection().filter(|_| self.visual()) {
+            Some(sel) => {
+                let r = visual::paste_range(&self.buf, sel, &mut text);
+                self.leave_visual();
+                r
+            }
+            None => {
+                let at = self.buf.clamp(self.cursor);
+                at..at
+            }
+        };
+        let insert = self.mode == Mode::Insert;
+        // In a vim Insert session the paste is a step of its own; the
+        // session goes on after it. Its text joins what `.` repeats.
+        let session = self.cfg.vim && insert;
+        if session {
+            self.history.end(self.cursor);
+            self.vim.typed(&text);
+        }
+        let fx = self.run(|ctx| {
+            let end = ctx.replace(range, &text).range.end;
+            let cursor = if insert {
+                end
+            } else {
+                vim::rest(
+                    ctx.buf,
+                    Pos {
+                        col: grapheme::prev(ctx.buf.line(end.line), end.col),
+                        ..end
+                    },
+                )
+            };
+            OpOutcome {
+                cursor,
+                insert: false,
+            }
+        });
+        if session {
+            self.history.begin(self.cursor);
+        }
+        fx.merge(self.selection_redraw(before))
     }
 
     /// Undoes (or, with `redo`, redoes) up to `count` steps and puts the
@@ -466,13 +752,17 @@ impl Editor {
         self.run(|ctx| operator::put(ctx, before, count))
     }
 
-    /// Committed text in Normal mode is a run of keys. Once one of them
-    /// enters Insert, the rest is typed.
+    /// Committed text in Normal or Visual mode is a run of keys. Once one
+    /// of them enters Insert, the rest is typed; once one leaves for
+    /// another mode (the command line), the rest is dropped.
     fn normal_text(&mut self, text: &str) -> Effects {
         let mut fx = Effects::default();
         for (i, c) in text.char_indices() {
-            if self.mode != Mode::Normal {
+            if self.mode == Mode::Insert {
                 return fx.merge(self.insert(&text[i..]));
+            }
+            if !self.takes_keys() {
+                return fx;
             }
             let k = KeyEvent {
                 key: Key::Char(c),
@@ -790,7 +1080,7 @@ impl ViewSource for Editor {
         self.reader
     }
     fn selection(&self) -> Option<Selection> {
-        None
+        self.shown_selection()
     }
     fn matches(&self, _i: usize) -> &[Range<usize>] {
         &[]

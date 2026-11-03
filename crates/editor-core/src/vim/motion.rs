@@ -221,7 +221,7 @@ fn line_start(buf: &Buffer, line: usize) -> Pos {
 }
 
 /// The byte column on `line` for `want`, on the last grapheme at most.
-fn col_for(line: &str, want: Want) -> usize {
+pub fn col_for(line: &str, want: Want) -> usize {
     match want {
         Want::End => last_col(line),
         Want::Col(g) => line
