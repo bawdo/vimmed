@@ -75,3 +75,42 @@ Total `.text`: 1.8 MiB. File size: 13.0 MiB.
 - If the size becomes a problem, the options are a feature flag per grammar
   (ship fewer languages) or stripping and link-time optimisation on the
   release profile. Neither is done here.
+
+## Re-measure on the real binaries (Checkpoint 1)
+
+Date 2026-11-04, sha 0337930, macOS arm64, `cargo build --release`.
+
+The numbers above came from a throwaway harness that forced `window` to link the
+highlighter. This section measures the real `window` and `launcher` as they are
+at Checkpoint 1.
+
+| Binary | Bytes | Size |
+|---|---:|---|
+| `target/release/window` | 3,023,616 | 2.9 MiB |
+| `target/release/launcher` | 337,184 | 329 KiB |
+
+`cargo bloat --release -p window --crates -n 20`: `.text` 2.3 MiB, file 3.4 MiB.
+
+| Crate | .text size |
+|---|---:|
+| std | 414.0 KiB |
+| harfrust | 358.4 KiB |
+| skrifa | 261.5 KiB |
+| read_fonts | 183.6 KiB |
+| zeno | 147.1 KiB |
+| tiny_skia | 134.5 KiB |
+| cosmic_text | 124.5 KiB |
+| image_webp | 119.5 KiB |
+| zune_jpeg | 112.0 KiB |
+| image | 106.4 KiB |
+| editor_core | 88.8 KiB |
+| editor_render | 64.6 KiB |
+| shell_mac | 47.2 KiB |
+| swash | 42.7 KiB |
+| png | 31.1 KiB |
+
+The real binary is about the size of the "Rust grammar only" harness build, not
+the 13.0 MiB "all twelve grammars" build. No shell or window code creates a
+`Highlighter` yet, so the linker drops the tree-sitter runtime and every grammar.
+The 13 MiB figure should be expected once highlighting is wired into the view
+path. Re-measure at that point.
