@@ -2,13 +2,17 @@
 //! block structure, the cursor and the mode, turns `Input` into edits and
 //! `Effects`, and implements `ViewSource` for the renderer.
 //!
-//! The insert path: typing, Backspace, Delete, Enter (a plain line split),
-//! the arrows, Home and End, and dirty tracking. With `Config::vim` the
-//! editor starts in Normal and routes Normal-mode keys to the vim engine
-//! (`crate::vim`), which decides what they mean; this file only carries out
-//! the `Step` it returns. Operators live in `vim::operator`; every edit,
-//! typed or from an operator, goes through `EditCtx::replace`, which records
-//! it in the history.
+//! The insert path: typing, Backspace, Delete, Enter, Tab and Shift+Tab
+//! (which continue, indent and outdent list items and close fences, else
+//! split the line or put in a tab: `list_keys`), the arrows, Home and End,
+//! and dirty tracking. Task toggles (`gx`, Ctrl+Space) are in `list_keys`
+//! too.
+//!
+//! With `Config::vim` the editor starts in Normal and routes Normal-mode
+//! keys to the vim engine (`crate::vim`), which decides what they mean;
+//! this file only carries out the `Step` it returns. Operators live in
+//! `vim::operator`; every edit, typed or from an operator, goes through
+//! `EditCtx::replace`, which records it in the history.
 //!
 //! Visual and Visual Line route their keys to the engine the same way; the
 //! editor keeps the selection's anchor. The clipboard keys (Primary+C, X
@@ -42,6 +46,7 @@
 //! so no edit splits a grapheme cluster.
 
 mod cmdline;
+mod list_keys;
 
 use std::io::ErrorKind;
 use std::ops::Range;
@@ -68,7 +73,7 @@ use crate::undo::History;
 use crate::view_model::{
     CaretShape, LineShifts, MsgKind, Selection, StatusLeft, StatusModel, ViewSource,
 };
-use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator, Touched};
+use crate::vim::operator::{self, EditCtx, ListKey, OpOutcome, OpRange, Operator, Touched};
 use crate::vim::register::{Register, Registers};
 use crate::vim::repeat::Change;
 use crate::vim::{self, Cursor, Step, Vim, Want, textobj, visual};
@@ -496,6 +501,13 @@ impl Editor {
             Key::Char('v') if primary => return self.paste(),
             _ => {}
         }
+        let ctrl_only = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        if k.key == Key::Space && k.mods == ctrl_only {
+            return self.ctrl_space(k);
+        }
         let k = if ctrl_c {
             KeyEvent {
                 key: Key::Esc,
@@ -550,7 +562,9 @@ impl Editor {
         match k.key {
             Key::Char(c) => self.insert(c.encode_utf8(&mut [0; 4])),
             Key::Space => self.insert(" "),
-            Key::Enter => self.insert("\n"),
+            Key::Enter => self.insert_list_key(ListKey::Enter),
+            Key::Tab if k.mods.shift => self.insert_list_key(ListKey::BackTab),
+            Key::Tab => self.insert_list_key(ListKey::Tab),
             Key::Backspace => self.backspace(),
             Key::Delete => self.delete(),
             Key::Left => {
@@ -580,9 +594,9 @@ impl Editor {
             Key::End => self.move_across(self.line_end(self.cursor.line)),
             Key::Up => self.vertical(false),
             Key::Down => self.vertical(true),
-            // TODO(later tasks): Tab and paging. Esc only means something
-            // in vim, which handles it above.
-            Key::Esc | Key::Tab | Key::PageUp | Key::PageDown => Effects::default(),
+            // TODO(later tasks): paging. Esc only means something in vim,
+            // which handles it above.
+            Key::Esc | Key::PageUp | Key::PageDown => Effects::default(),
         }
     }
 
@@ -701,6 +715,7 @@ impl Editor {
                 self.leave_visual();
                 self.repeat(count)
             }
+            Step::List(key) => self.normal_list_key(key),
         }
     }
 
@@ -1233,21 +1248,13 @@ impl Editor {
     }
 
     fn backspace(&mut self) -> Effects {
-        let c = self.buf.clamp(self.cursor);
-        let from = if c.col > 0 {
-            Pos {
-                line: c.line,
-                col: grapheme::prev(self.buf.line(c.line), c.col),
-            }
-        } else if c.line > 0 {
-            self.line_end(c.line - 1)
-        } else {
+        let Some(r) = operator::backspace_range(&self.buf, self.cursor) else {
             return Effects::default();
         };
         if !self.reader {
             self.vim.backspaced();
         }
-        self.edit(from..c, "")
+        self.edit(r, "")
     }
 
     fn delete(&mut self) -> Effects {
@@ -1682,12 +1689,18 @@ mod tests {
     }
 
     #[test]
-    fn enter_splits_the_line_without_continuing_lists() {
+    fn enter_splits_a_plain_line_and_continues_a_list() {
+        let mut e = ed("item one");
+        at(&mut e, 0, 4);
+        e.handle(key(Key::Enter));
+        assert_eq!(e.text(), "item\n one");
+        assert_eq!(e.cursor(), Pos { line: 1, col: 0 });
+        // On a list item the new line takes the item's prefix.
         let mut e = ed("- item one");
         at(&mut e, 0, 6);
         e.handle(key(Key::Enter));
-        assert_eq!(e.text(), "- item\n one");
-        assert_eq!(e.cursor(), Pos { line: 1, col: 0 });
+        assert_eq!(e.text(), "- item\n-  one");
+        assert_eq!(e.cursor(), Pos { line: 1, col: 2 });
     }
 
     #[test]

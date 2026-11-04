@@ -14,6 +14,8 @@ use std::ops::Range;
 use crate::buffer::{Buffer, Edit, Pos};
 use crate::grapheme;
 use crate::host::Host;
+use crate::lists::{self, EditPlan};
+use crate::markdown::Blocks;
 use crate::undo::{self, History};
 use crate::vim::motion::{self, Motion, MotionKind};
 use crate::vim::register::{Register, Registers};
@@ -306,6 +308,27 @@ impl<'a> EditCtx<'a> {
         inverse
     }
 
+    /// Carries out a plan from `crate::lists` (or any other planner) as one
+    /// undo step, and returns where it leaves the cursor.
+    ///
+    /// The edits go through `replace` in order, so each is recorded and
+    /// logged as a line shift, and each one's range is read in the buffer
+    /// the edits before it left (the `EditPlan` contract). They make one
+    /// group: a group of their own, or part of the one already open (an
+    /// Insert session). Undo puts the cursor back where it was before the
+    /// plan. Every edit is in `touched`, so the editor brings its blocks up
+    /// to date (several edits rebuild them). The cursor goes to
+    /// `plan.cursor`, clamped onto a grapheme; an empty plan only moves it.
+    pub fn apply_plan(&mut self, plan: EditPlan) -> Pos {
+        self.history.begin();
+        for e in &plan.edits {
+            self.replace(e.range.clone(), &e.text);
+        }
+        self.history.end();
+        self.cursor = self.buf.clamp(plan.cursor);
+        self.cursor
+    }
+
     /// Moves the cursor to where the command leaves it.
     pub fn place(&mut self, pos: Pos) {
         self.cursor = pos;
@@ -346,6 +369,72 @@ pub fn write_register(host: &mut dyn Host, registers: &mut Registers, reg: Regis
     host.clipboard_set(&reg.text);
     registers.wrote_clipboard(&reg);
     registers.set(None, reg);
+}
+
+/// A key that acts on list items, tasks and fences (`crate::lists`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKey {
+    /// Enter in Insert: continue a list, leave an empty item, or close a
+    /// fence.
+    Enter,
+    /// Tab: indent a list item.
+    Tab,
+    /// Shift+Tab: outdent a list item.
+    BackTab,
+    /// `gx` or Ctrl+Space: toggle a task's checkbox.
+    Toggle,
+}
+
+/// The plan `key` makes with the cursor at `cursor`, or `None` when the
+/// line is not one it acts on. `blocks` must describe `buf` as it is now:
+/// `crate::lists` only notices a mismatch it can see.
+pub fn list_plan(key: ListKey, buf: &Buffer, blocks: &Blocks, cursor: Pos) -> Option<EditPlan> {
+    let line = buf.clamp(cursor).line;
+    match key {
+        ListKey::Enter => lists::enter(buf, blocks, cursor),
+        ListKey::Tab => lists::indent(buf, blocks, line, cursor),
+        ListKey::BackTab => lists::outdent(buf, blocks, line, cursor),
+        ListKey::Toggle => lists::toggle_task(buf, blocks, line, cursor),
+    }
+}
+
+/// `key` pressed in Insert: `plan` (from `list_plan`) when there is one,
+/// or else what the key does on a plain line: Enter splits it, Tab puts in
+/// a tab, Shift+Tab and Ctrl+Space do nothing. Returns where the cursor
+/// goes.
+pub fn insert_list_key(ctx: &mut EditCtx, key: ListKey, plan: Option<EditPlan>) -> Pos {
+    if let Some(plan) = plan {
+        return ctx.apply_plan(plan);
+    }
+    let at = ctx.buf.clamp(ctx.cursor);
+    let cursor = match key {
+        ListKey::Enter => ctx.replace(at..at, "\n").range.end,
+        ListKey::Tab => ctx.replace(at..at, "\t").range.end,
+        ListKey::BackTab | ListKey::Toggle => at,
+    };
+    ctx.place(cursor);
+    cursor
+}
+
+/// What Backspace in Insert deletes with the cursor at `cursor`: the
+/// grapheme before it, or at a line's start the line break before it.
+/// `None` at the very start.
+pub fn backspace_range(buf: &Buffer, cursor: Pos) -> Option<Range<Pos>> {
+    let c = buf.clamp(cursor);
+    let from = if c.col > 0 {
+        Pos {
+            line: c.line,
+            col: grapheme::prev(buf.line(c.line), c.col),
+        }
+    } else if c.line > 0 {
+        Pos {
+            line: c.line - 1,
+            col: buf.line(c.line - 1).len(),
+        }
+    } else {
+        return None;
+    };
+    Some(from..c)
 }
 
 /// What a command left behind.
@@ -594,6 +683,110 @@ mod tests {
     use super::*;
     use crate::testkit::*;
     use crate::vim::Mode;
+
+    // `EditCtx::apply_plan`.
+
+    /// Applies `plan` to `text` with the cursor at `cursor`, inside a group
+    /// opened round it when `nested`, and returns the buffer, the history,
+    /// where the plan left the cursor and the lines it touched.
+    fn plan_on(
+        text: &str,
+        cursor: Pos,
+        plan: EditPlan,
+        nested: bool,
+    ) -> (Buffer, History, Pos, Vec<Touched>) {
+        let mut buf = Buffer::from_text(text);
+        let mut history = History::new();
+        let mut registers = Registers::new();
+        let mut host = FakeHost::default();
+        if nested {
+            history.begin();
+        }
+        let mut ctx = EditCtx::new(&mut buf, cursor, &mut history, &mut registers, &mut host);
+        let at = ctx.apply_plan(plan);
+        assert_eq!(ctx.cursor, at);
+        let touched = ctx.touched().to_vec();
+        if nested {
+            // The plan joined the outer group, which is still open.
+            assert_eq!(history.undo_len(), 0);
+            history.end();
+        }
+        (buf, history, at, touched)
+    }
+
+    fn edit(range: std::ops::Range<Pos>, text: &str) -> Edit {
+        Edit {
+            range,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn apply_plan_applies_edits_in_sequence_as_one_undo_step() {
+        // The second edit's line exists only once the first has run.
+        let plan = EditPlan {
+            edits: vec![
+                edit(pos(0, 2)..pos(0, 2), "\nxy"),
+                edit(pos(1, 2)..pos(1, 2), "!"),
+                edit(pos(2, 0)..pos(2, 1), ""),
+            ],
+            cursor: pos(1, 3),
+        };
+        let (mut buf, mut history, at, touched) = plan_on("ab\ncd", pos(0, 1), plan, false);
+        assert_eq!(buf.to_text(), "ab\nxy!\nd");
+        assert_eq!(at, pos(1, 3));
+        assert_eq!(touched.len(), 3);
+        assert_eq!(history.undo_len(), 1);
+        // Undo puts the text and the cursor back.
+        assert_eq!(history.undo(&mut buf), Some(pos(0, 1)));
+        assert_eq!(buf.to_text(), "ab\ncd");
+        history.redo(&mut buf);
+        assert_eq!(buf.to_text(), "ab\nxy!\nd");
+    }
+
+    #[test]
+    fn apply_plan_joins_an_open_group() {
+        let plan = EditPlan {
+            edits: vec![edit(pos(0, 0)..pos(0, 0), "  ")],
+            cursor: pos(0, 2),
+        };
+        let (mut buf, mut history, _, _) = plan_on("- a", pos(0, 0), plan, true);
+        assert_eq!(buf.to_text(), "  - a");
+        assert_eq!(history.undo_len(), 1);
+        history.undo(&mut buf);
+        assert_eq!(buf.to_text(), "- a");
+    }
+
+    #[test]
+    fn apply_plan_keeps_the_cursor_on_a_grapheme() {
+        // A cursor inside the family emoji, or past the line, is clamped.
+        let fam = "👩\u{200d}👩\u{200d}👧";
+        let plan = EditPlan {
+            edits: vec![edit(pos(0, 0)..pos(0, 0), "x")],
+            cursor: pos(0, 5),
+        };
+        let (_, _, at, _) = plan_on(fam, pos(0, 0), plan, false);
+        assert_eq!(at, pos(0, 1));
+        let plan = EditPlan {
+            edits: vec![edit(pos(0, 0)..pos(0, 0), "x")],
+            cursor: pos(3, 99),
+        };
+        let (buf, _, at, _) = plan_on(fam, pos(0, 0), plan, false);
+        assert_eq!(at, pos(0, buf.line(0).len()));
+    }
+
+    #[test]
+    fn an_empty_plan_changes_nothing() {
+        let plan = EditPlan {
+            edits: Vec::new(),
+            cursor: pos(0, 1),
+        };
+        let (buf, history, at, touched) = plan_on("ab", pos(0, 0), plan, false);
+        assert_eq!(buf.to_text(), "ab");
+        assert_eq!(history.undo_len(), 0);
+        assert!(touched.is_empty());
+        assert_eq!(at, pos(0, 1));
+    }
 
     // The brief's cases.
 

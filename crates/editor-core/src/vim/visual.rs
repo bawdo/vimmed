@@ -18,7 +18,7 @@ use crate::view_model::Selection;
 use crate::vim::motion::{self, Motion};
 use crate::vim::operator::{OpRange, Operator};
 use crate::vim::register::Register;
-use crate::vim::repeat::Change;
+use crate::vim::repeat::{Change, Typed};
 use crate::vim::{Cursor, Step, Vim, Want};
 
 /// The size of a selection, for `.` to repeat a visual operator over.
@@ -234,7 +234,7 @@ impl Vim {
                     self.pending = Some(Change::Visual {
                         op,
                         shape: shape(buf, sel),
-                        inserted: (op == Operator::Change).then(String::new),
+                        inserted: (op == Operator::Change).then(Typed::default),
                     });
                 }
                 Step::Operate {
@@ -735,9 +735,12 @@ mod tests {
         host.set_clipboard("- a\n- b");
         keys(&mut e, "A<CR>");
         let before = e.text();
+        // Typing Enter in a list continues it...
+        assert_eq!(before, "- item\n- ");
         keys(&mut e, "<D-v>");
-        // Typing Enter in a list would continue it; a paste never does.
-        assert_eq!(e.text(), format!("{before}- a\n- b"));
+        // ...but a paste's newlines never do.
+        assert_eq!(e.text(), "- item\n- - a\n- b");
+        assert_eq!(e.cursor(), pos(2, 3));
         keys(&mut e, "<Esc>u");
         assert_eq!(e.text(), before);
 
