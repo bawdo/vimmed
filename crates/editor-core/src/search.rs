@@ -739,6 +739,47 @@ mod tests {
     }
 
     #[test]
+    fn dot_after_d_slash_searches_its_own_pattern_again() {
+        // vim: `.` replays `d/foo<CR>`, whatever was searched since, and
+        // `foo` is the last search again.
+        let mut e = ed("x foo y bar z foo w bar");
+        keys(&mut e, "0d/foo<CR>");
+        assert_eq!(e.text(), "foo y bar z foo w bar");
+        keys(&mut e, "0/bar<CR>");
+        assert_eq!(e.cursor(), pos(0, 6));
+        keys(&mut e, "0.");
+        assert_eq!(e.text(), "foo w bar");
+        let s = e.search().unwrap();
+        assert_eq!((s.query.as_str(), s.forward), ("foo", true));
+        assert_eq!(e.matches(0), just(0..3));
+    }
+
+    #[test]
+    fn dot_after_d_question_mark_keeps_its_direction() {
+        let mut e = ed("w bar foo z bar y foo x");
+        keys(&mut e, "$d?foo<CR>");
+        assert_eq!(e.text(), "w bar foo z bar y x");
+        assert_eq!(e.cursor(), pos(0, 18));
+        keys(&mut e, "$/bar<CR>");
+        assert_eq!(e.cursor(), pos(0, 2));
+        keys(&mut e, "$.");
+        assert_eq!(e.text(), "w bar x");
+        let s = e.search().unwrap();
+        assert_eq!((s.query.as_str(), s.forward), ("foo", false));
+    }
+
+    #[test]
+    fn dot_after_dn_uses_the_search_as_it_is_now() {
+        // vim: the redo of `dn` is `n`, with whatever the last search is.
+        let mut e = ed("x foo y bar z foo w bar");
+        keys(&mut e, "/foo<CR>0dn");
+        assert_eq!(e.text(), "foo y bar z foo w bar");
+        keys(&mut e, "0/bar<CR>0.");
+        assert_eq!(e.text(), "bar z foo w bar");
+        assert_eq!(e.search().unwrap().query, "bar");
+    }
+
+    #[test]
     fn d_slash_esc_and_no_match_change_nothing() {
         let mut e = ed("x foo y");
         keys(&mut e, "d/foo<Esc>");
@@ -808,10 +849,24 @@ mod tests {
                 op: Operator::Delete,
                 reverse: false,
                 count: 2,
+                pattern: None,
                 inserted: None,
             })
         );
         assert_eq!(e.text(), "foo");
+        // `d?foo` records what it searched for.
+        let mut e = ed("foo x foo");
+        keys(&mut e, "$d?foo<CR>");
+        assert_eq!(
+            e.last_change(),
+            Some(&Change::Search {
+                op: Operator::Delete,
+                reverse: false,
+                count: 1,
+                pattern: Some(("foo".into(), false)),
+                inserted: None,
+            })
+        );
     }
 
     #[test]

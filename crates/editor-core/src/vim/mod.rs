@@ -177,6 +177,14 @@ impl Vim {
         self.pending = None;
     }
 
+    /// The query and direction an operator's `/` or `?` searched for, so
+    /// `.` searches for them again.
+    pub fn searched(&mut self, query: &str, forward: bool) {
+        if let Some(Change::Search { pattern, .. }) = self.pending.as_mut() {
+            *pattern = Some((query.to_owned(), forward));
+        }
+    }
+
     /// Text typed in the Insert session of the pending change.
     pub fn typed(&mut self, text: &str) {
         if let Some(t) = self.pending.as_mut().and_then(Change::text_mut) {
@@ -449,9 +457,9 @@ impl Vim {
     }
 
     /// `/ ? n N`, as motions or after an operator. Under an operator they
-    /// record a change that `.` repeats as `n` would: for `d/foo` that is
-    /// the same once `foo` is the last search. The editor discards it when
-    /// the search finds nothing or is cancelled.
+    /// record a change that `.` repeats: `dn` as `n` would, and `d/foo`
+    /// with its own query once the editor fills it in (`searched`). The
+    /// editor discards it when the search finds nothing or is cancelled.
     fn search_key(&mut self, c: char) -> Step {
         let count = self.count.effective();
         let op = self.op;
@@ -461,6 +469,7 @@ impl Vim {
                 op,
                 reverse: c == 'N',
                 count,
+                pattern: None,
                 inserted: (op == Operator::Change).then(String::new),
             });
         }

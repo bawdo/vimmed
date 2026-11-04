@@ -764,6 +764,9 @@ impl Editor {
                 return all.merge(self.selection_redraw(before));
             }
         };
+        if op.is_some() {
+            self.vim.searched(&search.query, search.forward);
+        }
         search.refresh(&self.buf);
         search.set_current(Some(&found));
         self.search = Some(search);
@@ -991,6 +994,22 @@ impl Editor {
         let mut vim = std::mem::take(&mut self.vim);
         let fx = self.run(|ctx| vim.repeat(ctx, count, last));
         self.vim = vim;
+        // vim: repeating `d/foo` searches for `foo` again, so it is the
+        // last search (and the highlights) once more.
+        if let Some(Change::Search {
+            pattern: Some((query, forward)),
+            ..
+        }) = self.vim.last_change()
+        {
+            let mut s = Search::new(*forward, self.vim_cursor());
+            s.query.clone_from(query);
+            s.refresh(&self.buf);
+            self.search = Some(s);
+            return fx.merge(Effects {
+                redraw: Redraw::All,
+                ..Effects::default()
+            });
+        }
         fx
     }
 

@@ -55,12 +55,15 @@ pub enum Change {
         op: Operator,
         inserted: Option<String>,
     },
-    /// An operator up to a match of the last search (`dn`, `cN`, and
-    /// `d/foo` as `dn`).
+    /// An operator up to a match: of the last search as it is at the
+    /// repeat (`dn`, `cN`), or of the query and direction it typed
+    /// (`pattern`, from `d/foo` or `d?foo`), which `.` makes the last
+    /// search again, as vim does.
     Search {
         op: Operator,
         reverse: bool,
         count: usize,
+        pattern: Option<(String, bool)>,
         inserted: Option<String>,
     },
 }
@@ -183,11 +186,16 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
             op,
             reverse,
             count,
+            pattern,
             inserted,
         } => {
-            let target = search.and_then(|(query, forward)| {
-                search::find(ctx.buf, query, cur.pos, forward != *reverse, *count)
-            });
+            let typed = pattern.as_ref().map(|(q, f)| (q.as_str(), *f));
+            let target = match typed {
+                Some((query, forward)) => search::find(ctx.buf, query, cur.pos, forward, *count),
+                None => search.and_then(|(query, forward)| {
+                    search::find(ctx.buf, query, cur.pos, forward != *reverse, *count)
+                }),
+            };
             match target.and_then(|hit| OpRange::exclusive(ctx.buf, cur.pos, hit.pos())) {
                 Some(r) => {
                     let out = operator::operate(ctx, *op, r);
