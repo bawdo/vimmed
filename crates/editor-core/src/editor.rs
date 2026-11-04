@@ -185,19 +185,22 @@ impl Editor {
     /// Reads `req.path` and opens it. A missing file opens empty under its
     /// name. Bench mode (`<P>BENCH` set) opens in Insert at the first bold
     /// on a paragraph line. The named registers are shared through the
-    /// state directory the environment names.
+    /// state directory the environment names; with none, they last only
+    /// as long as this window.
     pub fn open(req: OpenRequest, cfg: Config, platform: Platform, host: Box<dyn Host>) -> Editor {
-        Editor::open_with_state(req, cfg, platform, host, &StateDir::from_env())
+        let state = StateDir::from_env();
+        Editor::open_with_state(req, cfg, platform, host, state.as_ref())
     }
 
-    /// `open`, sharing the named registers through `state`. Nothing in
-    /// `state` is read or written until a named register is used.
+    /// `open`, sharing the named registers through `state` (with `None`,
+    /// keeping them in memory). Nothing in `state` is read or written until
+    /// a named register is used.
     pub fn open_with_state(
         req: OpenRequest,
         cfg: Config,
         platform: Platform,
         host: Box<dyn Host>,
-        state: &StateDir,
+        state: Option<&StateDir>,
     ) -> Editor {
         let (text, message) = match std::fs::read_to_string(&req.path) {
             Ok(text) => (text, None),
@@ -208,7 +211,9 @@ impl Editor {
         };
         marks::mark(marks::names::FILE_READ);
         let mut editor = Editor::build(req, &text, message, cfg, platform, host, bench_enabled());
-        editor.share_registers(state);
+        if let Some(state) = state {
+            editor.share_registers(state);
+        }
         marks::mark(marks::names::PARSED);
         editor
     }
@@ -281,12 +286,15 @@ impl Editor {
         let current = self.current_match().map(|(line, _)| line);
         let until = self.message_until;
         let mut fx = self.dispatch(input);
-        if self.registers.take_reset() {
-            self.say_as(
-                strings::NAMED_REGISTERS_RESET.to_owned(),
-                MsgKind::Warning,
-                status::MESSAGE_FOR_NS,
-            );
+        let warnings = [
+            (self.registers.take_reset(), strings::NAMED_REGISTERS_RESET),
+            (
+                self.registers.take_unshared(),
+                strings::NAMED_REGISTER_NOT_SHARED,
+            ),
+        ];
+        for (_, text) in warnings.into_iter().filter(|(due, _)| *due) {
+            self.say_as(text.to_owned(), MsgKind::Warning, status::MESSAGE_FOR_NS);
         }
         if fx.redraw == Redraw::None && self.status() != status {
             fx.redraw = Redraw::Status;

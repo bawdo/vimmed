@@ -130,8 +130,12 @@ pub struct Vim {
     /// The change the latest command made, until it is done: an Insert
     /// session's change is done at Esc.
     pending: Option<Change>,
-    /// The change `.` repeats.
-    last: Option<Change>,
+    /// The named register the latest command used, recorded with its
+    /// change when that is done.
+    pending_register: Option<char>,
+    /// The change `.` repeats, and the named register it writes (vim:
+    /// `"add.` deletes into `"a` again).
+    last: Option<(Change, Option<char>)>,
 }
 
 impl Vim {
@@ -176,7 +180,8 @@ impl Vim {
     /// The named register the step just made uses, if one was named. The
     /// editor takes it after every step but `Step::Pending`.
     pub fn take_register(&mut self) -> Option<char> {
-        self.register.take()
+        self.pending_register = self.register.take();
+        self.pending_register
     }
 
     /// `"` and the register's name, before a command. Only `a` to `z`
@@ -216,14 +221,14 @@ impl Vim {
 
     /// The change `.` repeats.
     pub fn last_change(&self) -> Option<&Change> {
-        self.last.as_ref()
+        self.last.as_ref().map(|(change, _)| change)
     }
 
     /// The command that made the pending change is done: it becomes the
-    /// change `.` repeats.
+    /// change `.` repeats, with the named register it used.
     pub fn commit(&mut self) {
         if let Some(c) = self.pending.take() {
-            self.last = Some(c);
+            self.last = Some((c, self.pending_register));
         }
     }
 
@@ -271,14 +276,16 @@ impl Vim {
     /// Replays the last change at `ctx.cursor`. A `count` replaces the
     /// recorded one, for this and later repeats. With no change recorded
     /// it does nothing. `search` is the last search's query and direction,
-    /// which a repeated `dn` (or `d/foo`) looks for.
+    /// which a repeated `dn` (or `d/foo`) looks for. The change writes the
+    /// named register it was recorded with, unless `ctx` names another
+    /// (`"b.`).
     pub fn repeat(
         &mut self,
         ctx: &mut EditCtx,
         count: Option<usize>,
         search: Option<(&str, bool)>,
     ) -> OpOutcome {
-        let Some(change) = self.last.as_mut() else {
+        let Some((change, register)) = self.last.as_mut() else {
             return OpOutcome {
                 cursor: ctx.cursor,
                 insert: false,
@@ -287,6 +294,7 @@ impl Vim {
         if let Some(n) = count {
             change.set_count(n);
         }
+        ctx.register = ctx.register.or(*register);
         repeat::replay(ctx, change, search)
     }
 

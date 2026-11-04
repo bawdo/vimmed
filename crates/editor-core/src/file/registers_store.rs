@@ -83,11 +83,15 @@ impl RegisterStore {
     /// Stores `reg` as register `name` (`a` to `z`), keeping every other
     /// register the file holds. Under an exclusive lock: read the file
     /// again, merge in this one register, write a temporary file and rename
-    /// it over the old one. On failure the register is still kept here.
+    /// it over the old one. On failure the register is still kept here,
+    /// until another window changes the file.
     pub fn set(&mut self, name: char, reg: Register) -> io::Result<()> {
         let result = self.write(name, reg.clone());
         if result.is_err() {
             self.cache.insert(name, reg);
+            // The file as it is now counts as read, so the next `get` keeps
+            // the cache rather than reading the file back over it.
+            self.seen = stamp(&self.file).ok();
         }
         result
     }

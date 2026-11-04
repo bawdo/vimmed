@@ -12,28 +12,21 @@ pub struct StateDir {
 }
 
 impl StateDir {
-    /// The state directory the environment names.
-    pub fn from_env() -> StateDir {
+    /// The state directory the environment names, or `None` when it names
+    /// none (no usable `$XDG_STATE_HOME` or `$HOME`).
+    pub fn from_env() -> Option<StateDir> {
         StateDir::from_vars(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
     }
 
     /// The state directory for these values of `$XDG_STATE_HOME` and
     /// `$HOME`. An empty or relative `$XDG_STATE_HOME` is ignored, as the
-    /// XDG spec says. With no `$HOME` either, the system's temporary directory
-    /// stands in for it.
-    fn from_vars(xdg: Option<OsString>, home: Option<OsString>) -> StateDir {
-        let base = xdg
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| {
-                home.map(PathBuf::from)
-                    .filter(|p| p.is_absolute())
-                    .unwrap_or_else(std::env::temp_dir)
-                    .join(".local/state")
-            });
-        StateDir {
+    /// XDG spec says, and so is an empty or relative `$HOME`.
+    fn from_vars(xdg: Option<OsString>, home: Option<OsString>) -> Option<StateDir> {
+        let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
+        let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".local/state")))?;
+        Some(StateDir {
             root: base.join(app_meta::SLUG),
-        }
+        })
     }
 
     /// A state directory at `path`, for tests.
@@ -88,22 +81,34 @@ mod tests {
 
     #[test]
     fn xdg_state_home_respected() {
-        let s = StateDir::from_vars(Some("/xdg/state".into()), Some("/home/u".into()));
+        let s = StateDir::from_vars(Some("/xdg/state".into()), Some("/home/u".into())).unwrap();
+        assert_eq!(s.root(), Path::new("/xdg/state").join(app_meta::SLUG));
+        let s = StateDir::from_vars(Some("/xdg/state".into()), None).unwrap();
         assert_eq!(s.root(), Path::new("/xdg/state").join(app_meta::SLUG));
     }
 
     #[test]
     fn without_xdg_state_home_the_home_directory_is_used() {
         let want = Path::new("/home/u/.local/state").join(app_meta::SLUG);
-        assert_eq!(
-            StateDir::from_vars(None, Some("/home/u".into())).root(),
-            want
-        );
+        let root = |xdg: Option<&str>| {
+            StateDir::from_vars(xdg.map(Into::into), Some("/home/u".into()))
+                .unwrap()
+                .root()
+                .to_owned()
+        };
+        assert_eq!(root(None), want);
         // The XDG spec: an empty or relative value is ignored.
-        let empty = StateDir::from_vars(Some("".into()), Some("/home/u".into()));
-        assert_eq!(empty.root(), want);
-        let relative = StateDir::from_vars(Some("rel/state".into()), Some("/home/u".into()));
-        assert_eq!(relative.root(), want);
+        assert_eq!(root(Some("")), want);
+        assert_eq!(root(Some("rel/state")), want);
+    }
+
+    #[test]
+    fn without_any_home_there_is_no_state_directory() {
+        // Not a shared temporary directory, where another user could plant
+        // the registers file.
+        assert_eq!(StateDir::from_vars(None, None), None);
+        assert_eq!(StateDir::from_vars(Some("".into()), Some("".into())), None);
+        assert_eq!(StateDir::from_vars(None, Some("rel/home".into())), None);
     }
 
     #[test]

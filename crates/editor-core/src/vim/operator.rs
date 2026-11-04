@@ -344,7 +344,7 @@ impl<'a> EditCtx<'a> {
 /// mirrors it.
 pub fn write_register(host: &mut dyn Host, registers: &mut Registers, reg: Register) {
     host.clipboard_set(&reg.text);
-    registers.wrote_clipboard(&reg.text);
+    registers.wrote_clipboard(&reg);
     registers.set(None, reg);
 }
 
