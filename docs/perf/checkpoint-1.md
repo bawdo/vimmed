@@ -115,6 +115,7 @@ owner's manual run on the bundle built at sha 8a937bf (not the earlier
 | Measure | Target | Result |
 |---|---|---|
 | Key to compositor p95 (`key_ms`) | 16 ms or under | 11.8 ms, PASS |
+| Our draw p95 (`key_draw_ms`) | 2 ms or under | 1.4 ms, PASS (p99 is 24.2 ms: see Bug D below) |
 | On-glass p95 (`key_glass_est_ms`) | 2.5 refresh periods or under (about 42 ms at 60 Hz) | 27.5 ms, PASS under the absolute reading (owner decision D15) |
 
 Per-stage figures (milliseconds):
@@ -136,17 +137,18 @@ Stage split (computed by the orchestrator from `samples.csv`):
 
 - Event to handler (`key_ms` minus wait, draw and render): median 4.7 ms, p95
   7.7 ms. This time is outside our timed stages.
-- `key_glass_est_ms` minus `key_ms` is a constant 15.7 ms, about 1.9 refresh
-  periods at 120 Hz. The estimator is the next display-link targetTimestamp
+- `key_glass_est_ms` minus `key_ms` is median 15.7 ms (range 11.5 to 16.5 ms
+  per key), about 1.9 refresh periods at 120 Hz (the median). The estimator is the next display-link targetTimestamp
   after the commit, plus one refresh.
 
 Draw tail (Bug D): diagnosed, fix pending the owner's confirmation. The p99 and
-max of `key_draw_ms` (24.2 and 25.1 ms, against a 1.4 ms p95) come from Enter,
-or a line join, above an image line. `DocView` line slots belong to a line
+max of `key_draw_ms` (24.2 and 25.1 ms, against a 1.4 ms p95) come, most
+likely, from Enter or a line join above the image (reproduced headlessly; the
+run's log has timings only). `DocView` line slots belong to a line
 index and do not move when lines are inserted or removed, so the image is
 paired with the wrong slot, loses its cached resampled copy, and is resampled
 on the UI thread inside the key handler (26 to 31 ms of a 30 to 35 ms key in
-the headless reproduction). Typing below the image does not spike. Not fixed.
+the headless reproduction). Typing below the image is expected not to spike (inferred, not measured). Not fixed.
 See `diag-draw-spikes-report.md` in the v0.9 SDD folder.
 
 ## Owner GUI checks
