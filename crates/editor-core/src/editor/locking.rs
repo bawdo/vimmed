@@ -14,8 +14,8 @@
 //! The lock lives as long as the open file: closing releases it, and so
 //! does dropping the editor. `:e!` keeps it.
 
-use crate::file::StateDir;
 use crate::file::lock::{Lock, LockOutcome};
+use crate::file::{DiskEvent, StateDir};
 use crate::status;
 use crate::strings;
 use crate::view_model::MsgKind;
@@ -92,11 +92,18 @@ impl Editor {
         self.read_only_chosen = true;
     }
 
-    /// The warnings beside the file name: the file's own, then `read-only`
-    /// once chosen, which a not-UTF-8 warning already covers.
+    /// The warnings beside the file name: the file's own, what the file
+    /// watch found (`disk`), then `read-only` once, whether chosen here or
+    /// found on disk, which a not-UTF-8 warning already covers.
     pub(super) fn shown_warnings(&self) -> Vec<&'static str> {
         let mut w = self.warnings.clone();
-        if self.read_only_chosen && !w.contains(&strings::NOT_UTF8_READ_ONLY) {
+        match self.disk {
+            Some(DiskEvent::Changed) => w.push(strings::CHANGED_ON_DISK),
+            Some(DiskEvent::Gone) => w.push(strings::NO_LONGER_ON_DISK),
+            _ => {}
+        }
+        let disk_read_only = matches!(self.disk, Some(DiskEvent::ReadOnly | DiskEvent::Unreadable));
+        if (self.read_only_chosen || disk_read_only) && !w.contains(&strings::NOT_UTF8_READ_ONLY) {
             w.push(strings::READ_ONLY);
         }
         w

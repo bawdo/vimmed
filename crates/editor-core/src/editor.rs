@@ -62,11 +62,17 @@
 //! inserts a table or opens the grid picker, which takes every key while
 //! it shows.
 //!
+//! External changes (`disk`): once the shell has drawn the first frame, a
+//! watch on the file reloads a clean document that changed on disk and
+//! warns about one with unsaved changes, a file gone, or one that cannot
+//! be read or written.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
 
 mod cmdline;
+mod disk;
 mod ime;
 mod link;
 mod list_keys;
@@ -82,7 +88,7 @@ use crate::buffer::{Buffer, Pos, ShiftMark};
 use crate::effects::{Effects, Redraw};
 use crate::ex::ExCmd;
 use crate::file::lock::Lock;
-use crate::file::{self, Loaded, RegisterStore, StateDir};
+use crate::file::{self, DiskEvent, Loaded, RegisterStore, StateDir, Watcher};
 use crate::grapheme;
 use crate::host::Host;
 use crate::input::{Input, Key, KeyEvent, Mods};
@@ -217,8 +223,9 @@ pub struct Editor {
     /// When the message goes (`marks::now_ns` clock); `None` keeps it until
     /// it is replaced or cleared.
     message_until: Option<u64>,
-    /// Warnings about the file on disk, for the status bar.
-    /// TODO(Tasks 31 and 32): read-only and changed-on-disk warnings.
+    /// Warnings about the file as it was read (not valid UTF-8), for the
+    /// status bar. What the file watch finds is `disk`; `shown_warnings`
+    /// puts them together.
     warnings: Vec<&'static str>,
     cfg: Config,
     platform: Platform,
@@ -245,6 +252,15 @@ pub struct Editor {
     lock_warning: Option<String>,
     /// The grid picker `:table` opens, while it shows (`table_keys`).
     picker: Option<TablePicker>,
+    /// What the watch last found wrong with the file on disk (`disk`):
+    /// never `Back`.
+    disk: Option<DiskEvent>,
+    /// The watch on the file, once the shell asked for it and there is a
+    /// file to watch (`disk`).
+    watcher: Option<Watcher>,
+    /// The shell asked for the watch (`start_watching`); a file missing
+    /// until now is watched from its first write.
+    watch_wanted: bool,
 }
 
 impl Editor {
@@ -384,6 +400,9 @@ impl Editor {
             read_only_chosen: false,
             lock_warning: None,
             picker: None,
+            disk: None,
+            watcher: None,
+            watch_wanted: false,
         }
     }
 
@@ -417,6 +436,14 @@ impl Editor {
         let until = self.message_until;
         let line = self.cursor.line;
         let mut fx = self.dispatch(input);
+        // A reload the file's change waits for, once the input left the
+        // document clean and in a mode that can take it (`disk`); never
+        // after the input closed the window. A clean `:w` refused as
+        // changed on disk ends here too: nothing was lost, the reload
+        // takes the file and its message replaces the refusal.
+        if fx.close.is_none() {
+            fx = fx.merge(self.take_waiting_reload());
+        }
         fx = fx.merge(self.drop_stale_preedit(line));
         let warnings = [
             (self.registers.take_reset(), strings::NAMED_REGISTERS_RESET),
@@ -464,6 +491,8 @@ impl Editor {
             // TODO(Task 38): while the table picker shows, hover selects
             // the cell under the pointer (`TablePicker::select`, the cell
             // from `DocView::picker_cell_at`) and a click inserts it.
+            // Coming to the front looks at the file at once (`disk`).
+            Input::Focus(true) => self.focus_in(),
             Input::Mouse(_) | Input::Scroll { .. } | Input::Focus(_) | Input::Appearance(_) => {
                 Effects::default()
             }
@@ -550,9 +579,16 @@ impl Editor {
         self.message_until = None;
     }
 
-    /// The main loop woke: a timed message whose time is up goes. One not
-    /// due yet (a timer that fired early) asks to be woken again then.
+    /// The main loop woke: what the file watch found is taken (`disk`),
+    /// then a timed message whose time is up goes. One not due yet (a
+    /// timer that fired early) asks to be woken again then.
     fn tick(&mut self, now_ns: u64) -> Effects {
+        let fx = self.poll_disk();
+        fx.merge(self.fade_message(now_ns))
+    }
+
+    /// Clears the message if its time is up at `now_ns`.
+    fn fade_message(&mut self, now_ns: u64) -> Effects {
         match self.message_until {
             None => return Effects::default(),
             Some(until) if now_ns < until => {
