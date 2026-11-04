@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod editor;
 pub mod effects;
 pub mod ex;
+pub mod file;
 pub mod grapheme;
 pub mod host;
 pub mod input;

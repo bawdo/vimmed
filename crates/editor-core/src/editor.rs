@@ -49,6 +49,7 @@ use std::path::PathBuf;
 
 use crate::buffer::{Buffer, Pos};
 use crate::effects::{Effects, Redraw};
+use crate::file::{RegisterStore, StateDir};
 use crate::grapheme;
 use crate::host::Host;
 use crate::input::{Input, Key, KeyEvent, Mods};
@@ -104,6 +105,8 @@ struct Searching {
     count: usize,
     /// The Up/Down goal column before the search, for Esc to restore.
     goal: Option<Want>,
+    /// The named register the waiting operator writes (`"ad/foo`).
+    register: Option<char>,
 }
 
 /// A run of lines that reveals as a whole: a fenced code block or a table.
@@ -159,6 +162,8 @@ pub struct Editor {
     search: Option<Search>,
     vim: Vim,
     registers: Registers,
+    /// The named register the command being carried out uses (`"a`).
+    register: Option<char>,
     history: History,
     dirty: bool,
     reader: bool,
@@ -179,8 +184,24 @@ pub struct Editor {
 impl Editor {
     /// Reads `req.path` and opens it. A missing file opens empty under its
     /// name. Bench mode (`<P>BENCH` set) opens in Insert at the first bold
-    /// on a paragraph line.
+    /// on a paragraph line. The named registers are shared through the
+    /// state directory the environment names; with none, they last only
+    /// as long as this window.
     pub fn open(req: OpenRequest, cfg: Config, platform: Platform, host: Box<dyn Host>) -> Editor {
+        let state = StateDir::from_env();
+        Editor::open_with_state(req, cfg, platform, host, state.as_ref())
+    }
+
+    /// `open`, sharing the named registers through `state` (with `None`,
+    /// keeping them in memory). Nothing in `state` is read or written until
+    /// a named register is used.
+    pub fn open_with_state(
+        req: OpenRequest,
+        cfg: Config,
+        platform: Platform,
+        host: Box<dyn Host>,
+        state: Option<&StateDir>,
+    ) -> Editor {
         let (text, message) = match std::fs::read_to_string(&req.path) {
             Ok(text) => (text, None),
             Err(e) if e.kind() == ErrorKind::NotFound => (String::new(), None),
@@ -189,7 +210,10 @@ impl Editor {
             Err(_) => (String::new(), Some(strings::READ_FAILED)),
         };
         marks::mark(marks::names::FILE_READ);
-        let editor = Editor::build(req, &text, message, cfg, platform, host, bench_enabled());
+        let mut editor = Editor::build(req, &text, message, cfg, platform, host, bench_enabled());
+        if let Some(state) = state {
+            editor.share_registers(state);
+        }
         marks::mark(marks::names::PARSED);
         editor
     }
@@ -236,6 +260,7 @@ impl Editor {
             search: None,
             vim: Vim::new(),
             registers: Registers::new(),
+            register: None,
             history: History::new(),
             dirty: false,
             reader: req.view,
@@ -261,6 +286,16 @@ impl Editor {
         let current = self.current_match().map(|(line, _)| line);
         let until = self.message_until;
         let mut fx = self.dispatch(input);
+        let warnings = [
+            (self.registers.take_reset(), strings::NAMED_REGISTERS_RESET),
+            (
+                self.registers.take_unshared(),
+                strings::NAMED_REGISTER_NOT_SHARED,
+            ),
+        ];
+        for (_, text) in warnings.into_iter().filter(|(due, _)| *due) {
+            self.say_as(text.to_owned(), MsgKind::Warning, status::MESSAGE_FOR_NS);
+        }
         if fx.redraw == Redraw::None && self.status() != status {
             fx.redraw = Redraw::Status;
         }
@@ -381,8 +416,14 @@ impl Editor {
     }
 
     /// What register `name` holds (`None` is the unnamed register).
-    pub fn register(&self, name: Option<char>) -> Option<Register> {
+    pub fn register(&mut self, name: Option<char>) -> Option<Register> {
         self.registers.get(name)
+    }
+
+    /// Shares the named registers with every other window through the
+    /// store in `state`.
+    pub fn share_registers(&mut self, state: &StateDir) {
+        self.registers.share(RegisterStore::new(state));
     }
 
     /// The command line's text, as typed after `:` (it starts as `'<,'>`
@@ -584,6 +625,17 @@ impl Editor {
             Some(sel) => self.vim.visual_key(&k, &self.buf, cur, sel),
             None => self.vim.key(&k, &self.buf, cur),
         };
+        if step != Step::Pending {
+            self.register = self.vim.take_register();
+        }
+        let fx = self.carry_out(step);
+        self.register = None;
+        fx
+    }
+
+    /// Does what a vim step asks, with `self.register` naming the register
+    /// it uses.
+    fn carry_out(&mut self, step: Step) -> Effects {
         let status = Effects {
             redraw: Redraw::Status,
             ..Effects::default()
@@ -721,6 +773,7 @@ impl Editor {
             op,
             count,
             goal: self.goal,
+            register: self.register.filter(|_| op.is_some()),
         });
         self.mode = Mode::Search;
         self.unsay();
@@ -808,6 +861,7 @@ impl Editor {
             op,
             count,
             goal,
+            register,
         }) = self.searching.take()
         else {
             return Effects::default();
@@ -857,7 +911,9 @@ impl Editor {
         // Like a Normal-mode command: one undo step, and the change `.`
         // repeats once it is done.
         self.history.begin();
+        self.register = register;
         let fx = self.go_to_match(op, &found);
+        self.register = None;
         if self.mode != Mode::Insert {
             self.history.end();
         }
@@ -957,7 +1013,7 @@ impl Editor {
         if !self.visual() || self.reader {
             return Effects::default();
         }
-        self.vim.reset();
+        self.vim.cancel();
         self.normal_key(KeyEvent {
             key: Key::Char('d'),
             mods: Mods::default(),
@@ -984,7 +1040,7 @@ impl Editor {
             return Effects::default();
         };
         let before = self.selection_lines();
-        self.vim.reset();
+        self.vim.cancel();
         let range = match self.shown_selection().filter(|_| self.visual()) {
             Some(sel) => {
                 let r = visual::paste_range(&self.buf, sel, &mut text);
@@ -1144,7 +1200,7 @@ impl Editor {
     /// undo step and change end here.
     fn leave_insert(&mut self) -> Effects {
         self.mode = Mode::Normal;
-        self.vim.reset();
+        self.vim.cancel();
         let fx = self.move_across(vim::leave_insert(&self.buf, self.cursor));
         self.history.end();
         self.vim.commit();
@@ -1240,6 +1296,7 @@ impl Editor {
             &mut self.registers,
             self.host.as_mut(),
         );
+        ctx.register = self.register;
         let out = f(&mut ctx);
         let touched = ctx.touched().to_vec();
         if out.insert {

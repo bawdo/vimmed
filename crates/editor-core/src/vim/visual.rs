@@ -178,6 +178,14 @@ impl Vim {
     /// Handles one key in Visual or Visual Line mode, for the selection
     /// `sel` (its head is `cur`). Motions, with counts, move the head.
     pub fn visual_key(&mut self, k: &KeyEvent, buf: &Buffer, cur: Cursor, sel: Selection) -> Step {
+        if let Some(step) = self.register_key(k) {
+            return step;
+        }
+        let step = self.visual_step(k, buf, cur, sel);
+        self.settle(step)
+    }
+
+    fn visual_step(&mut self, k: &KeyEvent, buf: &Buffer, cur: Cursor, sel: Selection) -> Step {
         let m = match k.key {
             Key::Char(c) if !k.mods.ctrl => return self.visual_char(c, buf, cur, sel),
             Key::Left => Motion::Left,

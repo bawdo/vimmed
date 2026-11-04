@@ -261,6 +261,9 @@ pub struct EditCtx<'a> {
     pub history: &'a mut History,
     pub registers: &'a mut Registers,
     pub host: &'a mut dyn Host,
+    /// The named register (`"a` to `"z`) the command writes or puts, if it
+    /// names one.
+    pub register: Option<char>,
     touched: Vec<Touched>,
 }
 
@@ -278,6 +281,7 @@ impl<'a> EditCtx<'a> {
             history,
             registers,
             host,
+            register: None,
             touched: Vec::new(),
         }
     }
@@ -312,14 +316,25 @@ impl<'a> EditCtx<'a> {
         &self.touched
     }
 
-    /// Writes the unnamed register and the system clipboard.
+    /// Writes the unnamed register and the system clipboard or, when the
+    /// command names a register, that register and the unnamed one (as vim
+    /// does), leaving the clipboard alone.
     pub fn write_register(&mut self, reg: Register) {
-        write_register(self.host, self.registers, reg);
+        match self.register {
+            Some(name) => {
+                self.registers.set(Some(name), reg.clone());
+                self.registers.set(None, reg);
+            }
+            None => write_register(self.host, self.registers, reg),
+        }
     }
 
-    /// What `p` and `P` put: the clipboard, read as `Registers::from_clipboard`
-    /// says.
+    /// What `p` and `P` put: the named register, or else the clipboard,
+    /// read as `Registers::from_clipboard` says.
     pub fn register_to_put(&mut self) -> Option<Register> {
+        if let Some(name) = self.register {
+            return self.registers.get(Some(name));
+        }
         let clip = self.host.clipboard_get();
         self.registers.from_clipboard(clip)
     }
@@ -329,7 +344,7 @@ impl<'a> EditCtx<'a> {
 /// mirrors it.
 pub fn write_register(host: &mut dyn Host, registers: &mut Registers, reg: Register) {
     host.clipboard_set(&reg.text);
-    registers.wrote_clipboard(&reg.text);
+    registers.wrote_clipboard(&reg);
     registers.set(None, reg);
 }
 

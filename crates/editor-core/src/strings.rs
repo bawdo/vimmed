@@ -23,6 +23,15 @@ pub const UNTITLED: &str = "Untitled";
 /// Shown when a file exists but could not be read, so it opened empty.
 pub const READ_FAILED: &str = "Couldn't read the file, so it opened empty";
 
+/// Shown when the shared named registers' file could not be read, so it
+/// was set aside and the registers start empty.
+pub const NAMED_REGISTERS_RESET: &str = "named registers reset: file was unreadable";
+
+/// Shown when a named register could not be written to the state file, so
+/// only this window has it.
+pub const NAMED_REGISTER_NOT_SHARED: &str =
+    "named register not shared: could not write the state file";
+
 /// Shown for a second when a search wraps past the end of the document (or,
 /// going backward, the start).
 pub const SEARCH_WRAPPED: &str = "search wrapped";
