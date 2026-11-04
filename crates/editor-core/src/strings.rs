@@ -181,6 +181,19 @@ pub const NO_SUCH_FILE: &str = "no such file: ";
 /// The status-line prompt Primary+L opens for a link's URL or path.
 pub const LINK_PROMPT: &str = "link: ";
 
+/// The find bar's line in the status row, with vim off (Primary+F).
+pub const FIND_PROMPT: &str = "find: ";
+
+/// The find bar's counter: the current match and how many there are
+/// (`0 of 0` with none).
+pub fn find_counter(at: usize, of: usize) -> String {
+    format!("{at} of {of}")
+}
+
+/// Asked, with vim off, when Primary+S would write over a file changed on
+/// disk: `o` is `:w!`, `r` is `:e!`, `c` cancels.
+pub const CHANGED_ON_DISK_PROMPT: &str = "file changed on disk: [o]verwrite [r]eload [c]ancel";
+
 /// The table picker's size label: `<columns> x <rows>`.
 pub fn table_size(cols: u32, rows: u32) -> String {
     format!("{cols} x {rows}")

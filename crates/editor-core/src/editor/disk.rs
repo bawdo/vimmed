@@ -161,7 +161,11 @@ impl Editor {
             Mode::Insert => !self.cfg.vim,
             Mode::Search | Mode::Command | Mode::Confirm | Mode::Prompt => false,
         };
-        mode && self.preedit.is_none() && self.picker.is_none() && self.asking.is_none()
+        // The find bar (vim off) holds its origin, as a search does.
+        mode && self.preedit.is_none()
+            && self.picker.is_none()
+            && self.asking.is_none()
+            && !self.finding()
     }
 
     /// Reloads as `:e!` does, keeping the cursor's line (clamped), and

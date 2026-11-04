@@ -283,6 +283,26 @@ impl History {
         Some(at)
     }
 
+    /// The id of the latest undo step, if there is one.
+    pub fn last_group(&self) -> Option<u64> {
+        self.undo.back().map(|g| g.id)
+    }
+
+    /// Opens the latest undo step again, for more edits to join it (a run
+    /// of typing with vim off: `crate::nonvim`), as `begin` opens a new
+    /// one; `end` files it again, under the same id. Only when it is step
+    /// `id`, nothing is open, nothing is waiting to be redone and it is not
+    /// the save point (a write ends a run). True when it reopened.
+    pub fn reopen(&mut self, id: u64) -> bool {
+        let latest = self.last_group() == Some(id);
+        if !latest || self.depth != 0 || !self.redo.is_empty() || self.saved == id {
+            return false;
+        }
+        self.open = self.undo.pop_back();
+        self.depth = 1;
+        true
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -329,6 +349,38 @@ mod tests {
         edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "hello");
         assert!(h.can_undo());
         assert!(!h.can_redo());
+    }
+
+    #[test]
+    fn reopen_extends_only_the_latest_unsaved_step() {
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("");
+        edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "a");
+        let id = h.last_group().unwrap();
+        assert!(h.reopen(id));
+        edit(&mut h, &mut buf, pos(0, 1)..pos(0, 1), "b");
+        h.end();
+        assert_eq!(h.undo_len(), 1);
+        assert_eq!(h.last_group(), Some(id));
+        // Not a step that is not the latest, nor the save point, nor with
+        // something to redo.
+        edit(&mut h, &mut buf, pos(0, 2)..pos(0, 2), "c");
+        assert!(!h.reopen(id));
+        let c = h.last_group().unwrap();
+        h.mark_saved();
+        assert!(!h.reopen(c));
+        edit(&mut h, &mut buf, pos(0, 3)..pos(0, 3), "d");
+        let d = h.last_group().unwrap();
+        h.undo(&mut buf);
+        h.redo(&mut buf);
+        assert!(h.reopen(d));
+        h.end();
+        h.undo(&mut buf);
+        assert!(!h.reopen(c));
+        assert_eq!(buf.to_text(), "abc");
+        h.undo(&mut buf);
+        h.undo(&mut buf);
+        assert_eq!(buf.to_text(), "");
     }
 
     #[test]

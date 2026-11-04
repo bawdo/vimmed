@@ -77,6 +77,13 @@
 //! writes it at once and closes with 128 plus the signal's number. At
 //! open, a copy a window that is gone left asks the recovery prompt.
 //!
+//! Vim off (`nonvim_keys`, with `crate::nonvim` saying what each key
+//! means): the editor rests in Insert with no mode shown, Shift and the
+//! arrows select, typing goes in runs that are one undo step each, and the
+//! formatting, undo, clipboard and find chords act. Primary+F opens the
+//! find bar in the status row, which takes every key while it shows.
+//! Primary+S over a file changed on disk asks rather than refusing.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
@@ -88,6 +95,7 @@ mod ime;
 mod link;
 mod list_keys;
 mod locking;
+mod nonvim_keys;
 mod prompt;
 mod reader;
 mod recovering;
@@ -109,6 +117,7 @@ use crate::markdown::{
     BlockId, Blocks, InlineKind, LineDisplay, LineKind, Prefix, Reveal, SpanBase, TableId, code_bg,
     line_display, ordered_display, parse_line,
 };
+use crate::nonvim::NonVim;
 use crate::platform::Platform;
 use crate::saver::{FileSaver, Saver, Unwired};
 
@@ -289,6 +298,9 @@ pub struct Editor {
     /// A copy a window that is gone left, newer than the file, while the
     /// recovery prompt is to ask or asks about it (`recovering`).
     recovery_found: Option<Found>,
+    /// What vim-off editing keeps: the typing run and the find bar
+    /// (`nonvim_keys`).
+    plain: NonVim,
 }
 
 impl Editor {
@@ -441,6 +453,7 @@ impl Editor {
             autosave_due: None,
             recovery: None,
             recovery_found: None,
+            plain: NonVim::default(),
         }
     }
 
@@ -469,6 +482,11 @@ impl Editor {
     }
 
     pub fn handle(&mut self, input: Input) -> Effects {
+        // With vim off, any input but a tick or a composition ends the
+        // typing run unless it types more of it (`nonvim_keys`).
+        if !self.cfg.vim && !matches!(input, Input::Tick { .. } | Input::Preedit { .. }) {
+            self.plain.input();
+        }
         let dirty = self.dirty;
         let autosave = self.autosave_before();
         let status = self.status();
@@ -581,7 +599,14 @@ impl Editor {
         if self.linking() {
             return self.cmdline_input(text);
         }
-        if !self.cfg.vim || self.mode == Mode::Insert {
+        // The find bar takes it (vim off).
+        if self.finding() {
+            return self.find_input(text);
+        }
+        if !self.cfg.vim {
+            return self.plain_type(text);
+        }
+        if self.mode == Mode::Insert {
             return self.insert(text);
         }
         if self.takes_keys() {
@@ -756,6 +781,10 @@ impl Editor {
         if self.picker.is_some() {
             return self.picker_key(k);
         }
+        // And the find bar, with vim off (`nonvim_keys`).
+        if self.finding() {
+            return self.find_key(k);
+        }
         let ctrl_c = self.cfg.vim
             && k.key == Key::Char('c')
             && k.mods
@@ -768,8 +797,11 @@ impl Editor {
         // none it is Esc, as in vim.
         match k.key {
             Key::Char('c') if (primary || ctrl_c) && self.visual() => return self.copy(),
-            Key::Char('x') if primary => return self.cut(),
-            Key::Char('v') if primary => return self.paste(),
+            // With vim off these go with the other chords, below.
+            Key::Char('x') if primary && self.cfg.vim => return self.cut(),
+            Key::Char('v') if primary && (self.cfg.vim || self.linking()) => {
+                return self.paste();
+            }
             // Primary+Shift+R turns reader view on and off.
             Key::Char('r' | 'R') if primary && k.mods.shift && !k.mods.alt => {
                 return self.toggle_reader();
@@ -785,6 +817,13 @@ impl Editor {
             Key::Char('s') if primary && !k.mods.shift && !k.mods.alt => {
                 if self.mode == Mode::Confirm || self.reader {
                     return Effects::default();
+                }
+                // With vim off, a file changed on disk asks.
+                if !self.cfg.vim {
+                    return self.plain_save().merge(Effects {
+                        redraw: Redraw::Status,
+                        ..Effects::default()
+                    });
                 }
                 return self.ex(ExCmd::Write { force: false }).merge(Effects {
                     redraw: Redraw::Status,
@@ -812,6 +851,11 @@ impl Editor {
         // Esc clears a message, and goes on to do what it does.
         if k.key == Key::Esc {
             self.unsay();
+        }
+        // With vim off, every other key is the non-vim engine's
+        // (`nonvim_keys`), but on the link prompt and in reader view.
+        if !self.cfg.vim && !self.reader && !self.linking() {
+            return self.plain_key(k);
         }
         let redo = self.cfg.vim
             && self.mode == Mode::Normal
@@ -1063,6 +1107,11 @@ impl Editor {
 
     /// The selection, while Visual is up or a search from Visual is.
     fn shown_selection(&self) -> Option<Selection> {
+        // Vim off: the selection Shift and the arrows make
+        // (`nonvim_keys`).
+        if !self.cfg.vim {
+            return self.plain_selection().filter(|_| self.mode == Mode::Insert);
+        }
         let linewise = match self.mode {
             Mode::Visual => false,
             Mode::VisualLine => true,
@@ -1711,6 +1760,10 @@ impl Editor {
         }
         self.cursor = self.buf.clamp(cursor);
         self.goal = None;
+        // Vim off: an edit drops the selection.
+        if !self.cfg.vim {
+            self.anchor = None;
+        }
         let new = self.reveal_extent(self.cursor.line);
         let dirty = if touched.is_empty() {
             None
@@ -1858,7 +1911,18 @@ impl ViewSource for Editor {
         self.cursor
     }
     fn status(&self) -> StatusModel {
-        let left = if let Some((text, kind)) = &self.message {
+        // The find bar (vim off) keeps its line while a message shows: the
+        // message goes on the right, before the counter.
+        let find = self.find_counter().filter(|_| self.asking.is_none());
+        let left = if find.is_some() {
+            let query = self.search.as_ref().map_or("", |s| s.query.as_str());
+            let (pre, at) = self.preedit().unwrap_or_default();
+            StatusLeft::Input {
+                prefix: strings::FIND_PROMPT,
+                text: format!("{query}{pre}"),
+                cursor: query.len() + at,
+            }
+        } else if let Some((text, kind)) = &self.message {
             StatusLeft::Message {
                 text: text.clone(),
                 kind: *kind,
@@ -1889,6 +1953,8 @@ impl ViewSource for Editor {
                 None if self.reader && matches!(self.mode, Mode::Normal | Mode::Insert) => {
                     StatusLeft::Mode(strings::MODE_READER)
                 }
+                // Vim off: no mode to name.
+                None if self.plain_editing() => StatusLeft::Mode(""),
                 None => StatusLeft::Mode(self.mode.name()),
             }
         };
@@ -1903,7 +1969,7 @@ impl ViewSource for Editor {
             file: self.title.clone(),
             dirty: self.dirty,
             warnings: self.shown_warnings(),
-            showcmd: self.showcmd(),
+            showcmd: find.unwrap_or_else(|| self.showcmd()),
             position,
         }
     }
@@ -1940,6 +2006,10 @@ impl ViewSource for Editor {
     fn caret_shape(&self) -> CaretShape {
         match self.mode {
             _ if self.reader => CaretShape::Hidden,
+            // The find bar's caret is in the status bar.
+            _ if self.finding() => CaretShape::Hidden,
+            // Vim off, read-only: nothing claims typing goes in.
+            Mode::Insert if !self.cfg.vim && self.refuses_edits() => CaretShape::Block,
             Mode::Insert => CaretShape::Bar,
             Mode::Search | Mode::Command => CaretShape::Hidden,
             Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::Confirm | Mode::Prompt => {
@@ -1950,7 +2020,8 @@ impl ViewSource for Editor {
     /// Only Insert's composition shows in the document; the command line's
     /// and a search's show in the status bar (`status`).
     fn preedit(&self) -> Option<(&str, usize)> {
-        let typing = (!self.cfg.vim && !self.linking()) || self.mode == Mode::Insert;
+        let typing =
+            !self.finding() && ((!self.cfg.vim && !self.linking()) || self.mode == Mode::Insert);
         Editor::preedit(self).filter(|_| typing)
     }
     fn line_shifts_since(&self, since: Option<ShiftMark>) -> Option<LineShifts> {
@@ -2265,10 +2336,11 @@ mod tests {
 
     #[test]
     fn status_shows_mode_file_and_grapheme_position() {
+        // Vim off: no mode to name (`nonvim`).
         let mut e = ed("e\u{301}x");
         at(&mut e, 0, 3);
         let s = e.status();
-        assert_eq!(s.left, StatusLeft::Mode("INSERT"));
+        assert_eq!(s.left, StatusLeft::Mode(""));
         assert_eq!(s.file, "notes.md");
         assert!(!s.dirty);
         assert_eq!(s.position, "1:2");

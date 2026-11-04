@@ -10,6 +10,7 @@ pub mod input;
 pub mod links;
 pub mod lists;
 pub mod markdown;
+pub mod nonvim;
 pub mod platform;
 pub mod saver;
 pub mod search;

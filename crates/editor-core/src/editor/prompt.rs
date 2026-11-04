@@ -1,8 +1,10 @@
 //! Prompt mode: a question in the status bar answered with one key, such
 //! as `unsaved changes: [s]ave [d]iscard [c]ancel` when the window is
-//! closed with unsaved changes, or the already-open prompt (`locking`)
-//! and the recovery prompt (`recovering`) at open. Esc is the close
-//! prompt's cancel; the prompts at open have no cancel, so Esc does
+//! closed with unsaved changes, the already-open prompt (`locking`)
+//! and the recovery prompt (`recovering`) at open, or, with vim off,
+//! `file changed on disk: [o]verwrite [r]eload [c]ancel` when Primary+S
+//! would write over a file changed on disk (`nonvim_keys`). Esc is the
+//! close and changed-on-disk prompts' cancel; the prompts at open have no cancel, so Esc does
 //! nothing there. Any other key waits for an
 //! answer. The input method is off while a prompt asks, so the answers
 //! arrive as plain keys; committed text of one char answers like the key,
@@ -28,6 +30,9 @@ pub(super) enum Ask {
     /// At open, a window that is gone left a recovery copy newer than the
     /// file (`recovering`).
     Recovery,
+    /// With vim off, Primary+S found the file changed on disk: `o` is
+    /// `:w!`, `r` is `:e!`.
+    ChangedOnDisk,
 }
 
 impl Ask {
@@ -36,6 +41,7 @@ impl Ask {
             Ask::Close => strings::UNSAVED_CHANGES_PROMPT.to_owned(),
             Ask::AlreadyOpen { pid } => strings::already_open(pid),
             Ask::Recovery => strings::RECOVERY_PROMPT.to_owned(),
+            Ask::ChangedOnDisk => strings::CHANGED_ON_DISK_PROMPT.to_owned(),
         }
     }
 
@@ -43,7 +49,7 @@ impl Ask {
     /// they cannot be dismissed into editing without a choice.
     fn esc(self) -> Option<char> {
         match self {
-            Ask::Close => Some('c'),
+            Ask::Close | Ask::ChangedOnDisk => Some('c'),
             Ask::AlreadyOpen { .. } | Ask::Recovery => None,
         }
     }
@@ -128,7 +134,15 @@ impl Editor {
                 let fx = self.end_prompt(p);
                 fx.merge(self.close(0))
             }
-            (Ask::Close, 'c') => self.end_prompt(p),
+            (Ask::Close | Ask::ChangedOnDisk, 'c') => self.end_prompt(p),
+            (Ask::ChangedOnDisk, 'o') => {
+                let fx = self.end_prompt(p);
+                fx.merge(self.write_step(true).1)
+            }
+            (Ask::ChangedOnDisk, 'r') => {
+                let fx = self.end_prompt(p);
+                fx.merge(self.reload())
+            }
             // Then the recovery prompt, if a copy was found (`recovering`).
             (Ask::AlreadyOpen { .. }, 'o') => {
                 let fx = self.end_prompt(p);

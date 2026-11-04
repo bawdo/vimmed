@@ -28,13 +28,18 @@ pub(super) fn normalise_newlines(text: String) -> String {
 impl Editor {
     /// True while an input method may compose: Insert (or vim off), the
     /// command line and a search. Never in reader mode, and never while a
-    /// prompt asks: its answers are single keys. Opened read-only, only
-    /// the command line and a search compose: the document takes no text.
+    /// prompt asks: its answers are single keys. Where the document takes
+    /// no text (opened read-only, or vim off on a file that is not valid
+    /// UTF-8), only the command line, a search and the find bar compose.
     pub fn ime_active(&self) -> bool {
         if self.reader || self.mode == Mode::Prompt {
             return false;
         }
-        if self.read_only_chosen {
+        // The find bar (vim off) is a line being typed, read-only or not.
+        if self.finding() {
+            return true;
+        }
+        if self.refuses_edits() {
             return self.cfg.vim && matches!(self.mode, Mode::Command | Mode::Search);
         }
         !self.cfg.vim || matches!(self.mode, Mode::Insert | Mode::Command | Mode::Search)
@@ -96,6 +101,7 @@ impl Editor {
     /// status bar for the command line or a search.
     fn preedit_redraw(&self) -> Effects {
         let redraw = match self.mode {
+            _ if self.finding() => Redraw::Status,
             Mode::Command | Mode::Search if self.cfg.vim || self.linking() => Redraw::Status,
             _ => {
                 let line = self
