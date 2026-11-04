@@ -1,12 +1,23 @@
 //! Links: opening one (`open_link`) and the link prompt Primary+L opens.
 //!
 //! `open_link` resolves a target against the document's directory
-//! (`crate::links`): a URL, or a local file that is not markdown, goes to
-//! the system handler (`Host::open_external`); a markdown file opens in a
-//! new window of its own (`Host::spawn_window`), tied to no launcher; a
-//! file that is not there says so. A bare `#fragment` points into this
-//! document and does nothing in v0.9 (no jump to the heading yet). Links
-//! open in reader view too.
+//! (`crate::links`) and decides, so keys and clicks share one rule:
+//! - an `http`, `https` or `mailto` URL (scheme in any case) goes straight
+//!   to the system handler (`Host::open_external`), fragment kept;
+//! - an existing `.md` or `.markdown` file, judged by where its symlinks
+//!   lead, opens in a new window of its own (`Host::spawn_window`), tied
+//!   to no launcher;
+//! - anything else (another scheme, `file:` included, or any other
+//!   existing path: a directory, an app, a script) asks first in the
+//!   status bar, `open <target>? [o]pen [c]ancel` (`prompt`). The target
+//!   shown is exactly what `o` hands the system handler: a URL as given,
+//!   or a local path with its symlinks resolved. `c` or Esc cancels, back
+//!   to the mode it was asked from. Nothing is remembered between asks;
+//! - a file that is not there says so.
+//!
+//! A bare `#fragment` points into this document and does nothing in v0.9
+//! (no jump to the heading yet). Links open, and the prompt asks, in
+//! reader view and with vim off too.
 //!
 //! Primary+L, in Normal, Insert, Visual and Visual Line (and with vim
 //! off, Primary+K too), opens the command line as the link prompt
@@ -36,6 +47,21 @@ use crate::vim::operator::OpOutcome;
 use crate::vim::{self, visual};
 
 use super::Editor;
+use super::prompt::Ask;
+
+/// The schemes a link opens with no question: the web and mail. Any other
+/// scheme (`file:` included) asks first.
+const DIRECT_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
+
+/// True when `url`'s scheme (the text before the first `:`, any case) is
+/// one of `DIRECT_SCHEMES`.
+fn opens_directly(url: &str) -> bool {
+    url.split_once(':').is_some_and(|(scheme, _)| {
+        DIRECT_SCHEMES
+            .iter()
+            .any(|s| scheme.eq_ignore_ascii_case(s))
+    })
+}
 
 /// The link prompt being typed, and what Enter or Esc goes back to.
 pub(super) struct Linking {
@@ -61,13 +87,21 @@ impl Editor {
             return Effects::default();
         }
         match links::classify(target, &self.link_dir()) {
-            LinkTarget::External(url) => self.host.open_external(&url),
-            LinkTarget::Local(path) => self.host.open_external(&path.to_string_lossy()),
-            LinkTarget::Markdown(path) => self.host.spawn_window(WindowRequest {
-                path,
-                view: false,
-                display_name: None,
-            }),
+            LinkTarget::External(url) if opens_directly(&url) => self.host.open_external(&url),
+            LinkTarget::External(url) => return self.ask_open(url),
+            LinkTarget::Local(path) | LinkTarget::Markdown(path) => {
+                // Classified on where the path leads: a `notes.md` that is
+                // a symlink to something else is not markdown.
+                let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if !(real.is_file() && links::is_markdown(&real)) {
+                    return self.ask_open(real.to_string_lossy().into_owned());
+                }
+                self.host.spawn_window(WindowRequest {
+                    path,
+                    view: false,
+                    display_name: None,
+                });
+            }
             LinkTarget::Missing(path) => {
                 let text = format!("{}{}", strings::NO_SUCH_FILE, path.display());
                 self.say_as(text, MsgKind::Error, status::MESSAGE_FOR_NS);
@@ -79,6 +113,17 @@ impl Editor {
             }
         }
         Effects::default()
+    }
+
+    /// Asks before `target` goes to the system handler; `o` hands it over
+    /// as shown (`prompt`). A question already asking keeps the bar, and
+    /// this link is dropped.
+    fn ask_open(&mut self, target: String) -> Effects {
+        if self.asking.is_some() {
+            return Effects::default();
+        }
+        self.opening = Some(target);
+        self.ask(Ask::OpenLink)
     }
 
     /// The directory links resolve against: the file's, made absolute
@@ -296,22 +341,206 @@ mod tests {
         assert_eq!(e.message(), None);
     }
 
+    /// The status bar's question while a prompt asks, if any.
+    fn asked(e: &crate::editor::Editor) -> Option<String> {
+        match e.status().left {
+            StatusLeft::Prompt(q) => Some(q),
+            _ => None,
+        }
+    }
+
+    /// `p` with its symlinks resolved, as the open-link prompt shows it.
+    fn real(p: &Path) -> String {
+        std::fs::canonicalize(p)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
-    fn external_and_local_go_to_open_external() {
-        let dir = Scratch::new("ext");
-        let data = dir.file("data.txt");
+    fn https_and_mailto_open_directly() {
+        let dir = Scratch::new("web");
         let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
         e.open_link("https://example.com/a#b");
-        e.open_link("data.txt");
+        e.open_link("http://example.com/");
+        e.open_link("mailto:a@b.c");
+        // The scheme is compared without regard to case.
+        e.open_link("HTTPS://example.com/");
+        e.open_link("MailTo:x@y.z");
         assert_eq!(
             host.state().opened,
             [
-                "https://example.com/a#b".to_owned(),
-                data.to_string_lossy().into_owned()
+                "https://example.com/a#b",
+                "http://example.com/",
+                "mailto:a@b.c",
+                "HTTPS://example.com/",
+                "MailTo:x@y.z",
             ]
         );
         assert!(host.state().spawned.is_empty());
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(asked(&e), None);
         assert_eq!(e.message(), None);
+    }
+
+    #[test]
+    fn md_opens_in_our_window() {
+        let dir = Scratch::new("md-own");
+        let other = dir.file("Other.MARKDOWN");
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        e.open_link("Other.MARKDOWN");
+        assert_eq!(
+            host.state().spawned,
+            [WindowRequest {
+                path: other,
+                view: false,
+                display_name: None,
+            }]
+        );
+        assert!(host.state().opened.is_empty());
+        assert_eq!(asked(&e), None);
+    }
+
+    #[test]
+    fn other_local_file_asks_then_opens_on_o() {
+        let dir = Scratch::new("local");
+        let data = dir.file("data.txt");
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        let fx = e.open_link("data.txt");
+        let shown = real(&data);
+        assert_eq!(asked(&e), Some(strings::open_link_prompt(&shown)));
+        assert_eq!(e.mode(), Mode::Prompt);
+        // Called from outside `handle` (a click), it asks for the repaint.
+        assert_ne!(fx.redraw, crate::effects::Redraw::None);
+        assert!(host.state().opened.is_empty());
+        // Other keys wait.
+        keys(&mut e, "xq<CR>");
+        assert!(host.state().opened.is_empty());
+        assert_eq!(e.mode(), Mode::Prompt);
+        keys(&mut e, "o");
+        assert_eq!(host.state().opened, [shown]);
+        assert!(host.state().spawned.is_empty());
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(asked(&e), None);
+        assert_eq!(e.text(), "");
+    }
+
+    #[test]
+    fn a_directory_asks_too() {
+        let dir = Scratch::new("dir");
+        std::fs::create_dir(dir.path().join("sub.md")).unwrap();
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        e.open_link("sub.md");
+        let shown = real(&dir.path().join("sub.md"));
+        assert_eq!(asked(&e), Some(strings::open_link_prompt(&shown)));
+        keys(&mut e, "c");
+        assert_eq!(e.mode(), Mode::Normal);
+        assert!(host.state().opened.is_empty());
+        assert!(host.state().spawned.is_empty());
+    }
+
+    #[test]
+    fn other_scheme_asks_and_esc_cancels() {
+        let dir = Scratch::new("scheme");
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        keys(&mut e, "i");
+        for url in ["file:///etc/hosts", "ftp://x.y/z", "vscode://open?a=b"] {
+            e.open_link(url);
+            // A scheme URL shows as given.
+            assert_eq!(asked(&e), Some(strings::open_link_prompt(url)));
+            keys(&mut e, "<Esc>");
+            assert_eq!(e.mode(), Mode::Insert);
+            assert_eq!(asked(&e), None);
+        }
+        assert!(host.state().opened.is_empty());
+        assert!(host.state().spawned.is_empty());
+        // Answered with `o`, the URL goes as given.
+        e.open_link("ftp://x.y/z#f");
+        keys(&mut e, "o");
+        assert_eq!(host.state().opened, ["ftp://x.y/z#f"]);
+        assert_eq!(e.mode(), Mode::Insert);
+        // Nothing was typed by the answers.
+        assert_eq!(e.text(), "");
+    }
+
+    #[test]
+    fn prompt_shows_symlink_resolved_target() {
+        let dir = Scratch::new("symlink");
+        let target = dir.file("script.sh");
+        std::os::unix::fs::symlink(&target, dir.path().join("run")).unwrap();
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        e.open_link("run");
+        let shown = real(&target);
+        assert!(shown.ends_with("script.sh"));
+        assert_eq!(asked(&e), Some(strings::open_link_prompt(&shown)));
+        keys(&mut e, "O");
+        assert_eq!(host.state().opened, [shown]);
+    }
+
+    #[test]
+    fn md_symlink_to_text_file_asks() {
+        let dir = Scratch::new("md-symlink");
+        let target = dir.file("secret.txt");
+        std::os::unix::fs::symlink(&target, dir.path().join("notes2.md")).unwrap();
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        e.open_link("notes2.md");
+        assert_eq!(asked(&e), Some(strings::open_link_prompt(&real(&target))));
+        assert!(host.state().spawned.is_empty());
+        keys(&mut e, "c");
+        assert!(host.state().opened.is_empty());
+        assert!(host.state().spawned.is_empty());
+    }
+
+    #[test]
+    fn md_symlink_to_md_file_opens_in_our_window() {
+        let dir = Scratch::new("md-md-symlink");
+        let target = dir.file("real.md");
+        std::os::unix::fs::symlink(&target, dir.path().join("alias.md")).unwrap();
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        e.open_link("alias.md");
+        assert_eq!(asked(&e), None);
+        assert_eq!(host.state().spawned.len(), 1);
+        assert!(host.state().opened.is_empty());
+    }
+
+    #[test]
+    fn the_open_prompt_works_in_reader_view() {
+        let dir = Scratch::new("reader-ask");
+        let data = dir.file("data.txt");
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", true);
+        e.open_link("data.txt");
+        assert_eq!(asked(&e), Some(strings::open_link_prompt(&real(&data))));
+        keys(&mut e, "o");
+        assert_eq!(host.state().opened, [real(&data)]);
+        assert_eq!(e.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn the_open_prompt_works_with_vim_off() {
+        let dir = Scratch::new("plain-ask");
+        let data = dir.file("data.txt");
+        let (mut e, host) = plain_with_host("ab");
+        e.open_link(&data.to_string_lossy());
+        assert_eq!(asked(&e), Some(strings::open_link_prompt(&real(&data))));
+        assert!(!e.ime_active());
+        keys(&mut e, "<Esc>");
+        assert_eq!(e.mode(), Mode::Insert);
+        assert!(host.state().opened.is_empty());
+        e.open_link("vscode://x");
+        e.handle(Input::Text("o".into()));
+        assert_eq!(host.state().opened, ["vscode://x"]);
+        assert_eq!(e.text(), "ab");
+    }
+
+    #[test]
+    fn a_new_link_while_asking_changes_nothing() {
+        let dir = Scratch::new("twice");
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        e.open_link("ftp://a");
+        e.open_link("ftp://b");
+        assert_eq!(asked(&e), Some(strings::open_link_prompt("ftp://a")));
+        keys(&mut e, "o");
+        assert_eq!(host.state().opened, ["ftp://a"]);
     }
 
     #[test]
@@ -357,8 +586,9 @@ mod tests {
         // Cargo.toml.
         let (mut e, host) = ed_at(Path::new(""), "", false);
         e.open_link("Cargo.toml");
+        keys(&mut e, "o");
         let want = std::env::current_dir().unwrap().join("Cargo.toml");
-        assert_eq!(host.state().opened, [want.to_string_lossy().into_owned()]);
+        assert_eq!(host.state().opened, [real(&want)]);
     }
 
     #[test]
@@ -367,8 +597,9 @@ mod tests {
         // system handler get an absolute path, whatever their cwd.
         let (mut e, host) = ed_at(Path::new("src/notes.md"), "", false);
         e.open_link("lib.rs");
+        keys(&mut e, "o");
         let want = std::env::current_dir().unwrap().join("src/lib.rs");
-        assert_eq!(host.state().opened, [want.to_string_lossy().into_owned()]);
+        assert_eq!(host.state().opened, [real(&want)]);
     }
 
     #[test]

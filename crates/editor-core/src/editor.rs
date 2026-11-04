@@ -269,6 +269,9 @@ pub struct Editor {
     /// The link prompt, while the command line is asking for a link
     /// (`link`).
     linking: Option<link::Linking>,
+    /// The target the open-link prompt would hand the system handler,
+    /// while it asks (`link`).
+    opening: Option<String>,
     /// This window's lock record on the file, while it is open
     /// (`locking`).
     lock: Option<Lock>,
@@ -443,6 +446,7 @@ impl Editor {
             asking: None,
             path: req.path,
             linking: None,
+            opening: None,
             lock: None,
             read_only_chosen: false,
             lock_warning: None,
@@ -723,7 +727,7 @@ impl Editor {
     /// The question Prompt or Confirm mode asks, while it asks it.
     pub fn prompt(&self) -> Option<String> {
         if let Some(p) = &self.asking {
-            return Some(p.question());
+            return Some(p.question(self.opening.as_deref()));
         }
         self.confirm.as_ref().map(ConfirmSession::prompt)
     }
