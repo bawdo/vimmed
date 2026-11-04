@@ -1,8 +1,9 @@
 //! Prompt mode: a question in the status bar answered with one key, such
 //! as `unsaved changes: [s]ave [d]iscard [c]ancel` when the window is
-//! closed with unsaved changes, or the already-open prompt at open
-//! (`locking`). Esc is the close prompt's cancel; the already-open prompt
-//! has no cancel, so Esc does nothing there. Any other key waits for an
+//! closed with unsaved changes, or the already-open prompt (`locking`)
+//! and the recovery prompt (`recovering`) at open. Esc is the close
+//! prompt's cancel; the prompts at open have no cancel, so Esc does
+//! nothing there. Any other key waits for an
 //! answer. The input method is off while a prompt asks, so the answers
 //! arrive as plain keys; committed text of one char answers like the key,
 //! and longer text is no answer.
@@ -24,6 +25,9 @@ pub(super) enum Ask {
     Close,
     /// At open, another live window (process `pid`) has the file open.
     AlreadyOpen { pid: u32 },
+    /// At open, a window that is gone left a recovery copy newer than the
+    /// file (`recovering`).
+    Recovery,
 }
 
 impl Ask {
@@ -31,15 +35,16 @@ impl Ask {
         match self {
             Ask::Close => strings::UNSAVED_CHANGES_PROMPT.to_owned(),
             Ask::AlreadyOpen { pid } => strings::already_open(pid),
+            Ask::Recovery => strings::RECOVERY_PROMPT.to_owned(),
         }
     }
 
-    /// The answer Esc gives, if any. The already-open prompt has none, so
-    /// it cannot be dismissed into editing without a choice.
+    /// The answer Esc gives, if any. The prompts at open have none, so
+    /// they cannot be dismissed into editing without a choice.
     fn esc(self) -> Option<char> {
         match self {
             Ask::Close => Some('c'),
-            Ask::AlreadyOpen { .. } => None,
+            Ask::AlreadyOpen { .. } | Ask::Recovery => None,
         }
     }
 }
@@ -124,20 +129,38 @@ impl Editor {
                 fx.merge(self.close(0))
             }
             (Ask::Close, 'c') => self.end_prompt(p),
+            // Then the recovery prompt, if a copy was found (`recovering`).
             (Ask::AlreadyOpen { .. }, 'o') => {
                 let fx = self.end_prompt(p);
                 self.open_read_only();
-                self.say_held_lock_warning();
+                self.offer_recovery();
                 fx
             }
             (Ask::AlreadyOpen { .. }, 'e') => {
                 let fx = self.end_prompt(p);
-                self.say_held_lock_warning();
+                self.offer_recovery();
                 fx
             }
             (Ask::AlreadyOpen { .. }, 'q') => {
                 let fx = self.end_prompt(p);
                 fx.merge(self.close(0))
+            }
+            (Ask::Recovery, 'r') => {
+                let fx = self.end_prompt(p);
+                let fx = fx.merge(self.restore_recovery());
+                self.say_held_lock_warning();
+                fx
+            }
+            (Ask::Recovery, 'd') => {
+                let fx = self.end_prompt(p);
+                self.discard_found();
+                self.say_held_lock_warning();
+                fx
+            }
+            // The prompt stays until `r` or `d`.
+            (Ask::Recovery, 'c') => {
+                self.compare_recovery();
+                Effects::default()
             }
             _ => Effects::default(),
         }

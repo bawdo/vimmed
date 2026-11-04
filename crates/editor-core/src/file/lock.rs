@@ -122,7 +122,7 @@ fn record_pid(name: &str, hash: &str) -> Option<u32> {
     rest.strip_suffix(".lock")?.parse().ok()
 }
 
-fn absolute_key_path(path: &Path) -> PathBuf {
+pub(crate) fn absolute_key_path(path: &Path) -> PathBuf {
     if let Ok(canon) = fs::canonicalize(path) {
         return canon;
     }
@@ -140,7 +140,7 @@ fn absolute_key_path(path: &Path) -> PathBuf {
 /// `kill(pid, 0)`: success or EPERM (alive, but not ours to signal) means
 /// the process exists; ESRCH means it does not.
 #[cfg(unix)]
-fn is_alive(pid: u32) -> bool {
+pub(crate) fn is_alive(pid: u32) -> bool {
     // Pid 0 and values above i32::MAX would address process groups or wrap
     // to negative pids, never a single process.
     let Ok(pid) = libc::pid_t::try_from(pid) else {
@@ -156,7 +156,7 @@ fn is_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_alive(_pid: u32) -> bool {
+pub(crate) fn is_alive(_pid: u32) -> bool {
     false
 }
 

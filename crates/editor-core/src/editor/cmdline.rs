@@ -126,13 +126,16 @@ impl Editor {
 
     /// `write`'s work after the read-only check (autosave's write too):
     /// true when written, which leaves the buffer clean, records the save
-    /// point and rebases the file watch, saying nothing. A failed or
-    /// refused write says why, as an Error.
+    /// point, removes the recovery copy and rebases the file watch, saying
+    /// nothing. A failed or refused write says why, as an Error.
     pub(super) fn write_quietly(&mut self, force: bool) -> bool {
         match self.saver.write(&self.buf.to_text(), force) {
             Ok(()) => {
                 self.dirty = false;
                 self.history.mark_saved();
+                if let Some(r) = self.recovery.as_mut() {
+                    r.delete();
+                }
                 self.wrote();
                 true
             }
@@ -228,12 +231,14 @@ impl Editor {
     }
 
     /// Closes the window, exiting with `code`: drops a waiting autosave
-    /// (`autosave`), tells the `Saver`, lets the lock record go
-    /// (`locking`), then stops the file watch, which never waits on its
+    /// (`autosave`) and the recovery copy (`recovering`; a signal has
+    /// taken it first, to keep it), tells the `Saver`, lets the lock record
+    /// go (`locking`), then stops the file watch, which never waits on its
     /// thread (`disk`).
     pub fn close(&mut self, code: i32) -> Effects {
         // A wake already queued must never write what `:q!` discarded.
         self.autosave_due = None;
+        self.discard_recovery();
         self.saver.close(code);
         self.release_lock();
         self.stop_watching();

@@ -113,6 +113,27 @@ pub fn lock_unavailable(reason: &str) -> String {
 /// directory (no `$XDG_STATE_HOME` and no `$HOME`).
 pub const NO_STATE_DIRECTORY: &str = "no state directory";
 
+/// Asked at open when a window that is gone left a copy of unsaved text
+/// newer than the file.
+pub const RECOVERY_PROMPT: &str = "recovery copy found: [r]estore [d]iscard [c]ompare";
+
+/// The display name of the reader window `c` at the recovery prompt
+/// opens on the copy of `name`.
+pub fn recovery_title(name: &str) -> String {
+    format!("{name} (recovery)")
+}
+
+/// The recovery copy could not be written, with the system's reason.
+pub fn recovery_failed(reason: &str) -> String {
+    format!("recovery copy not written: {reason}")
+}
+
+/// The recovery copy found at open could not be read or removed, with
+/// the system's reason.
+pub fn recovery_unreadable(reason: &str) -> String {
+    format!("recovery copy unusable: {reason}")
+}
+
 /// A command line that is no command.
 pub fn not_a_command(input: &str) -> String {
     format!("E492: Not a command: {input}")

@@ -3,6 +3,7 @@
 
 pub mod load;
 pub mod lock;
+pub mod recovery;
 pub mod registers_store;
 pub mod statedir;
 pub mod watch;

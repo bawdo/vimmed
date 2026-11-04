@@ -52,6 +52,12 @@ impl Editor {
                 self.lock_warning = Some(error.to_string());
                 let _ = self.ask(Ask::AlreadyOpen { pid });
             }
+            // The recovery prompt about to ask would hide it: it is said
+            // once that is answered.
+            LockOutcome::Unavailable {
+                error,
+                holder: None,
+            } if self.recovery_found.is_some() => self.lock_warning = Some(error.to_string()),
             LockOutcome::Unavailable {
                 error,
                 holder: None,
@@ -59,8 +65,8 @@ impl Editor {
         }
     }
 
-    /// After `o` or `e` at the already-open prompt: says the lock failure
-    /// it held back, if any.
+    /// Once the prompts at open are answered: says the lock failure held
+    /// back, if any.
     pub(super) fn say_held_lock_warning(&mut self) {
         if let Some(reason) = self.lock_warning.take() {
             self.lock_unavailable(&reason);

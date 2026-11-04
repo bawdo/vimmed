@@ -78,7 +78,7 @@ impl SignalKind {
     }
 
     /// The exit code after closing on this signal: 128 plus its number.
-    /// TODO(Task 34): the recovery copy is written before the window exits.
+    /// The editor writes its recovery copy first, if the document is dirty.
     pub fn exit_code(self) -> i32 {
         128 + self.number()
     }

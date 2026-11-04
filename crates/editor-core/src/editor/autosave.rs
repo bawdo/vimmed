@@ -171,7 +171,8 @@ mod tests {
 
     /// An autosaving editor opened on the real file at `path`, with its
     /// lock record in a temporary state directory (removed when the guard
-    /// drops).
+    /// drops). It keeps no recovery copy, whose own wakes these tests do
+    /// not watch (`recovering` has autosave's part in that).
     fn open_autosaving(path: &Path) -> (Editor, FakeHost, tempfile::TempDir) {
         let host = FakeHost::default();
         host.state().now = START;
@@ -182,13 +183,14 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let state = StateDir::at(tmp.path().join("state"));
-        let e = Editor::open_with_state(
+        let mut e = Editor::open_with_state(
             r,
             autosave_on(),
             Platform::Mac,
             Box::new(host.clone()),
             Some(&state),
         );
+        e.discard_recovery();
         (e, host, tmp)
     }
 
