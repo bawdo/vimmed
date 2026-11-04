@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::buffer::Pos;
 use crate::editor::{Config, Editor, OpenRequest};
 use crate::effects::Effects;
+use crate::file::StateDir;
 use crate::host::{Host, Waker, WindowRequest};
 use crate::input::{Input, Key, KeyEvent, Mods};
 use crate::platform::Platform;
@@ -124,6 +125,15 @@ pub(crate) fn build_reader(text: &str) -> Editor {
 /// Like `ed`, with a handle on the editor's host.
 pub(crate) fn ed_with_host(text: &str) -> (Editor, FakeHost) {
     build_with_host(text, Config::default(), false)
+}
+
+/// Like `ed_with_host`, with the named registers shared through `state`
+/// (a temporary directory). Editors built any other way keep their named
+/// registers in memory, so no test reaches the real state directory.
+pub(crate) fn ed_with_state(text: &str, state: &StateDir) -> (Editor, FakeHost) {
+    let (mut e, host) = build_with_host(text, Config::default(), false);
+    e.share_registers(state);
+    (e, host)
 }
 
 /// A call the editor made to its `Saver`.

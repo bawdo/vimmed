@@ -122,8 +122,11 @@ pub struct Vim {
     count: Count,
     /// `d`, `c` or `y`, waiting for its motion.
     op: Option<Operator>,
-    /// `g`, or `i` after an operator, waiting for its second key.
+    /// `g`, or `i` after an operator, or `"`, waiting for its second key.
     prefix: Option<char>,
+    /// The named register (`"a` to `"z`) the command uses, until the
+    /// editor takes it (`take_register`).
+    register: Option<char>,
     /// The change the latest command made, until it is done: an Insert
     /// session's change is done at Esc.
     pending: Option<Change>,
@@ -139,6 +142,10 @@ impl Vim {
     /// The pending count and keys, for the status line.
     pub fn showcmd(&self) -> String {
         let mut s = String::new();
+        if let Some(r) = self.register {
+            s.push('"');
+            s.push(r);
+        }
         if let Some(n) = self.count.pre {
             s.push_str(&n.to_string());
         }
@@ -150,11 +157,61 @@ impl Vim {
         s
     }
 
-    /// Forgets the pending command (not the change `.` repeats).
-    pub fn reset(&mut self) {
+    /// Forgets the pending command, named register and all (not the change
+    /// `.` repeats).
+    pub fn cancel(&mut self) {
+        self.reset();
+        self.register = None;
+    }
+
+    /// Forgets the pending count, operator and prefix. The named register
+    /// stays for the step being made to use; `settle` drops it when the
+    /// command came to nothing.
+    fn reset(&mut self) {
         self.count = Count::default();
         self.op = None;
         self.prefix = None;
+    }
+
+    /// The named register the step just made uses, if one was named. The
+    /// editor takes it after every step but `Step::Pending`.
+    pub fn take_register(&mut self) -> Option<char> {
+        self.register.take()
+    }
+
+    /// `"` and the register's name, before a command. Only `a` to `z`
+    /// name one; anything else cancels the command.
+    fn register_key(&mut self, k: &KeyEvent) -> Option<Step> {
+        let Key::Char(c) = k.key else {
+            return None;
+        };
+        if k.mods.ctrl {
+            return None;
+        }
+        if self.prefix == Some('"') {
+            self.prefix = None;
+            if c.is_ascii_lowercase() {
+                self.register = Some(c);
+            } else {
+                self.cancel();
+            }
+            return Some(Step::Pending);
+        }
+        if c == '"' && self.op.is_none() && self.prefix.is_none() {
+            self.prefix = Some('"');
+            return Some(Step::Pending);
+        }
+        None
+    }
+
+    /// After a key: a command that came to nothing drops its named
+    /// register too.
+    fn settle(&mut self, step: Step) -> Step {
+        let waiting = self.op.is_some() || self.prefix.is_some() || self.count.given();
+        if step == Step::Pending && !waiting {
+            self.register = None;
+        }
+        step
     }
 
     /// The change `.` repeats.
@@ -237,6 +294,14 @@ impl Vim {
     /// Ctrl+C, which the editor turns into Esc) clears the pending command.
     /// A key that completes nothing clears it too, count included.
     pub fn key(&mut self, k: &KeyEvent, buf: &Buffer, cur: Cursor) -> Step {
+        if let Some(step) = self.register_key(k) {
+            return step;
+        }
+        let step = self.normal_key(k, buf, cur);
+        self.settle(step)
+    }
+
+    fn normal_key(&mut self, k: &KeyEvent, buf: &Buffer, cur: Cursor) -> Step {
         let m = match k.key {
             Key::Char(c) if k.mods.ctrl => return self.ctrl(c),
             Key::Char(c) => return self.char(c, buf, cur),
