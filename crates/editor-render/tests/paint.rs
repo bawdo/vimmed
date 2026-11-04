@@ -191,6 +191,49 @@ fn caret_rect_follows_the_cursor() {
 }
 
 #[test]
+fn preedit_paints_underlined_at_the_caret() {
+    let t = with(&[("color.preedit.underline", "#00FF00")]);
+    let g = Geom::new(&t, 2.0);
+    let mut src = Fake::new(&["ab cd"], t.clone());
+    src.cursor = Pos { line: 0, col: 2 };
+    let mut v = view(&t, 2.0);
+    let green = |v: &DocView| {
+        let f = v.frame();
+        let rows = g.line_rows(0);
+        (rows.start..rows.end)
+            .flat_map(|y| (0..f.width_px).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = f.pixmap.pixel(x, y).unwrap();
+                p.green() > 200 && p.red() < 60 && p.blue() < 60
+            })
+            .count()
+    };
+    v.paint_all(&src);
+    assert_eq!(green(&v), 0, "no composition: nothing in its colour");
+    let plain = v.caret_rect().unwrap();
+
+    src.preedit = Some(("xyz".into(), 2));
+    v.paint_lines(&src, 0..1);
+    assert!(green(&v) > 50, "the composition paints in its colour");
+    let spans = v.styled_spans(0).unwrap();
+    let pre = spans
+        .iter()
+        .find(|s| s.range == (2..5))
+        .expect("a span over the composition");
+    assert!(pre.underline);
+    assert_eq!(pre.color, t.color(TokenId::ColorPreeditUnderline));
+    // The caret sits inside the composition, at its cursor.
+    let inside = v.caret_rect().unwrap();
+    assert!(inside.x > plain.x, "{} > {}", inside.x, plain.x);
+
+    // Gone again: the line paints as before.
+    src.preedit = None;
+    v.paint_lines(&src, 0..1);
+    assert_eq!(green(&v), 0);
+    assert_eq!(v.caret_rect().unwrap().x, plain.x);
+}
+
+#[test]
 fn scroll_to_cursor_scrolls_only_when_needed() {
     let t = Tokens::defaults(Theme::Light);
     let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();

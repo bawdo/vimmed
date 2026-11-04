@@ -5,6 +5,11 @@
 //! away. Its snapshot re-uploads only the strips the damage touched; the
 //! frame clock's `after-paint` closes the frame's timings. Background
 //! workers wake the main loop through the `Waker`.
+//!
+//! Input methods: one `IMMulticontext` on the canvas. The key controller
+//! feeds it only while the editor takes text (`sync_ime`), so in Normal and
+//! Visual every key is mapped directly; its `commit` is `Input::Text` and
+//! `preedit-changed` is `Input::Preedit`.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::OsString;
@@ -85,12 +90,19 @@ struct State {
     bench: Option<BenchPlan>,
     progress: Progress,
     clipboard: Rc<OnceCell<Clipboard>>,
+    key_ctl: gtk::EventControllerKey,
+    im: gtk::IMMulticontext,
+    /// The key controller feeds `im` (the editor takes text).
+    ime_on: bool,
 }
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static EXIT: Cell<Option<i32>> = const { Cell::new(None) };
     static MAIN_LOOP: glib::MainLoop = glib::MainLoop::new(None, false);
+    /// The last key press's GDK time, taken in the capture phase: the input
+    /// method's signals carry none.
+    static KEY_MS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Runs `f` on the state unless it is missing or already borrowed (a GTK
@@ -222,6 +234,9 @@ pub fn run(args: WindowArgs) -> i32 {
     doc.set_images(&base_dir, waker.clone());
     doc.set_highlighting(waker);
     let strip_px = std::env::var(format!("{}STRIP_PX", app_meta::ENV_PREFIX)).ok();
+    let keys = gtk::EventControllerKey::new();
+    let im = gtk::IMMulticontext::new();
+    im.set_client_widget(Some(&canvas));
 
     let state = State {
         editor,
@@ -244,10 +259,13 @@ pub fn run(args: WindowArgs) -> i32 {
             ..Progress::default()
         },
         clipboard,
+        key_ctl: keys.clone(),
+        im: im.clone(),
+        ime_on: false,
     };
     let bench = state.bench.is_some();
     STATE.with(|s| *s.borrow_mut() = Some(state));
-    connect(&window, &canvas);
+    connect(&window, &canvas, &keys, &im);
     window.present();
     if bench {
         schedule_bench_check();
@@ -258,10 +276,29 @@ pub fn run(args: WindowArgs) -> i32 {
     EXIT.with(Cell::get).unwrap_or(0)
 }
 
-fn connect(window: &gtk::Window, canvas: &Canvas) {
-    let keys = gtk::EventControllerKey::new();
+fn connect(
+    window: &gtk::Window,
+    canvas: &Canvas,
+    keys: &gtk::EventControllerKey,
+    im: &gtk::IMMulticontext,
+) {
     keys.connect_key_pressed(|c, key, _code, state| on_key(c, key, state));
-    window.add_controller(keys);
+    window.add_controller(keys.clone());
+    let stamp = gtk::EventControllerKey::new();
+    stamp.set_propagation_phase(gtk::PropagationPhase::Capture);
+    stamp.connect_key_pressed(|c, _, _, _| {
+        KEY_MS.with(|k| k.set(c.current_event_time()));
+        glib::Propagation::Proceed
+    });
+    window.add_controller(stamp);
+
+    im.connect_commit(|_, text| on_ime(Input::Text(text.to_owned())));
+    im.connect_preedit_changed(|im| {
+        let (text, _, cursor) = im.preedit_string();
+        let cursor = input::char_to_byte(&text, cursor);
+        let text = text.to_string();
+        on_ime(Input::Preedit { text, cursor });
+    });
 
     let focus = gtk::EventControllerFocus::new();
     focus.connect_enter(|_| {
@@ -269,7 +306,13 @@ fn connect(window: &gtk::Window, canvas: &Canvas) {
             if let Some(c) = st.clipboard.get() {
                 c.refresh();
             }
+            if st.ime_on {
+                st.im.focus_in();
+            }
         });
+    });
+    focus.connect_leave(|_| {
+        with_state(|st| st.im.focus_out());
     });
     window.add_controller(focus);
 
@@ -361,7 +404,35 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
         Redraw::Lines(r) => st.doc.paint_lines(&st.editor, r),
         Redraw::Status => st.doc.paint_lines(&st.editor, 0..0),
     }
+    sync_ime(st);
     fx.close
+}
+
+/// Keeps the input method in step with the editor: the key controller
+/// feeds it only while the editor takes text, and while text is being
+/// composed its candidate window follows the caret.
+fn sync_ime(st: &mut State) {
+    let on = st.editor.ime_active();
+    let turned_on = on && !st.ime_on;
+    if on != st.ime_on {
+        st.ime_on = on;
+        if on {
+            st.key_ctl.set_im_context(Some(&st.im));
+            st.im.focus_in();
+        } else {
+            st.key_ctl.set_im_context(None::<&gtk::IMContext>);
+            st.im.reset();
+            st.im.focus_out();
+        }
+    }
+    let composing = st.editor.preedit().is_some();
+    if (turned_on || composing)
+        && let Some(r) = st.doc.caret_rect()
+    {
+        let (w, h) = (r.w.ceil() as i32, r.h.ceil() as i32);
+        let area = gdk::Rectangle::new(r.x as i32, r.y as i32, w, h);
+        st.im.set_cursor_location(&area);
+    }
 }
 
 fn on_key(
@@ -370,11 +441,25 @@ fn on_key(
     state: gdk::ModifierType,
 ) -> glib::Propagation {
     let handler_ns = marks::now_ns();
-    let mut k = KeyTimes::new(c.current_event_time(), handler_ns);
+    let k = KeyTimes::new(c.current_event_time(), handler_ns);
     let mods = input::mods_from_state(state.bits());
     let Some(inp) = input::map(key.into_glib(), key.to_unicode(), mods, k.start_ns) else {
         return glib::Propagation::Proceed;
     };
+    handle(inp, k);
+    glib::Propagation::Stop
+}
+
+/// Text the input method committed, or its composition, timed from the key
+/// press that caused it (with none, from the handler).
+fn on_ime(inp: Input) {
+    let handler_ns = marks::now_ns();
+    let event_ms = KEY_MS.with(Cell::get);
+    handle(inp, KeyTimes::new(event_ms, handler_ns));
+}
+
+/// One input to the editor, painted, queued for drawing and timed.
+fn handle(inp: Input, mut k: KeyTimes) {
     k.input = timing::input_kind(&inp);
     let close = with_state(|st| {
         let fx = st.editor.handle(inp);
@@ -390,7 +475,6 @@ fn on_key(
     if let Some(Some(code)) = close {
         finish(code);
     }
-    glib::Propagation::Stop
 }
 
 /// The frame clock painted a frame: log the first frame and key timings,

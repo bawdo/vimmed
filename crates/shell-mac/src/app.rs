@@ -26,10 +26,11 @@ use marks::bench::{BenchPlan, Progress};
 use marks::names;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{MainThreadMarker, MainThreadOnly, sel};
+use objc2::{MainThreadMarker, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString, NSUserDefaults};
@@ -68,6 +69,8 @@ struct State {
     image_staged: bool,
     bench: Option<BenchPlan>,
     progress: Progress,
+    /// The editor took text (`Editor::ime_active`) after the last input.
+    ime_active: bool,
 }
 
 /// What `run` prepares before the toolkit starts.
@@ -82,6 +85,9 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static PREPARED: RefCell<Option<Prepared>> = const { RefCell::new(None) };
     static EXIT: Cell<Option<i32>> = const { Cell::new(None) };
+    /// The key-down `interpretKeyEvents:` is handling, for its timing and
+    /// for `doCommandBySelector:`.
+    static IME_KEY: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
 }
 
 /// Runs `f` on the state unless it is missing or already borrowed (an
@@ -304,6 +310,7 @@ pub fn launch(delegate: &Delegate) {
             start_ns: marks::now_ns(),
             ..Progress::default()
         },
+        ime_active: false,
     };
     let bench = state.bench.is_some();
     STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -354,7 +361,26 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
         Redraw::Status => st.doc.paint_lines(&st.editor, 0..0),
     }
     stage(st);
+    sync_ime(st);
     fx.close
+}
+
+/// Keeps the input method in step with the editor: while text is being
+/// composed the candidate window follows the caret, and a composition the
+/// editor dropped (Esc out of Insert) is discarded.
+fn sync_ime(st: &mut State) {
+    let active = st.editor.ime_active();
+    let composing = st.editor.preedit().is_some();
+    if (composing || (st.ime_active && !active))
+        && let Some(ctx) = st.view.inputContext()
+    {
+        if composing {
+            ctx.invalidateCharacterCoordinates();
+        } else {
+            ctx.discardMarkedText();
+        }
+    }
+    st.ime_active = active;
 }
 
 /// Copies new damage into the back surface and wakes the display link.
@@ -368,12 +394,74 @@ fn stage(st: &mut State) -> bool {
     true
 }
 
+/// True when this key-down goes through the input method.
+pub fn takes_ime(event: &NSEvent) -> bool {
+    let mods = input::mods_from_flags(event.modifierFlags().0);
+    with_state(|st| {
+        let composing = st.editor.preedit().is_some();
+        input::routes_to_ime(st.editor.ime_active(), composing, event.keyCode(), mods)
+    })
+    .unwrap_or(false)
+}
+
+pub fn begin_ime_key(event: &NSEvent) {
+    IME_KEY.with(|k| *k.borrow_mut() = Some(event.retain()));
+}
+
+pub fn end_ime_key() {
+    IME_KEY.with(|k| k.borrow_mut().take());
+}
+
+/// Text the input method committed, or its composition, timed from the
+/// key-down that caused it (or from now, for a palette or a click).
+pub fn on_ime(inp: Input) {
+    let handler_s = now_s();
+    let event_s = IME_KEY.with(|k| k.borrow().as_ref().map(|e| e.timestamp()));
+    handle(inp, event_s.unwrap_or(handler_s), handler_s);
+}
+
+/// `doCommandBySelector:`: the input method passed its key on, so the key
+/// goes to the editor as it is.
+pub fn on_ime_command() {
+    if let Some(event) = IME_KEY.with(|k| k.borrow_mut().take()) {
+        on_key(&event);
+    }
+}
+
+/// The composition's length in UTF-16 units, while there is one.
+pub fn marked_utf16_len() -> Option<usize> {
+    with_state(|st| st.editor.preedit().map(|(t, _)| t.encode_utf16().count())).flatten()
+}
+
+/// The caret in screen coordinates, for the candidate window. With no
+/// caret in the document (the command line, a search), the bottom left of
+/// the view, by the status bar.
+pub fn caret_screen_rect(view: &NSView) -> NSRect {
+    let caret = with_state(|st| st.doc.caret_rect()).flatten();
+    let rect = match caret {
+        Some(r) => NSRect::new(
+            NSPoint::new(f64::from(r.x), f64::from(r.y)),
+            NSSize::new(f64::from(r.w), f64::from(r.h)),
+        ),
+        None => NSRect::new(NSPoint::new(0.0, view.bounds().size.height), NSSize::ZERO),
+    };
+    let in_window = view.convertRect_toView(rect, None);
+    match view.window() {
+        Some(w) => w.convertRectToScreen(in_window),
+        None => in_window,
+    }
+}
+
 pub fn on_key(event: &NSEvent) {
     let handler_s = now_s();
-    let event_s = event.timestamp();
     let Some(inp) = input::from_event(event) else {
         return;
     };
+    handle(inp, event.timestamp(), handler_s);
+}
+
+/// One input to the editor, painted, staged and timed.
+fn handle(inp: Input, event_s: f64, handler_s: f64) {
     let input = input_kind(&inp);
     let close = with_state(|st| {
         let fx = st.editor.handle(inp);

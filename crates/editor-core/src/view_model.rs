@@ -163,6 +163,12 @@ pub trait ViewSource {
     fn current_match(&self) -> Option<(usize, Range<usize>)>;
     /// How the caret is drawn.
     fn caret_shape(&self) -> CaretShape;
+    /// Text an input method is composing at the cursor, in the document,
+    /// and its cursor (a byte offset into it). It is not in the buffer: the
+    /// renderer draws it at the caret, underlined.
+    fn preedit(&self) -> Option<(&str, usize)> {
+        None
+    }
     /// The line shifts since `since` (with `None`, only the current mark),
     /// so the renderer can move its per-line state with the lines. `None`
     /// when the source does not report shifts: the renderer then resizes

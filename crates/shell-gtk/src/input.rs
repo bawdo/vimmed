@@ -53,9 +53,10 @@ pub fn mods_from_state(bits: u32) -> Mods {
     }
 }
 
-/// The input for one key press: `keyval` is the keysym GDK chose for the
-/// layout and Shift state, `ch` its character (Ctrl+C arrives as `c`).
-pub fn map(keyval: u32, ch: Option<char>, mods: Mods, time_ns: u64) -> Option<Input> {
+/// The key for one key press, as a table from the keysym to `Key`, else its
+/// character: `keyval` is the keysym GDK chose for the layout and Shift
+/// state, `ch` its character (Ctrl+C arrives as `c`).
+pub fn map_key(keyval: u32, ch: Option<char>, mods: Mods, time_ns: u64) -> Option<KeyEvent> {
     use keysym as k;
     let named = match keyval {
         k::RETURN | k::KP_ENTER => Some(Key::Enter),
@@ -75,7 +76,21 @@ pub fn map(keyval: u32, ch: Option<char>, mods: Mods, time_ns: u64) -> Option<In
         _ => None,
     };
     let key = named.or_else(|| ch.filter(|c| !c.is_control()).map(Key::Char))?;
-    Some(Input::Key(KeyEvent { key, mods, time_ns }))
+    Some(KeyEvent { key, mods, time_ns })
+}
+
+/// `map_key` as editor input.
+pub fn map(keyval: u32, ch: Option<char>, mods: Mods, time_ns: u64) -> Option<Input> {
+    map_key(keyval, ch, mods, time_ns).map(Input::Key)
+}
+
+/// The byte offset of char `index` in `text` (GTK counts a preedit's cursor
+/// in chars), clamped to its length.
+pub fn char_to_byte(text: &str, index: i32) -> usize {
+    let index = usize::try_from(index).unwrap_or(0);
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(i, _)| i)
 }
 
 #[cfg(test)]
@@ -120,6 +135,56 @@ mod tests {
             key(map(keysym::SPACE, Some(' '), m, 0)),
             Some((Key::Space, m))
         );
+    }
+
+    #[test]
+    fn key_table_gives_the_editors_key_events() {
+        let ke = |key, mods| {
+            Some(KeyEvent {
+                key,
+                mods,
+                time_ns: 7,
+            })
+        };
+        // `<C-Space>` and `<S-Tab>`, as editor-core's testkit sends them.
+        let ctrl = mods_from_state(mask::CONTROL);
+        assert_eq!(
+            map_key(keysym::SPACE, Some(' '), ctrl, 7),
+            ke(Key::Space, ctrl)
+        );
+        let shift = mods_from_state(mask::SHIFT);
+        assert_eq!(
+            map_key(keysym::ISO_LEFT_TAB, None, shift, 7),
+            ke(Key::Tab, shift)
+        );
+        // Ctrl+S and Ctrl+Shift+R: the primary modifier on Linux.
+        assert_eq!(
+            map_key(u32::from('s'), Some('s'), ctrl, 7),
+            ke(Key::Char('s'), ctrl)
+        );
+        let ctrl_shift = mods_from_state(mask::CONTROL | mask::SHIFT);
+        assert_eq!(
+            map_key(u32::from('R'), Some('R'), ctrl_shift, 7),
+            ke(Key::Char('R'), ctrl_shift)
+        );
+        assert_eq!(
+            map(keysym::ESCAPE, None, Mods::default(), 7),
+            Some(Input::Key(KeyEvent {
+                key: Key::Esc,
+                mods: Mods::default(),
+                time_ns: 7
+            }))
+        );
+    }
+
+    #[test]
+    fn preedit_cursor_chars_become_bytes() {
+        assert_eq!(char_to_byte("abc", 2), 2);
+        assert_eq!(char_to_byte("日本", 1), 3);
+        assert_eq!(char_to_byte("日本", 2), 6);
+        assert_eq!(char_to_byte("日本", 9), 6);
+        assert_eq!(char_to_byte("ab", -1), 0);
+        assert_eq!(char_to_byte("", 0), 0);
     }
 
     #[test]

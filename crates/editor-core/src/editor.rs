@@ -41,11 +41,15 @@
 //! text `c` deletes) to Esc. An arrow key inside the session ends the step
 //! and starts another, as in vim.
 //!
+//! Input methods (`ime`): committed text and the composition, which is
+//! held beside the buffer and drawn at the caret until it commits.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
 
 mod cmdline;
+mod ime;
 mod list_keys;
 
 use std::io::ErrorKind;
@@ -186,6 +190,8 @@ pub struct Editor {
     platform: Platform,
     host: Box<dyn Host>,
     saver: Box<dyn Saver>,
+    /// The text an input method is composing and its cursor (`ime`).
+    preedit: Option<(String, usize)>,
 }
 
 impl Editor {
@@ -280,6 +286,7 @@ impl Editor {
             platform,
             host,
             saver: Box::new(Unwired),
+            preedit: None,
         }
     }
 
@@ -292,7 +299,9 @@ impl Editor {
         let status = self.status();
         let current = self.current_match().map(|(line, _)| line);
         let until = self.message_until;
+        let line = self.cursor.line;
         let mut fx = self.dispatch(input);
+        fx = fx.merge(self.drop_stale_preedit(line));
         let warnings = [
             (self.registers.take_reset(), strings::NAMED_REGISTERS_RESET),
             (
@@ -325,34 +334,44 @@ impl Editor {
     fn dispatch(&mut self, input: Input) -> Effects {
         match input {
             Input::Key(k) => self.key(k),
-            // Committed text types only in Insert. In Normal and Visual it
-            // is a run of keys, so an input method never types into the
-            // buffer there.
-            Input::Text(text) if !self.cfg.vim || self.mode == Mode::Insert => self.insert(&text),
-            Input::Text(text) if self.takes_keys() => self.normal_text(&text),
-            Input::Text(text) if self.mode == Mode::Search => self.search_input(&text),
-            Input::Text(text) if self.mode == Mode::Command => self.cmdline_input(&text),
-            // In Confirm, each char is an answer.
-            Input::Text(text) if self.mode == Mode::Confirm => {
-                text.chars().fold(Effects::default(), |fx, c| {
-                    fx.merge(self.confirm_key(KeyEvent {
-                        key: Key::Char(c),
-                        mods: Mods::default(),
-                        time_ns: 0,
-                    }))
-                })
+            // A commit ends the composition, wherever it lands.
+            Input::Text(text) => {
+                let fx = self.clear_preedit();
+                fx.merge(self.text_input(&ime::normalise_newlines(text)))
             }
-            Input::Text(_) => Effects::default(),
+            Input::Preedit { text, cursor } => self.set_preedit(text, cursor),
             // TODO(later tasks): ask before closing with unsaved changes.
             Input::CloseRequested => self.close(0),
             // TODO(Task 34): write the recovery copy before closing.
             Input::Signal(s) => self.close(s.exit_code()),
-            Input::Preedit { .. }
-            | Input::Mouse(_)
-            | Input::Scroll { .. }
-            | Input::Focus(_)
-            | Input::Appearance(_) => Effects::default(),
+            Input::Mouse(_) | Input::Scroll { .. } | Input::Focus(_) | Input::Appearance(_) => {
+                Effects::default()
+            }
             Input::Tick { now_ns } => self.tick(now_ns),
+        }
+    }
+
+    /// Committed text types only in Insert. In Normal and Visual it is a
+    /// run of keys, so an input method never types into the buffer there.
+    fn text_input(&mut self, text: &str) -> Effects {
+        if !self.cfg.vim || self.mode == Mode::Insert {
+            return self.insert(text);
+        }
+        if self.takes_keys() {
+            return self.normal_text(text);
+        }
+        match self.mode {
+            Mode::Search => self.search_input(text),
+            Mode::Command => self.cmdline_input(text),
+            // In Confirm, each char is an answer.
+            Mode::Confirm => text.chars().fold(Effects::default(), |fx, c| {
+                fx.merge(self.confirm_key(KeyEvent {
+                    key: Key::Char(c),
+                    mods: Mods::default(),
+                    time_ns: 0,
+                }))
+            }),
+            _ => Effects::default(),
         }
     }
 
@@ -1518,11 +1537,15 @@ impl ViewSource for Editor {
                 _ => None,
             };
             match typed {
-                Some((prefix, text)) => StatusLeft::Input {
-                    prefix,
-                    text: text.clone(),
-                    cursor: text.len(),
-                },
+                Some((prefix, text)) => {
+                    // A composition shows after what is typed.
+                    let (pre, at) = self.preedit().unwrap_or_default();
+                    StatusLeft::Input {
+                        prefix,
+                        text: format!("{text}{pre}"),
+                        cursor: text.len() + at,
+                    }
+                }
                 None => StatusLeft::Mode(self.mode.name()),
             }
         };
@@ -1568,6 +1591,12 @@ impl ViewSource for Editor {
                 CaretShape::Block
             }
         }
+    }
+    /// Only Insert's composition shows in the document; the command line's
+    /// and a search's show in the status bar (`status`).
+    fn preedit(&self) -> Option<(&str, usize)> {
+        let typing = !self.cfg.vim || self.mode == Mode::Insert;
+        Editor::preedit(self).filter(|_| typing)
     }
     fn line_shifts_since(&self, since: Option<ShiftMark>) -> Option<LineShifts> {
         Some(LineShifts {
