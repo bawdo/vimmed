@@ -5,6 +5,7 @@ pub mod ex;
 pub mod grapheme;
 pub mod host;
 pub mod input;
+pub mod lists;
 pub mod markdown;
 pub mod platform;
 pub mod saver;
