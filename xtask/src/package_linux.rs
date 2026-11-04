@@ -10,7 +10,8 @@
 //!   renamed.
 //! - `<BUNDLE_ID>.desktop` and `<BUNDLE_ID>.metainfo.xml`, rendered.
 //! - `arch/`: the rendered `PKGBUILD` with the sources it lists (a source
-//!   tarball of the workspace, the desktop and the metainfo files), ready
+//!   tarball of the workspace's build inputs, the desktop and the metainfo
+//!   files), ready
 //!   for `makepkg`.
 //!
 //! cargo-deb and cargo-generate-rpm then package the staged files, without
@@ -138,22 +139,34 @@ pub fn stage(root: &Path, bin: &Path, pkg: &Path, n: &Names) -> Result<(), Strin
     Ok(())
 }
 
-/// The workspace's source files, relative to `root`: what git tracks (plus
-/// untracked files it doesn't ignore) when git can read the checkout.
-/// Otherwise (the rename test's copy has no `.git`, and a worktree mounted in
-/// a container has a dangling one) every file except `.git`, top-level
-/// `target*` directories and the plain top-level names in `.gitignore`.
+/// Top-level files `cargo build --frozen --release` reads.
+const BUILD_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"];
+/// Top-level directories it reads: the cargo config, every workspace member
+/// (all must exist for the workspace to load), and the packaging templates.
+/// Nothing in `crates/` reads files outside its crate except app-meta's
+/// build script, which reads the root `Cargo.toml`.
+const BUILD_DIRS: [&str; 4] = [".cargo", "crates", "xtask", "packaging"];
+
+/// Whether a workspace-relative path is a build input, and so belongs in
+/// the source tarball. Docs, reports, notes, the README and Docker files
+/// are not, and some of them spell the project name.
+pub fn is_build_input(rel: &str) -> bool {
+    BUILD_FILES.contains(&rel)
+        || rel
+            .split_once('/')
+            .is_some_and(|(top, _)| BUILD_DIRS.contains(&top))
+}
+
+/// The workspace's build inputs (see `is_build_input`), relative to `root`:
+/// from what git tracks when git can read the checkout, otherwise (the
+/// rename test's copy has no `.git`, and a worktree mounted in a container
+/// has a dangling one) from a walk of the build-input directories. Untracked
+/// files are left out of a checkout's list.
 pub fn source_files(root: &Path) -> Result<Vec<String>, String> {
     if root.join(".git").exists()
         && let Ok(out) = Command::new("git")
             .current_dir(root)
-            .args([
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ])
+            .args(["ls-files", "-z", "--cached"])
             .output()
         && out.status.success()
     {
@@ -162,23 +175,16 @@ pub fn source_files(root: &Path) -> Result<Vec<String>, String> {
             .split(|b| *b == 0)
             .filter(|s| !s.is_empty())
             .map(|s| String::from_utf8_lossy(s).into_owned())
-            .filter(|rel| root.join(rel).is_file())
+            .filter(|rel| is_build_input(rel) && root.join(rel).is_file())
             .collect());
     }
-    let ignored =
-        top_level_ignores(&fs::read_to_string(root.join(".gitignore")).unwrap_or_default());
-    fn walk(root: &Path, dir: &Path, skip: &[String], out: &mut Vec<String>) -> Result<(), String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
         for entry in fs::read_dir(dir).map_err(|e| io_err("read", dir, e))? {
             let entry = entry.map_err(|e| io_err("read", dir, e))?;
             let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if dir == root && (name == ".git" || name.starts_with("target") || skip.contains(&name))
-            {
-                continue;
-            }
             let kind = entry.file_type().map_err(|e| io_err("stat", &path, e))?;
             if kind.is_dir() {
-                walk(root, &path, skip, out)?;
+                walk(root, &path, out)?;
             } else if kind.is_file() {
                 let rel = path.strip_prefix(root).expect("walked under root");
                 out.push(rel.to_string_lossy().into_owned());
@@ -186,23 +192,17 @@ pub fn source_files(root: &Path) -> Result<Vec<String>, String> {
         }
         Ok(())
     }
-    let mut out = Vec::new();
-    walk(root, root, &ignored, &mut out)?;
+    let mut out: Vec<String> = BUILD_FILES
+        .iter()
+        .filter(|f| root.join(f).is_file())
+        .map(|f| f.to_string())
+        .collect();
+    for dir in BUILD_DIRS {
+        if root.join(dir).is_dir() {
+            walk(root, &root.join(dir), &mut out)?;
+        }
+    }
     Ok(out)
-}
-
-/// The plain names in a `.gitignore` (`spike/`, `/notes`): no globs, no
-/// negation, no inner slash. Enough for the top-level directories this
-/// workspace ignores.
-fn top_level_ignores(gitignore: &str) -> Vec<String> {
-    gitignore
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
-        .map(|l| l.trim_start_matches('/').trim_end_matches('/'))
-        .filter(|l| !l.is_empty() && !l.contains(['*', '?', '[', '/']))
-        .map(String::from)
-        .collect()
 }
 
 /// Writes `dest`, a gzipped tarball of `files` (relative to `root`) under
@@ -333,12 +333,22 @@ mod tests {
     }
 
     #[test]
-    fn source_files_without_git_skip_target_dirs() {
+    fn source_files_without_git_keep_only_build_inputs() {
         let s = scratch("walk");
         for f in [
             "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
             "crates/a/src/lib.rs",
+            "xtask/src/main.rs",
+            "packaging/templates/x.in",
             ".cargo/config.toml",
+            ".gitignore",
+            "README.md",
+            "docs/plan.md",
+            "reports/r.md",
+            "research_notes/n.md",
+            "docker/Dockerfile.check",
             "target/release/x",
             "target-linux/y",
             "spike/z",
@@ -348,23 +358,40 @@ mod tests {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, "x").unwrap();
         }
-        fs::write(
-            s.join(".gitignore"),
-            "target/\nspike/\n.superpowers/\n*.log\n",
-        )
-        .unwrap();
         let mut got = source_files(&s).unwrap();
         got.sort();
         assert_eq!(
             got,
             [
                 ".cargo/config.toml",
-                ".gitignore",
+                "Cargo.lock",
                 "Cargo.toml",
-                "crates/a/src/lib.rs"
+                "crates/a/src/lib.rs",
+                "packaging/templates/x.in",
+                "rust-toolchain.toml",
+                "xtask/src/main.rs",
             ]
         );
         fs::remove_dir_all(&s).unwrap();
+    }
+
+    #[test]
+    fn source_files_from_git_keep_only_build_inputs() {
+        let got = source_files(&root()).unwrap();
+        assert!(got.iter().all(|f| is_build_input(f)), "{got:?}");
+        for needed in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+        ] {
+            assert!(got.iter().any(|f| f == needed), "{needed} missing");
+        }
+        assert!(got.iter().any(|f| f == "crates/app-meta/build.rs"));
+        assert!(
+            !got.iter()
+                .any(|f| f.starts_with("docs/") || f == "README.md")
+        );
     }
 
     #[test]

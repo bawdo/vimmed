@@ -77,7 +77,8 @@ The desktop entry runs `<name> -b %f`, so opening a Markdown file from a file ma
 detached window for it.
 
 For Arch, `package-linux` also renders `target/pkg/arch/PKGBUILD` beside a source tarball of the
-workspace and the desktop and metainfo files. Build it there:
+workspace's committed build inputs (the manifests, `.cargo/`, `crates/`, `xtask/` and
+`packaging/`) and the desktop and metainfo files. Build it there:
 
 ```sh
 cd target/pkg/arch && makepkg -si

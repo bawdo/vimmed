@@ -121,12 +121,38 @@ fn capture(cmd: &mut Command) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// One old-name hit: the file, the form found and its byte offset.
-pub type Hit = (PathBuf, String, usize);
+/// One old-name hit: the file, the form found, and its byte offset in the
+/// file's contents or, when `in_name` is set, in the entry's own name.
+#[derive(Debug)]
+pub struct Hit {
+    pub path: PathBuf,
+    pub form: String,
+    pub offset: usize,
+    pub in_name: bool,
+}
 
-/// Scans `path` (a file, or every file under a directory) for `forms`.
-/// Symlinks are not followed; their target text is scanned instead.
-/// Returns the number of files scanned and the hits.
+/// Unpacks a gzipped tarball into `dest` (created if missing).
+pub fn unpack_tarball(tarball: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let ok = Command::new("tar")
+        .arg("-xzf")
+        .arg(tarball)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .map_err(|e| format!("tar: {e}"))?
+        .success();
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("tar could not unpack {}", tarball.display()))
+    }
+}
+
+/// Scans `path` (a file, or every file under a directory) for `forms`, in
+/// file contents and in the names of every entry below `path`. Symlinks are
+/// not followed; their target text is scanned instead. Returns the number
+/// of files scanned and the hits.
 pub fn scan_tree(path: &Path, forms: &[String]) -> Result<(usize, Vec<Hit>), String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
     if meta.is_dir() {
@@ -134,6 +160,15 @@ pub fn scan_tree(path: &Path, forms: &[String]) -> Result<(usize, Vec<Hit>), Str
         let entries = fs::read_dir(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("read {}: {e}", path.display()))?;
+            let name = entry.file_name();
+            hits.extend(find_forms(name.as_encoded_bytes(), forms).into_iter().map(
+                |(form, offset)| Hit {
+                    path: entry.path(),
+                    form,
+                    offset,
+                    in_name: true,
+                },
+            ));
             let (f, h) = scan_tree(&entry.path(), forms)?;
             files += f;
             hits.extend(h);
@@ -148,7 +183,12 @@ pub fn scan_tree(path: &Path, forms: &[String]) -> Result<(usize, Vec<Hit>), Str
     };
     let hits = find_forms(&bytes, forms)
         .into_iter()
-        .map(|(form, off)| (path.to_path_buf(), form, off))
+        .map(|(form, offset)| Hit {
+            path: path.to_path_buf(),
+            form,
+            offset,
+            in_name: false,
+        })
         .collect();
     Ok((1, hits))
 }
@@ -317,8 +357,14 @@ pub fn run(root: &Path, new_slug: &str, linux: bool) -> Result<(), String> {
     let (mut hits, mut files) = (0usize, 0usize);
     for a in &artefacts {
         let (f, h) = scan_tree(&a.path, &forms)?;
-        for (path, form, off) in &h {
-            eprintln!("HIT {} offset {off} form {form:?}", path.display());
+        for hit in &h {
+            let place = if hit.in_name { "name" } else { "offset" };
+            eprintln!(
+                "HIT {} {place} {} form {:?}",
+                hit.path.display(),
+                hit.offset,
+                hit.form
+            );
         }
         println!("rename test: {}: {} hits in {f} files", a.label, h.len());
         files += f;
@@ -361,6 +407,16 @@ fn linux_packages(root: &Path, copy: &Path, new: &Names) -> Result<Vec<Artefact>
     if !pkgbuild.is_file() {
         return Err(format!("rename test: no {}", pkgbuild.display()));
     }
+    // The source tarball is compressed, so scanning it raw proves nothing:
+    // unpack it and scan its contents and paths as a group of its own.
+    let tarball = t
+        .join("pkg/arch")
+        .join(format!("{}-{}.tar.gz", new.kebab, app_meta::VERSION));
+    if !tarball.is_file() {
+        return Err(format!("rename test: no {}", tarball.display()));
+    }
+    let tree = ex.join("arch-source");
+    unpack_tarball(&tarball, &tree)?;
     let version = fs::read_to_string(ex.join("version.txt")).unwrap_or_default();
     println!("Linux launcher --version: {}", version.trim());
     if !version.contains(&new.slug) {
@@ -393,6 +449,10 @@ fn linux_packages(root: &Path, copy: &Path, new: &Names) -> Result<Vec<Artefact>
         Artefact {
             label: ".rpm contents",
             path: ex.join("rpm"),
+        },
+        Artefact {
+            label: "Arch source tarball contents",
+            path: tree,
         },
     ])
 }
@@ -476,6 +536,40 @@ mod tests {
         let (files, hits) = scan_tree(&base, &name_forms(&n)).unwrap();
         assert_eq!(files, 3);
         assert_eq!(hits.len(), 3, "two in the file, one in the link target");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn planted_name_in_the_source_tarball_is_reported() {
+        use crate::package_linux::{source_files, source_tarball};
+        let base = scratch_base("tarball");
+        let n = Names::from_slug("abc_def", "com.bawdo").unwrap();
+        let tree = base.join("tree");
+        for (f, text) in [
+            ("Cargo.toml", "[workspace]\n"),
+            ("crates/x/src/lib.rs", "// clean\n"),
+            ("crates/x/src/planted.rs", "const N: &str = \"AbcDef\";\n"),
+            (
+                "crates/abc_def/src/lib.rs",
+                "// clean contents, named path\n",
+            ),
+            ("docs/plan.md", "abc_def is not a build input\n"),
+        ] {
+            let p = tree.join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        }
+        let tarball = base.join("arch/t-1.tar.gz");
+        source_tarball(&tree, &source_files(&tree).unwrap(), &tarball, "t-1").unwrap();
+
+        let out = base.join("unpacked");
+        unpack_tarball(&tarball, &out).unwrap();
+        let (files, hits) = scan_tree(&out, &name_forms(&n)).unwrap();
+        assert_eq!(files, 4, "docs/ stays out of the tarball");
+        let in_content = hits.iter().filter(|h| !h.in_name).count();
+        let in_names = hits.iter().filter(|h| h.in_name).count();
+        assert_eq!(in_content, 1, "the planted constant");
+        assert_eq!(in_names, 1, "the crates/abc_def directory");
         fs::remove_dir_all(&base).unwrap();
     }
 
