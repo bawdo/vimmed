@@ -11,6 +11,8 @@ editor-core = { path = "../editor-core" }
 # frame through `TextLayout::end_frame`. Default features (std, swash, fontconfig) are kept.
 cosmic-text = { version = "0.19", features = ["shape-run-cache"] }
 tiny-skia = "0.12"
+# The `Script` in cosmic-text's `Fallback` trait (the version cosmic-text resolves).
+unicode-script = "0.5"
 marks = { path = "../marks" }
 # Code-block highlighting: the tree-sitter runtime and one grammar per supported language.
 tree-sitter = "0.27"

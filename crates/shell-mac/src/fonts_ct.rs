@@ -3,8 +3,17 @@
 //! found through CoreText once, then cached in the same file the Linux
 //! shell uses (`<cache>/<kebab>/font-paths`, which `bench --first-run`
 //! deletes), so later starts never ask CoreText.
+//!
+//! A codepoint none of those faces covers is looked up lazily, on the
+//! fallback worker: `CTFontCreateForString` from the system UI font, then
+//! that font's `kCTFontURLAttribute`. Core Text is warmed with one throwaway
+//! lookup once the first frame is out.
 
 use std::path::{Path, PathBuf};
+
+/// The codepoint of the throwaway warm-up lookup: one no start-up face
+/// covers, so Core Text walks its cascade list.
+pub const WARM_UP: char = '\u{4E00}';
 
 pub const SANS: &str = "/System/Library/Fonts/SFNS.ttf";
 pub const SANS_ITALIC: &str = "/System/Library/Fonts/SFNSItalic.ttf";
@@ -51,15 +60,15 @@ pub fn parse_cache(text: &str, exists: impl Fn(&Path) -> bool) -> Option<Vec<Pat
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::MacFonts;
+pub use mac::{MacFonts, cache_file};
 
 #[cfg(target_os = "macos")]
 mod mac {
     use std::path::PathBuf;
 
     use editor_render::fonts::FontResolver;
-    use objc2_core_foundation::{CFString, CFURL};
-    use objc2_core_text::{CTFontDescriptor, kCTFontURLAttribute};
+    use objc2_core_foundation::{CFRange, CFString, CFURL};
+    use objc2_core_text::{CTFont, CTFontDescriptor, CTFontUIFontType, kCTFontURLAttribute};
 
     use super::*;
 
@@ -77,11 +86,34 @@ mod mac {
         url.downcast::<CFURL>().ok()?.to_file_path()
     }
 
+    /// The file of the face Core Text picks for `c`, through the system UI
+    /// font's cascade list.
+    fn file_covering(c: char) -> Option<PathBuf> {
+        let s = CFString::from_str(c.encode_utf8(&mut [0; 4]));
+        let range = CFRange {
+            location: 0,
+            length: c.len_utf16() as isize,
+        };
+        // SAFETY: a valid UI font type; size 0 means the default size.
+        let base =
+            unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, 0.0, None) }?;
+        // SAFETY: `range` covers exactly the string's UTF-16 units.
+        let font = unsafe { base.for_string(&s, range) };
+        // SAFETY: kCTFontURLAttribute is a valid font attribute key.
+        let url = unsafe { font.attribute(kCTFontURLAttribute) }?;
+        url.downcast::<CFURL>().ok()?.to_file_path()
+    }
+
+    /// The font cache file under this process's environment.
+    pub fn cache_file() -> Option<PathBuf> {
+        let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+        cache_path(env("XDG_CACHE_HOME"), env("HOME"))
+    }
+
     impl MacFonts {
         /// Reads the cache, or resolves the fallback set and writes it.
         pub fn load() -> MacFonts {
-            let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
-            let cache = cache_path(env("XDG_CACHE_HOME"), env("HOME"));
+            let cache = cache_file();
             let cached = cache
                 .as_ref()
                 .and_then(|p| std::fs::read_to_string(p).ok())
@@ -117,9 +149,11 @@ mod mac {
             v.extend(self.fallback.iter().cloned());
             v
         }
-        fn lookup(&self, _c: char) -> Option<PathBuf> {
-            // TODO(Task 42): CTFontCreateForString off the start-up path.
-            None
+        fn lookup(&self, c: char) -> Option<PathBuf> {
+            file_covering(c)
+        }
+        fn warm_up(&self) {
+            let _ = file_covering(WARM_UP);
         }
     }
 }
@@ -132,7 +166,10 @@ mod tests {
     fn cache_round_trips() {
         let paths = vec![PathBuf::from("/a/b.ttf"), PathBuf::from("/c d/e.ttc")];
         let text = format_cache(&paths);
-        assert_eq!(parse_cache(&text, |_| true), Some(paths));
+        assert_eq!(parse_cache(&text, |_| true), Some(paths.clone()));
+        // The renderer appends codepoint lines; they don't spoil the cache.
+        let more = format!("{text}glyph\t2610\t/f/Symbols.ttf\n");
+        assert_eq!(parse_cache(&more, |_| true), Some(paths));
     }
 
     #[test]
