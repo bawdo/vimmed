@@ -84,6 +84,11 @@
 //! find bar in the status row, which takes every key while it shows.
 //! Primary+S over a file changed on disk asks rather than refusing.
 //!
+//! The mouse (`mouse`): clicks place the cursor (reveal following on the
+//! button's release), drags and double-clicks select, and clicks open
+//! links, toggle task checkboxes and pick in the table picker, from the
+//! hit the shell's renderer found. The wheel scrolls the view.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
@@ -95,6 +100,7 @@ mod ime;
 mod link;
 mod list_keys;
 mod locking;
+mod mouse;
 mod nonvim_keys;
 mod prompt;
 mod reader;
@@ -112,7 +118,7 @@ use crate::file::recovery::{Found, Recovery};
 use crate::file::{self, DiskEvent, Loaded, RegisterStore, StateDir, Watcher};
 use crate::grapheme;
 use crate::host::Host;
-use crate::input::{Input, Key, KeyEvent, Mods};
+use crate::input::{Input, Key, KeyEvent, Mods, MouseEvent, MouseKind};
 use crate::markdown::{
     BlockId, Blocks, InlineKind, LineDisplay, LineKind, Prefix, Reveal, SpanBase, TableId, code_bg,
     line_display, ordered_display, parse_line,
@@ -304,6 +310,12 @@ pub struct Editor {
     /// What vim-off editing keeps: the typing run and the find bar
     /// (`nonvim_keys`).
     plain: NonVim,
+    /// The mouse button held since a `Down` or `DoubleClick` the editor
+    /// took, until its `Up` (`mouse`).
+    pressed: Option<mouse::Pressed>,
+    /// The part of a point the wheel has scrolled but the view has not
+    /// (`mouse`).
+    wheel_rem: f32,
 }
 
 impl Editor {
@@ -458,6 +470,8 @@ impl Editor {
             recovery: None,
             recovery_found: None,
             plain: NonVim::default(),
+            pressed: None,
+            wheel_rem: 0.0,
         }
     }
 
@@ -486,9 +500,20 @@ impl Editor {
     }
 
     pub fn handle(&mut self, input: Input) -> Effects {
-        // With vim off, any input but a tick or a composition ends the
-        // typing run unless it types more of it (`nonvim_keys`).
-        if !self.cfg.vim && !matches!(input, Input::Tick { .. } | Input::Preedit { .. }) {
+        // With vim off, any input but a tick, a composition, the wheel or
+        // the pointer's hover ends the typing run unless it types more of
+        // it (`nonvim_keys`).
+        let passive = matches!(
+            input,
+            Input::Tick { .. }
+                | Input::Preedit { .. }
+                | Input::Scroll { .. }
+                | Input::Mouse(MouseEvent {
+                    kind: MouseKind::Move,
+                    ..
+                })
+        );
+        if !self.cfg.vim && !passive {
             self.plain.input();
         }
         let dirty = self.dirty;
@@ -549,6 +574,16 @@ impl Editor {
     }
 
     fn dispatch(&mut self, input: Input) -> Effects {
+        // Typing while a mouse button is held: the reveal the press held
+        // back catches up first (`mouse`).
+        if matches!(
+            input,
+            Input::Key(_) | Input::Text(_) | Input::Preedit { .. }
+        ) && self.pressed.is_some()
+        {
+            let fx = self.release_press();
+            return fx.merge(self.dispatch(input));
+        }
         match input {
             Input::Key(k) => self.key(k),
             // A commit ends the composition, wherever it lands.
@@ -562,14 +597,13 @@ impl Editor {
             Input::CloseRequested => self.close(0),
             // The recovery copy is written first (`recovering`).
             Input::Signal(s) => self.close_on_signal(s),
-            // TODO(Task 38): while the table picker shows, hover selects
-            // the cell under the pointer (`TablePicker::select`, the cell
-            // from `DocView::picker_cell_at`) and a click inserts it.
+            // Clicks, drags, the table picker's hover and the wheel
+            // (`mouse`).
+            Input::Mouse(m) => self.mouse(m),
+            Input::Scroll { dy_pt } => self.wheel(dy_pt),
             // Coming to the front looks at the file at once (`disk`).
             Input::Focus(true) => self.focus_in(),
-            Input::Mouse(_) | Input::Scroll { .. } | Input::Focus(_) | Input::Appearance(_) => {
-                Effects::default()
-            }
+            Input::Focus(_) | Input::Appearance(_) => Effects::default(),
             Input::Tick { now_ns } => self.tick(now_ns),
         }
     }
@@ -1872,12 +1906,15 @@ impl Editor {
         start..end
     }
 
+    /// What line `i` reveals: around the cursor, or, while a mouse button
+    /// is held, around where the cursor was before the press (`mouse`).
     fn reveal(&self, i: usize) -> Reveal {
+        let at = self.reveal_at();
         if self.reader {
             Reveal::None
-        } else if i == self.cursor.line {
-            Reveal::Cursor(self.cursor.col)
-        } else if self.group(i).is_some() && self.group(i) == self.group(self.cursor.line) {
+        } else if i == at.line {
+            Reveal::Cursor(at.col)
+        } else if self.group(i).is_some() && self.group(i) == self.group(at.line) {
             Reveal::Block
         } else {
             Reveal::None

@@ -133,7 +133,7 @@ impl Editor {
 
     /// A `cols` by `rows` table at the cursor (`tables::insert`), as one
     /// undo step that puts the cursor back on undo.
-    fn insert_table(&mut self, cols: u32, rows: u32) -> Effects {
+    pub(super) fn insert_table(&mut self, cols: u32, rows: u32) -> Effects {
         let plan = tables::insert(&self.buf, self.cursor, cols, rows);
         let before = self.cursor;
         let normal = self.cfg.vim && self.mode == Mode::Normal;
@@ -149,10 +149,8 @@ impl Editor {
 
     /// A key while the grid picker shows: `h`/Left, `l`/Right, `k`/Up and
     /// `j`/Down move the selection (growing the grid), Enter inserts the
-    /// selected size and Esc closes it. Every other key does nothing.
-    ///
-    /// TODO(Task 38): mouse hover selects a cell (`TablePicker::select`)
-    /// and a click inserts it; see `Editor::dispatch`.
+    /// selected size and Esc closes it. Every other key does nothing. The
+    /// mouse hovers and clicks in it too (`mouse`).
     pub(super) fn picker_key(&mut self, k: KeyEvent) -> Effects {
         let plain = !(k.mods.ctrl || k.mods.alt || self.platform.primary(k.mods));
         let Some(p) = self.picker.as_mut() else {

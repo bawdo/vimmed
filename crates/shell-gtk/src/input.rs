@@ -1,8 +1,9 @@
-//! Turning GDK key presses into editor input. The mapping works on plain
-//! keysyms and modifier bits so it is tested everywhere; the shell passes
-//! `gdk::Key`'s value and its Unicode character.
+//! Turning GDK key presses, clicks and scrolls into editor input. The
+//! mapping works on plain keysyms, modifier bits and numbers so it is
+//! tested everywhere; the shell passes `gdk::Key`'s value and its Unicode
+//! character, a press's count and a scroll's delta.
 
-use editor_core::input::{Input, Key, KeyEvent, Mods};
+use editor_core::input::{Input, Key, KeyEvent, Mods, MouseKind};
 
 /// X11 keysyms (`gdk/gdkkeysyms.h`), the values of `gdk::Key`.
 pub mod keysym {
@@ -84,6 +85,29 @@ pub fn map(keyval: u32, ch: Option<char>, mods: Mods, time_ns: u64) -> Option<In
     map_key(keyval, ch, mods, time_ns).map(Input::Key)
 }
 
+/// The editor's kind for a `GtkGestureClick` press with `n_press`: the
+/// second press of a double-click is `DoubleClick`; any other (a third
+/// too) is `Down`.
+pub fn press_kind(n_press: i32) -> MouseKind {
+    if n_press == 2 {
+        MouseKind::DoubleClick
+    } else {
+        MouseKind::Down
+    }
+}
+
+/// Points down the document for a `GtkEventControllerScroll` delta `dy`
+/// (positive down the document). A smooth (surface unit) delta is in
+/// points already; a wheel's is in notches, each scrolling the page height
+/// `page_pt` to the power 2/3, as `GtkScrolledWindow` does.
+pub fn scroll_pt(dy: f64, wheel: bool, page_pt: f32) -> f32 {
+    if wheel {
+        dy as f32 * page_pt.max(1.0).powf(2.0 / 3.0)
+    } else {
+        dy as f32
+    }
+}
+
 /// The byte offset of char `index` in `text` (GTK counts a preedit's cursor
 /// in chars), clamped to its length.
 pub fn char_to_byte(text: &str, index: i32) -> usize {
@@ -96,6 +120,23 @@ pub fn char_to_byte(text: &str, index: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_second_press_is_a_double_click() {
+        assert_eq!(press_kind(1), MouseKind::Down);
+        assert_eq!(press_kind(2), MouseKind::DoubleClick);
+        assert_eq!(press_kind(3), MouseKind::Down);
+    }
+
+    #[test]
+    fn scroll_deltas_become_points_down_the_document() {
+        // Smooth (surface) deltas are points already.
+        assert_eq!(scroll_pt(3.5, false, 1000.0), 3.5);
+        // A wheel notch scrolls the page height to the power 2/3, as a
+        // GtkScrolledWindow does: 100 points for a 1000 point page.
+        assert!((scroll_pt(1.0, true, 1000.0) - 100.0).abs() < 1e-3);
+        assert!((scroll_pt(-2.0, true, 1000.0) + 200.0).abs() < 1e-3);
+    }
 
     fn key(i: Option<Input>) -> Option<(Key, Mods)> {
         match i {

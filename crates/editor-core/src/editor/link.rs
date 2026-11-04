@@ -77,8 +77,11 @@ pub(super) struct Linking {
 }
 
 impl Editor {
-    /// Opens a link's target (the `(...)` of `[text](target)`), as a click
-    /// on a link does. A bare `#fragment` does nothing. A target that is
+    /// Follows a link's target (the `(...)` of `[text](target)`), as a
+    /// click on a link does (`mouse`): a web or mail link goes to the
+    /// system handler, a markdown file opens in a window of its own, and
+    /// any other target asks first (see the module notes), so the effects
+    /// can be a prompt. A bare `#fragment` does nothing. A target that is
     /// not there shows `no such file: <path>`; the effects then ask for the
     /// status repaint and the timer that fades it, so this can be called
     /// from outside `handle`.
@@ -530,6 +533,34 @@ mod tests {
         e.handle(Input::Text("o".into()));
         assert_eq!(host.state().opened, ["vscode://x"]);
         assert_eq!(e.text(), "ab");
+    }
+
+    #[test]
+    fn the_question_escapes_bidi_and_control_chars_but_opens_the_original() {
+        let dir = Scratch::new("bidi");
+        let (mut e, host) = ed_at(&dir.path().join("notes.md"), "", false);
+        // U+202E would show `ftp://h/aexe.pdf` reversed as a harmless pdf.
+        let target = "ftp://h/a\u{202e}fdp.exe\u{7}\tz\u{2066}";
+        e.open_link(target);
+        assert_eq!(
+            asked(&e),
+            Some(r"open ftp://h/a\u{202e}fdp.exe\u{7}\u{9}z\u{2066}? [o]pen [c]ancel".to_owned())
+        );
+        keys(&mut e, "o");
+        assert_eq!(host.state().opened, [target]);
+        // A literal `\u{202e}` in a target cannot pass for an escaped one,
+        // and zero-width and line separator chars show too.
+        let target = "ftp://h/\\u{202e}a\u{200b}b\u{200d}c\u{feff}d\u{2028}e\u{2029}";
+        e.open_link(target);
+        assert_eq!(
+            asked(&e),
+            Some(
+                r"open ftp://h/\\u{202e}a\u{200b}b\u{200d}c\u{feff}d\u{2028}e\u{2029}? [o]pen [c]ancel"
+                    .to_owned()
+            )
+        );
+        keys(&mut e, "o");
+        assert_eq!(host.state().opened.last().map(String::as_str), Some(target));
     }
 
     #[test]

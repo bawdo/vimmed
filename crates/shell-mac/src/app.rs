@@ -14,7 +14,7 @@ use dispatch2::DispatchQueue;
 use editor_core::editor::{Config, Editor, OpenRequest};
 use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
-use editor_core::input::{Input, SignalKind};
+use editor_core::input::{Input, MouseEvent, MouseKind, SignalKind};
 use editor_core::platform::Platform;
 use editor_core::tokens::TokenId;
 use editor_core::view_model::ViewSource;
@@ -351,6 +351,8 @@ pub fn launch(delegate: &Delegate) {
     window.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     window.makeKeyAndOrderFront(None);
     window.makeFirstResponder(Some(&view));
+    // `mouseMoved:` reaches the view (the table picker's hover).
+    window.setAcceptsMouseMovedEvents(true);
     // The deprecated call on purpose: macOS 14's cooperative `activate()`
     // never takes focus from the active app, so a window the launcher
     // starts from a terminal would never come forward or become key (and
@@ -537,6 +539,64 @@ pub fn on_key(event: &NSEvent) {
         return;
     };
     handle(inp, event.timestamp(), handler_s);
+}
+
+/// A mouse button event or a move, hit-tested against what was painted
+/// (in the view's flipped points) and handed to the editor. A move goes
+/// only while the table picker shows: nothing else hovers. Mouse input is
+/// not timed as keys are.
+pub fn on_mouse(view: &NSView, event: &NSEvent, kind: MouseKind) {
+    let at = view.convertPoint_fromView(event.locationInWindow(), None);
+    let mods = input::mods_from_flags(event.modifierFlags().0);
+    let close = with_state(|st| {
+        if kind == MouseKind::Move && st.editor.table_picker().is_none() {
+            return None;
+        }
+        let hit = st.doc.hit_test(at.x as f32, at.y as f32);
+        let composing = st.editor.preedit().is_some();
+        let fx = st
+            .editor
+            .handle(Input::Mouse(MouseEvent { kind, hit, mods }));
+        let close = apply_changed(st, fx);
+        // A press the editor took dropped the composition: the input
+        // method drops it too, rather than committing it later where the
+        // caret went.
+        if composing
+            && st.editor.preedit().is_none()
+            && let Some(ctx) = st.view.inputContext()
+        {
+            IME_CALL.with(|c| *c.borrow_mut() = Some((ctx, false)));
+        }
+        close
+    });
+    flush_ime();
+    if let Some(Some(code)) = close {
+        finish(code);
+    }
+}
+
+/// The wheel or trackpad, as points down the document.
+pub fn on_scroll(event: &NSEvent) {
+    let close = with_state(|st| {
+        let t = st.editor.tokens();
+        let line_pt = t.px(TokenId::FontSize) * t.ratio(TokenId::LineHeightBody);
+        let precise = event.hasPreciseScrollingDeltas();
+        let dy_pt = input::scroll_pt(event.scrollingDeltaY(), precise, line_pt);
+        let fx = st.editor.handle(Input::Scroll { dy_pt });
+        apply_changed(st, fx)
+    });
+    flush_ime();
+    if let Some(Some(code)) = close {
+        finish(code);
+    }
+}
+
+/// `apply`, unless the effects ask nothing.
+fn apply_changed(st: &mut State, fx: Effects) -> Option<i32> {
+    if fx == Effects::default() {
+        return None;
+    }
+    apply(st, fx)
 }
 
 /// One input to the editor, painted, staged and timed.

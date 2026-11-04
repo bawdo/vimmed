@@ -7,8 +7,11 @@
 //! every other key, and every key in Normal and Visual, is mapped directly
 //! (`input::routes_to_ime`). The composition lives in the editor; the view
 //! only reports it.
+//!
+//! The mouse buttons, the pointer's moves and the wheel go to `app`, which
+//! hit-tests them against what was painted.
 
-use editor_core::input::Input;
+use editor_core::input::{Input, MouseKind};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -73,6 +76,33 @@ define_class!(
             } else {
                 app::on_key(event);
             }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let kind = input::press_kind(event.clickCount());
+            app::on_mouse(self, event, kind);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            app::on_mouse(self, event, MouseKind::Drag);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            app::on_mouse(self, event, MouseKind::Up);
+        }
+
+        /// Only while the table picker shows (`app::on_mouse`).
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            app::on_mouse(self, event, MouseKind::Move);
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            app::on_scroll(event);
         }
 
         #[unsafe(method(tick:))]

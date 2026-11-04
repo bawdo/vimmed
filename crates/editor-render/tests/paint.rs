@@ -159,22 +159,6 @@ fn caret_and_hit_round_trip_on_a_laid_line() {
 }
 
 #[test]
-fn hit_test_maps_through_hidden_syntax() {
-    let t = Tokens::defaults(Theme::Light);
-    let src = Fake::new(&["plain", "**bold** tail"], t.clone());
-    let mut v = view(&t, 2.0);
-    v.paint_all(&src);
-    let g = Geom::new(&t, 2.0);
-    // Line 1 shows "bold tail": the far right of it is the source end.
-    let y = (g.line_rows(1).start + 10) as f32 / 2.0;
-    let end = v.hit_test(W_PT - 1.0, y).unwrap();
-    assert_eq!(end, Pos { line: 1, col: 13 });
-    // Column 0 of the display is source byte 2, after the hidden `**`.
-    let first = v.hit_test(0.0, y).unwrap();
-    assert_eq!(first, Pos { line: 1, col: 2 });
-}
-
-#[test]
 fn caret_rect_follows_the_cursor() {
     let t = Tokens::defaults(Theme::Light);
     let mut src = Fake::new(&["alpha", "beta"], t.clone());

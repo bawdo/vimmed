@@ -162,7 +162,10 @@ impl Editor {
             Mode::Search | Mode::Command | Mode::Confirm | Mode::Prompt => false,
         };
         // The find bar (vim off) holds its origin, as a search does.
+        // A held mouse button holds positions too (`mouse`): the reload
+        // waits for its release.
         mode && self.preedit.is_none()
+            && self.pressed.is_none()
             && self.picker.is_none()
             && self.asking.is_none()
             && !self.finding()
@@ -338,6 +341,26 @@ mod tests {
         assert_eq!(e.text(), "hello\n");
         assert_eq!(e.mode(), Mode::Command);
         keys(&mut e, "<Esc>");
+        assert_eq!(e.text(), "changed elsewhere\n");
+    }
+
+    #[test]
+    fn a_reload_waits_for_the_mouse_button() {
+        use crate::input::{Input, Mods, MouseEvent, MouseHit, MouseKind};
+        let (_dir, path) = doc("hello\nworld\n");
+        let (mut e, _state) = open(&path);
+        let at = |kind| {
+            Input::Mouse(MouseEvent {
+                kind,
+                hit: Some(MouseHit::text(crate::testkit::pos(1, 2))),
+                mods: Mods::default(),
+            })
+        };
+        e.handle(at(MouseKind::Down));
+        fs::write(&path, "changed elsewhere\n").unwrap();
+        e.disk_event(DiskEvent::Changed);
+        assert_eq!(e.text(), "hello\nworld\n", "not under a held press");
+        e.handle(at(MouseKind::Up));
         assert_eq!(e.text(), "changed elsewhere\n");
     }
 

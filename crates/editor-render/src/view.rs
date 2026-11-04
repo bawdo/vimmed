@@ -35,6 +35,11 @@
 //!
 //! Reader view: no caret and nothing revealed; the status bar stays at its
 //! height (owner decision D21). `scroll_by` scrolls without the cursor.
+//!
+//! The mouse: `hit_test` says what is under a point (the source position
+//! through hidden syntax, the grapheme under it, and whether it is text, a
+//! task's checkbox, an image, a link or a cell of the table picker), from
+//! what was last painted, for the shell to hand to the editor.
 //! The help overlay
 //! (`overlay`) covers the text area while the source shows it, and the
 //! table picker sits under the cursor's line while the source shows that.
@@ -46,6 +51,7 @@ use editor_core::buffer::{LineShift, Pos, ShiftMark};
 use editor_core::effects::Scroll;
 use editor_core::grapheme;
 use editor_core::host::Waker;
+use editor_core::input::{MouseHit, Zone};
 use editor_core::markdown::{
     BlockDeco, BlockId, LineDisplay, Prefix, SpanBase, SpanStyle, display_to_src,
 };
@@ -111,6 +117,32 @@ fn paint_image(
     }
 }
 
+/// The source range of the run of link-styled spans holding display byte
+/// `byte` (hidden syntax between them included), or `None` when the span
+/// there is no link.
+fn link_run(d: &LineDisplay, byte: usize) -> Option<Range<usize>> {
+    let mut at = 0;
+    let k = d.spans.iter().position(|s| {
+        let end = at + s.src.len();
+        let here = (at..end).contains(&byte);
+        at = end;
+        here
+    })?;
+    if !d.spans[k].style.link {
+        return None;
+    }
+    let first = (0..k)
+        .rev()
+        .take_while(|&j| d.spans[j].style.link)
+        .last()
+        .unwrap_or(k);
+    let last = (k + 1..d.spans.len())
+        .take_while(|&j| d.spans[j].style.link)
+        .last()
+        .unwrap_or(k);
+    Some(d.spans[first].src.start..d.spans[last].src.end)
+}
+
 /// A rectangle in points, relative to the frame's top left.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RectPt {
@@ -134,6 +166,11 @@ pub(crate) struct Cached {
 }
 
 impl Cached {
+    /// The text this layout was made from.
+    pub(crate) fn key_text(&self) -> &str {
+        &self.key.text
+    }
+
     /// True when this layout was made from exactly these inputs.
     pub(crate) fn key_matches(&self, text: &str, spans: &[StyledSpan], width: f32) -> bool {
         self.key.text == text && self.key.spans == spans && self.key.width == width
@@ -299,6 +336,9 @@ pub struct DocView {
     lines: Vec<LineSlot>,
     pub(crate) status_cache: Vec<Cached>,
     pub(crate) last_status: Option<StatusModel>,
+    /// Each status bar item as last painted: its text and where it runs
+    /// across, in frame pixels (`status_items`).
+    pub(crate) status_items: Vec<(String, Range<f32>)>,
     pub(crate) damage: Damage,
     /// The caret's line and its rectangle in frame pixels, as last painted.
     caret: Option<(usize, RectF)>,
@@ -356,6 +396,7 @@ impl DocView {
             lines: Vec::new(),
             status_cache: Vec::new(),
             last_status: None,
+            status_items: Vec::new(),
             damage: Damage::new(),
             caret: None,
             cursor_drawn: None,
@@ -525,30 +566,79 @@ impl DocView {
         self.layout.end_frame();
     }
 
-    /// The source position under the point `x_pt, y_pt`, or `None` outside
-    /// the text area or over a line not painted yet. Over a rendered table
-    /// row, the position is in the cell under the point.
-    pub fn hit_test(&self, x_pt: f32, y_pt: f32) -> Option<Pos> {
+    /// What is under the point `x_pt, y_pt`, as the mouse sees it (`None`
+    /// outside the text area or over a line not painted yet), from what
+    /// was last painted:
+    /// - over a cell of the table picker, `Zone::Picker` (the picker sits
+    ///   over the text);
+    /// - over an image line's picture, `Zone::Image`, at the line's start;
+    /// - else the source position nearest the point (`pos`, through hidden
+    ///   syntax) and the grapheme under it (`under`), over a rendered table
+    ///   row in the cell under the point. The zone is `Prefix` left of a
+    ///   task item's text on its first row (its checkbox), `Link` over
+    ///   link-styled text (the source range of the run of link spans under
+    ///   the point) and `Text` otherwise.
+    pub fn hit_test(&self, x_pt: f32, y_pt: f32) -> Option<MouseHit> {
         let s = self.frame.scale;
         let (x, y) = (x_pt * s, y_pt * s);
         let g = self.geo();
         if !(0.0..g.text_bottom).contains(&y) || self.lines.is_empty() {
             return None;
         }
-        let last = self.lines.len() - 1;
+        if let Some((col, row)) = self.picker_at.and_then(|p| p.cell_at(x, y)) {
+            let pos = self.text_hit(x, y).map_or(Pos::default(), |h| h.pos);
+            return Some(MouseHit {
+                pos,
+                under: pos,
+                zone: Zone::Picker { col, row },
+            });
+        }
+        self.text_hit(x, y)
+    }
+
+    /// `hit_test` on the document's lines, `x, y` in frame pixels inside
+    /// the text area.
+    fn text_hit(&self, x: f32, y: f32) -> Option<MouseHit> {
+        let g = self.geo();
+        let last = self.lines.len().checked_sub(1)?;
         let mut top = g.page_top - self.scroll;
         for (i, slot) in self.lines.iter().enumerate() {
             if y < top + slot.height || i == last {
-                let laid = &slot.text.as_ref()?.laid;
                 let d = slot.display.as_ref()?;
-                if let Some(col) = self.hit_table(i, x - g.col_x, (y - top).max(0.0)) {
-                    return Some(Pos { line: i, col });
+                if slot.image.is_some() && matches!(d.deco, BlockDeco::Image { .. }) {
+                    let pos = Pos { line: i, col: 0 };
+                    return Some(MouseHit {
+                        pos,
+                        under: pos,
+                        zone: Zone::Image,
+                    });
                 }
-                let b = laid.hit(x - g.col_x - slot.offset, (y - top).max(0.0));
-                return Some(Pos {
+                let laid = &slot.text.as_ref()?.laid;
+                let ly = (y - top).max(0.0);
+                if let Some(col) = self.hit_table(i, x - g.col_x, ly) {
+                    return Some(MouseHit::text(Pos { line: i, col }));
+                }
+                let lx = x - g.col_x - slot.offset;
+                let at = |b: usize| Pos {
                     line: i,
                     col: display_to_src(d, b),
-                });
+                };
+                let pos = at(laid.hit(lx, ly));
+                let cluster = laid.cluster_at(lx, ly);
+                let under = cluster.as_ref().map_or(pos, |c| at(c.start));
+                let first_row = laid.row_geometry().first().map_or(0.0, |r| r.height);
+                let zone = if matches!(d.prefix, Prefix::Task(_))
+                    && lx < 0.0
+                    && x - g.col_x >= slot.prefix_dx
+                    && ly < first_row
+                {
+                    Zone::Prefix
+                } else {
+                    cluster
+                        .and_then(|c| link_run(d, c.start))
+                        .map_or(Zone::Text, Zone::Link)
+                };
+                return Some(MouseHit { pos, under, zone });
             }
             top += slot.height;
         }
@@ -588,8 +678,9 @@ impl DocView {
         }
     }
 
-    /// Scrolls the view without the cursor (reader view's keys): by whole
-    /// lines from the one at the top of the text area (a line partly
+    /// Scrolls the view without the cursor (reader view's keys, and the
+    /// wheel by points): by whole lines from the one at the top of the
+    /// text area (a line partly
     /// scrolled off counts as the top one, so the first line up shows it
     /// whole), by text-area heights, or to either end. The scroll stays
     /// between the top and where the last line's bottom meets the bottom
@@ -610,6 +701,7 @@ impl DocView {
             })
             .collect();
         let want = match s {
+            Scroll::Points(n) => self.scroll + n as f32 * self.frame.scale,
             Scroll::Top => 0.0,
             Scroll::Bottom => max,
             Scroll::Line(i) => match starts.len().checked_sub(1) {
@@ -681,6 +773,12 @@ impl DocView {
             .text
             .as_ref()
             .map(|c| c.key.spans.as_slice())
+    }
+
+    /// The status bar's items as last painted, left to right on each side:
+    /// each one's text and the pixels it runs across from the frame's left.
+    pub fn status_items(&self) -> &[(String, Range<f32>)] {
+        &self.status_items
     }
 
     /// Where line `i`'s text starts, in frame pixels from the left, while it
