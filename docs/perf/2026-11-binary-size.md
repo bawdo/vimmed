@@ -157,16 +157,19 @@ fallback. The release `window` binary from `cargo xtask bundle-mac --release`
 The launcher is unchanged at 337,184 B. The font fallback adds 99,712 B. This
 is the jump flagged above: the harness estimate for the grammars alone was
 13.6 MB, and the real window with the grammars and everything else it now links
-is 15.9 MB.
+is 15.9 MB (15.2 MiB).
 
 Relation to cold start (macOS, Mac16,6, laptop display, see
 `checkpoint-1.md`): against the Task 15 baseline at 935ed41, when the window
 was about 3.0 MB, first_frame median went from 186.8 to 205.7 ms (+18.9 ms) and
 p95 from 203.4 to 214.7 ms (+11.3 ms). Both are inside the 250 ms median and
-400 ms p95 thresholds. The extra time is before first paint (toolkit_init
-107.4 to 116.6 ms, window_created 129.4 to 140.1 ms, first_paint 133.1 to
-143.8 ms), which is consistent with mapping and relocating a binary about five
-times larger rather than with highlighting work. highlight_ready (179.5 ms
-median) lands before first_frame. The size has a measurable but affordable cost
-on cold start; the options listed above (a feature flag per grammar, link-time
+400 ms p95 thresholds. Most of the growth is before first paint, about 10.7
+of the 18.9 ms (toolkit_init 107.4 to 116.6 ms, window_created 129.4 to
+140.1 ms, first_paint 133.1 to 143.8 ms). The baselines differ: those three
+marks are compared with ff1a140, first_frame with 935ed41. That the extra time
+comes from mapping and relocating a binary about five times larger is an
+inference, not something the marks show. highlight_ready (179.5 ms median)
+lands about 36 ms after first_paint, inside the window, so highlighting is part
+of the later stretch to first_frame. If the inference holds, the size has a
+measurable but affordable cost on cold start; the options listed above (a feature flag per grammar, link-time
 optimisation) remain available if it needs to come down.

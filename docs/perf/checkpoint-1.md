@@ -2,8 +2,9 @@
 
 Base sha 0337930 (Phase B complete, Tasks 1 to 17). The macOS cold starts in
 section 1 were measured later, at sha 8a937bf (grammars linked by Task 27b,
-lazy font fallback by Task 42). This page collects every Checkpoint 1 number. Sections marked pending are filled in by the orchestrator
-or the owner; do not read an empty cell as a pass.
+lazy font fallback by Task 42). This page collects every Checkpoint 1 number.
+Sections marked pending are filled in by the orchestrator or the owner; do not
+read an empty cell as a pass.
 
 ## Display used
 
@@ -79,9 +80,13 @@ window about 3.0 MB):
 
 Both are still inside the thresholds. Earlier Task 15 runs at ff1a140 had
 toolkit_init 107.4, window_created 129.4 and first_paint 133.1 ms; now they are
-116.6, 140.1 and 143.8 ms. The growth sits before the first paint (process
-start and toolkit init), which fits a binary about five times larger to map and
-relocate. highlight_ready (179.5 ms median) lands before first_frame.
+116.6, 140.1 and 143.8 ms. Most of the growth sits before first paint (about
+10.7 of the 18.9 ms). Note the baselines differ: first_paint is compared with
+ff1a140, first_frame with 935ed41. Reading that growth as the cost of mapping
+and relocating a binary about five times larger is an inference, not something
+the marks show. highlight_ready (179.5 ms median) lands about 36 ms after
+first_paint, inside the window, so highlighting is part of the later stretch
+to first_frame.
 
 Linux stage budget (a reference for the i7-7700HQ, not a pass mark on the Mac).
 The Linux stage runs are deferred (owner decision D8: macOS until the end), so
@@ -113,7 +118,7 @@ neither row above is a pass.
 
 The Linux kit, `scripts/checkpoint-linux.sh 1`, is written and checked
 (`bash -n`, shellcheck) but the run is deferred to the end of the project by
-owner decision D8. Nothing below is measured yet (macOS is the focus until the end).
+owner decision D8. Nothing below is measured yet.
 
 | Measure | Target | Result |
 |---|---|---|
@@ -194,13 +199,14 @@ cosmic_text 124.5 KiB, image_webp 119.5 KiB, zune_jpeg 112.0 KiB, image
 
 The 3.0 MB figure was true only before the shells constructed a `Highlighter`:
 the linker dropped the twelve tree-sitter grammars. Once they were wired in
-(Task 27b) the window binary grew to 15.9 MB, and Task 42's lazy font fallback
-added 99,712 B. Full detail is in `2026-11-binary-size.md`.
+(Task 27b) the window binary grew to 15.9 MB (15.2 MiB), and Task 42's lazy
+font fallback added 99,712 B. Full detail is in `2026-11-binary-size.md`.
 
 Effect on cold start: the window binary is about five times larger than at the
 Task 15 baseline, and first_frame median moved from 186.8 to 205.7 ms (p95
-203.4 to 214.7 ms), with the growth before first paint (section 1). That is
-inside the 250 ms and 400 ms thresholds, but the binary size is now a cost
+203.4 to 214.7 ms), with most of the growth before first paint (section 1; the
+baselines differ, see there). Whether the size causes that is an inference. It
+is inside the 250 ms and 400 ms thresholds, but the binary size is now a cost
 worth watching.
 
 ## 7. Judgement
