@@ -22,7 +22,7 @@ use std::time::Duration;
 use editor_core::editor::{Config, Editor, OpenRequest};
 use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
-use editor_core::input::Input;
+use editor_core::input::{Input, SignalKind};
 use editor_core::platform::Platform;
 use editor_core::strings;
 use editor_core::tokens::TokenId;
@@ -281,6 +281,11 @@ pub fn run(args: WindowArgs) -> i32 {
     let bench = state.bench.is_some();
     STATE.with(|s| *s.borrow_mut() = Some(state));
     connect(&window, &canvas, &keys, &im);
+    // SIGTERM keeps a recovery copy of unsaved text, on the main loop.
+    glib_unix::unix_signal_add_local(SignalKind::Terminate.number(), || {
+        on_terminate();
+        glib::ControlFlow::Continue
+    });
     // An editor that opens taking text (vim off, bench mode) feeds the
     // input method from the first key.
     with_state(sync_ime);
@@ -664,13 +669,26 @@ fn request_close() {
     }
 }
 
+/// SIGTERM: the editor writes its recovery copy, if the document is
+/// dirty, and closes with 143.
+fn on_terminate() {
+    let term = SignalKind::Terminate;
+    let close = with_state(|st| {
+        let fx = st.editor.handle(Input::Signal(term));
+        apply(st, fx)
+    });
+    finish(close.flatten().unwrap_or(term.exit_code()));
+}
+
 /// Stops the main loop; `run` then returns `code`. The lock record and
 /// the file watch go first, so no way out (a bench deadline) leaves them
-/// behind.
+/// behind; so does the recovery copy of a way out that did not close the
+/// editor (a signal's close kept its copy).
 fn finish(code: i32) {
     EXIT.with(|e| e.set(Some(code)));
     with_state(|st| {
         st.editor.release_lock();
+        st.editor.discard_recovery();
         st.editor.stop_watching();
         st.window.set_visible(false);
     });

@@ -14,7 +14,7 @@ use dispatch2::DispatchQueue;
 use editor_core::editor::{Config, Editor, OpenRequest};
 use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
-use editor_core::input::Input;
+use editor_core::input::{Input, SignalKind};
 use editor_core::platform::Platform;
 use editor_core::tokens::TokenId;
 use editor_core::view_model::ViewSource;
@@ -43,7 +43,7 @@ use crate::glass::{KeyTimes, Tick, input_kind, key_values, kind_value, redraw_ki
 use crate::present::{IoSurface, Presenter};
 use crate::startup::{FirstFrame, fit_content};
 use crate::view::{Delegate, DocumentView};
-use crate::{clipboard, input, router};
+use crate::{clipboard, input, router, signal};
 
 /// The window's content size in points. It is the bench protocol's size
 /// (Task 4), used for every window, clamped to the screen's visible frame.
@@ -333,6 +333,14 @@ pub fn launch(delegate: &Delegate) {
     };
     let bench = state.bench.is_some();
     STATE.with(|s| *s.borrow_mut() = Some(state));
+    // SIGTERM keeps a recovery copy of unsaved text; until now it ends
+    // the process as by default.
+    if let Err(e) = signal::install(on_terminate) {
+        eprintln!(
+            "{}: SIGTERM will not keep a recovery copy: {e}",
+            app_meta::SLUG
+        );
+    }
     // A message the open left (an unreadable file) fades like any other.
     with_state(|st| {
         if let Some(at) = st.editor.open_effects().wake_at {
@@ -720,13 +728,27 @@ pub fn request_close() {
     }
 }
 
+/// SIGTERM (`signal`): the editor writes its recovery copy, if the
+/// document is dirty, and closes with 143.
+fn on_terminate() {
+    let term = SignalKind::Terminate;
+    let close = with_state(|st| {
+        let fx = st.editor.handle(Input::Signal(term));
+        apply(st, fx)
+    });
+    flush_ime();
+    finish(close.flatten().unwrap_or(term.exit_code()));
+}
+
 /// Stops the event loop; `run` then returns `code`. The lock record and
 /// the file watch go first, so no way out (a bench deadline, the router,
-/// the exit below) leaves them behind.
+/// the exit below) leaves them behind; so does the recovery copy of a way
+/// out that did not close the editor (a signal's close kept its copy).
 pub(crate) fn finish(code: i32) {
     EXIT.with(|e| e.set(Some(code)));
     with_state(|st| {
         st.editor.release_lock();
+        st.editor.discard_recovery();
         st.editor.stop_watching();
         st.link.pause();
         st.window.orderOut(None);

@@ -14,5 +14,6 @@ marks = { path = "../marks" }
 # Toolkit crates, Linux only, so `cargo test --workspace` still builds on macOS.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+glib-unix = { version = "0.22", default-features = false }
 detach = { path = "../detach" }
 yeslogic-fontconfig-sys = "6"

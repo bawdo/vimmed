@@ -72,6 +72,11 @@
 //! holds it. `handle` reports each change of the dirty state once
 //! (`Effects::dirty`); the shells show it beside the title.
 //!
+//! Recovery copies (`recovering`): while the document is dirty a copy of
+//! its text is kept in the state directory, written on a worker; a signal
+//! writes it at once and closes with 128 plus the signal's number. At
+//! open, a copy a window that is gone left asks the recovery prompt.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
@@ -85,6 +90,7 @@ mod list_keys;
 mod locking;
 mod prompt;
 mod reader;
+mod recovering;
 mod table_keys;
 
 use std::ops::Range;
@@ -94,6 +100,7 @@ use crate::buffer::{Buffer, Pos, ShiftMark};
 use crate::effects::{Effects, Redraw};
 use crate::ex::ExCmd;
 use crate::file::lock::Lock;
+use crate::file::recovery::{Found, Recovery};
 use crate::file::{self, DiskEvent, Loaded, RegisterStore, StateDir, Watcher};
 use crate::grapheme;
 use crate::host::Host;
@@ -276,6 +283,12 @@ pub struct Editor {
     /// When autosave writes the change waiting (`autosave`; the
     /// `marks::now_ns` clock): `None` while nothing is waiting.
     autosave_due: Option<u64>,
+    /// This window's recovery copy of the open file, while there is a
+    /// state directory to keep it in (`recovering`).
+    recovery: Option<Recovery>,
+    /// A copy a window that is gone left, newer than the file, while the
+    /// recovery prompt is to ask or asks about it (`recovering`).
+    recovery_found: Option<Found>,
 }
 
 impl Editor {
@@ -325,9 +338,16 @@ impl Editor {
             editor.share_registers(state);
         }
         if lockable {
+            // The scan first, so a lock warning can wait for its prompt.
+            if let Some(state) = state {
+                editor.start_recovery(state);
+            }
             editor.lock_at_open(state);
+            // After the already-open prompt, if that asks.
+            if editor.asking.is_none() {
+                editor.offer_recovery();
+            }
         }
-        // TODO(Task 34): the recovery scan goes here, before this mark.
         marks::mark(marks::names::STATE_SCANNED);
         marks::mark(marks::names::PARSED);
         editor
@@ -419,6 +439,8 @@ impl Editor {
             watcher: None,
             watch_wanted: false,
             autosave_due: None,
+            recovery: None,
+            recovery_found: None,
         }
     }
 
@@ -453,6 +475,7 @@ impl Editor {
         let current = self.current_match().map(|(line, _)| line);
         let until = self.message_until;
         let line = self.cursor.line;
+        let edits = self.buf.shift_mark();
         let mut fx = self.dispatch(input);
         // A reload the file's change waits for, once the input left the
         // document clean and in a mode that can take it (`disk`); never
@@ -465,6 +488,8 @@ impl Editor {
         fx = fx.merge(self.drop_stale_preedit(line));
         if fx.close.is_none() {
             fx = fx.merge(self.autosave_after(&autosave));
+            // After autosave, which may have left the document clean.
+            fx = fx.merge(self.recovery_after(edits));
         }
         // The dirty state is reported here, once per change of it, so an
         // input that passes through several states (an undo to the save
@@ -513,8 +538,8 @@ impl Editor {
             // With unsaved changes, ask (`prompt`).
             Input::CloseRequested if self.dirty => self.ask(Ask::Close),
             Input::CloseRequested => self.close(0),
-            // TODO(Task 34): write the recovery copy before closing.
-            Input::Signal(s) => self.close(s.exit_code()),
+            // The recovery copy is written first (`recovering`).
+            Input::Signal(s) => self.close_on_signal(s),
             // TODO(Task 38): while the table picker shows, hover selects
             // the cell under the pointer (`TablePicker::select`, the cell
             // from `DocView::picker_cell_at`) and a click inserts it.
@@ -607,12 +632,13 @@ impl Editor {
     }
 
     /// The main loop woke: what the file watch found is taken (`disk`),
-    /// a write autosave has due goes (`autosave`), then a timed message
-    /// whose time is up goes. One not due yet (a
-    /// timer that fired early) asks to be woken again then.
+    /// a write autosave has due goes (`autosave`), so does a recovery copy
+    /// due (`recovering`), then a timed message whose time is up goes. One
+    /// not due yet (a timer that fired early) asks to be woken again then.
     fn tick(&mut self, now_ns: u64) -> Effects {
         let fx = self.poll_disk();
         let fx = fx.merge(self.autosave_tick(now_ns));
+        let fx = fx.merge(self.recovery_tick(now_ns));
         fx.merge(self.fade_message(now_ns))
     }
 

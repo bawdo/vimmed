@@ -19,6 +19,8 @@ mod clipboard;
 #[cfg(target_os = "macos")]
 mod displaylink;
 #[cfg(target_os = "macos")]
+mod signal;
+#[cfg(target_os = "macos")]
 mod view;
 
 #[cfg(target_os = "macos")]
