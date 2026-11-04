@@ -120,8 +120,10 @@ mod tests {
     use crate::testkit::{FakeHost, FileCall, ViewSource, ed_with_files, keys};
     use crate::view_model::{MsgKind, StatusLeft};
 
-    /// An editor opened on `path`, with a host whose clock reads 1000.
-    fn open(path: &Path) -> Editor {
+    /// An editor opened on `path`, with a host whose clock reads 1000, and
+    /// the temporary state directory its lock record goes in (removed
+    /// when the guard drops).
+    fn open(path: &Path) -> (Editor, tempfile::TempDir) {
         let host = FakeHost::default();
         host.state().now = 1_000;
         let req = OpenRequest {
@@ -129,7 +131,16 @@ mod tests {
             view: false,
             display_name: None,
         };
-        Editor::open_with_state(req, Config::default(), Platform::Mac, Box::new(host), None)
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file::StateDir::at(tmp.path().join("state"));
+        let e = Editor::open_with_state(
+            req,
+            Config::default(),
+            Platform::Mac,
+            Box::new(host),
+            Some(&state),
+        );
+        (e, tmp)
     }
 
     fn colon(e: &mut Editor, typed: &str) -> Effects {
@@ -155,7 +166,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         fs::write(&path, "hello\r\n").unwrap();
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         keys(&mut e, "x");
         let fx = colon(&mut e, "w");
         assert_eq!(fs::read_to_string(&path).unwrap(), "ello\r\n");
@@ -170,7 +181,7 @@ mod tests {
         let path = dir.path().join("latin1.md");
         let bytes = b"caf\xe9\n".to_vec();
         fs::write(&path, &bytes).unwrap();
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         assert_eq!(e.status().warnings, [strings::NOT_UTF8_READ_ONLY]);
         keys(&mut e, "ihello<Esc>");
         for cmd in ["w", "w!", "wq", "x"] {
@@ -187,7 +198,7 @@ mod tests {
     fn missing_file_opens_empty_and_first_w_creates_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("new.md");
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         assert_eq!(e.text(), "");
         assert_eq!(e.message(), None);
         keys(&mut e, "ihello<Esc>");
@@ -200,7 +211,7 @@ mod tests {
     fn missing_parent_says_the_os_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("no-such-dir").join("new.md");
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         keys(&mut e, "ihello<Esc>");
         colon(&mut e, "w");
         let want = format!("write failed: {}", os_error(libc::ENOENT));
@@ -213,7 +224,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("COMMIT_EDITMSG");
         fs::write(&path, "message\n").unwrap();
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         keys(&mut e, "x");
         assert_eq!(colon(&mut e, "cq").close, Some(1));
         assert_eq!(fs::read_to_string(&path).unwrap(), "message\n");
@@ -223,7 +234,7 @@ mod tests {
     fn wq_does_not_close_on_failed_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("no-such-dir").join("new.md");
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         keys(&mut e, "ihello<Esc>");
         assert_eq!(colon(&mut e, "wq").close, None);
         let want = format!("write failed: {}", os_error(libc::ENOENT));
@@ -239,7 +250,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         fs::write(&path, "hello\n").unwrap();
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         keys(&mut e, "x");
         fs::write(&path, "changed elsewhere\n").unwrap();
         colon(&mut e, "w");
@@ -261,7 +272,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         fs::write(&path, "one\ntwo").unwrap();
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         keys(&mut e, "x");
         fs::write(&path, "\u{FEFF}three\r\nfour\r\n").unwrap();
         let fx = colon(&mut e, "e!");
@@ -280,7 +291,7 @@ mod tests {
     fn the_open_message_fades() {
         // A directory exists but cannot be read as text.
         let dir = tempfile::tempdir().unwrap();
-        let mut e = open(dir.path());
+        let (mut e, _state) = open(dir.path());
         assert_eq!(e.message(), Some(strings::READ_FAILED));
         let due = 1_000 + status::MESSAGE_FOR_NS;
         assert_eq!(e.open_effects().wake_at, Some(due));
@@ -307,7 +318,7 @@ mod tests {
     fn an_unreadable_open_says_the_read_error_on_w() {
         // A directory exists but cannot be read as text.
         let dir = tempfile::tempdir().unwrap();
-        let mut e = open(dir.path());
+        let (mut e, _state) = open(dir.path());
         for cmd in ["w", "w!"] {
             colon(&mut e, cmd);
             let want = format!("write failed: {}", os_error(libc::EISDIR));
@@ -329,7 +340,7 @@ mod tests {
         let path = dir.path().join("drop-box.md");
         fs::write(&path, "secret").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         assert_eq!(e.message(), Some(strings::READ_FAILED));
         colon(&mut e, "w!");
         let want = format!("write failed: {}", os_error(libc::EACCES));
@@ -343,7 +354,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         fs::write(&path, "hello").unwrap();
-        let mut e = open(&path);
+        let (mut e, _state) = open(&path);
         fs::remove_file(&path).unwrap();
         colon(&mut e, "e!");
         let want = format!("reload failed: {}", os_error(libc::ENOENT));

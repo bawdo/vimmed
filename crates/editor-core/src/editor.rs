@@ -53,6 +53,10 @@
 //! Links (`link`): `open_link` opens a link's target through the host, and
 //! Primary+L opens the command line as the `link: ` prompt.
 //!
+//! The lock record (`locking`): opening a file takes one, another window
+//! holding it asks the already-open prompt, and its `o` answer makes the
+//! document read-only, refusing edits as reader view does.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
@@ -61,6 +65,7 @@ mod cmdline;
 mod ime;
 mod link;
 mod list_keys;
+mod locking;
 mod prompt;
 mod reader;
 
@@ -70,6 +75,7 @@ use std::path::PathBuf;
 use crate::buffer::{Buffer, Pos, ShiftMark};
 use crate::effects::{Effects, Redraw};
 use crate::ex::ExCmd;
+use crate::file::lock::Lock;
 use crate::file::{self, Loaded, RegisterStore, StateDir};
 use crate::grapheme;
 use crate::host::Host;
@@ -221,6 +227,15 @@ pub struct Editor {
     /// The link prompt, while the command line is asking for a link
     /// (`link`).
     linking: Option<link::Linking>,
+    /// This window's lock record on the file, while it is open
+    /// (`locking`).
+    lock: Option<Lock>,
+    /// `o` at the already-open prompt: edits and writes are refused
+    /// (`locking`).
+    read_only_chosen: bool,
+    /// Why the lock record could not be written, held back while the
+    /// already-open prompt asks (`locking`).
+    lock_warning: Option<String>,
 }
 
 impl Editor {
@@ -228,15 +243,20 @@ impl Editor {
     /// name. Bench mode (`<P>BENCH` set) opens in Insert at the first bold
     /// on a paragraph line. The named registers are shared through the
     /// state directory the environment names; with none, they last only
-    /// as long as this window.
+    /// as long as this window. The file's lock record goes there too
+    /// (`open_with_state`).
     pub fn open(req: OpenRequest, cfg: Config, platform: Platform, host: Box<dyn Host>) -> Editor {
         let state = StateDir::from_env();
         Editor::open_with_state(req, cfg, platform, host, state.as_ref())
     }
 
     /// `open`, sharing the named registers through `state` (with `None`,
-    /// keeping them in memory). Nothing in `state` is read or written until
-    /// a named register is used.
+    /// keeping them in memory) and taking the file's lock record there
+    /// (`locking`). A file read (or found missing) takes the lock: another
+    /// live window holding it asks the already-open prompt before any
+    /// editing, and with no `state`, or one that cannot be written, the
+    /// file opens as usual and says so once. A file that could not be read
+    /// takes none.
     pub fn open_with_state(
         req: OpenRequest,
         cfg: Config,
@@ -248,6 +268,7 @@ impl Editor {
         marks::mark(marks::names::FILE_READ);
         let saver = FileSaver::new(req.path.clone(), &loaded);
         let not_utf8 = matches!(loaded, Loaded::NotUtf8 { .. });
+        let lockable = !matches!(loaded, Loaded::Error(_)) && !req.path.as_os_str().is_empty();
         // A file that is missing opens empty under its name; one that is
         // not valid UTF-8 opens empty and read-only (it is never written
         // back); one that cannot be read opens empty, saying so.
@@ -263,6 +284,11 @@ impl Editor {
         if let Some(state) = state {
             editor.share_registers(state);
         }
+        if lockable {
+            editor.lock_at_open(state);
+        }
+        // TODO(Task 34): the recovery scan goes here, before this mark.
+        marks::mark(marks::names::STATE_SCANNED);
         marks::mark(marks::names::PARSED);
         editor
     }
@@ -345,6 +371,9 @@ impl Editor {
             asking: None,
             path: req.path,
             linking: None,
+            lock: None,
+            read_only_chosen: false,
+            lock_warning: None,
         }
     }
 
@@ -555,7 +584,7 @@ impl Editor {
     /// The question Prompt or Confirm mode asks, while it asks it.
     pub fn prompt(&self) -> Option<String> {
         if let Some(p) = &self.asking {
-            return Some(p.question().to_owned());
+            return Some(p.question());
         }
         self.confirm.as_ref().map(ConfirmSession::prompt)
     }
@@ -770,7 +799,7 @@ impl Editor {
         if self.mode != Mode::Insert {
             self.history.end();
         }
-        if self.reader {
+        if self.refuses_edits() {
             self.vim.discard();
         } else if self.mode == Mode::Normal {
             self.vim.commit();
@@ -877,7 +906,7 @@ impl Editor {
                 self.goal = Some(c.want);
                 fx
             }
-            Step::Insert(_) | Step::Open { .. } if self.reader => Effects::default(),
+            Step::Insert(_) | Step::Open { .. } if self.refuses_edits() => Effects::default(),
             Step::Insert(p) => {
                 self.mode = Mode::Insert;
                 self.move_across(p)
@@ -1113,7 +1142,7 @@ impl Editor {
         if self.mode != Mode::Insert {
             self.history.end();
         }
-        if self.reader {
+        if self.refuses_edits() {
             self.vim.discard();
         } else if self.mode == Mode::Normal {
             self.vim.commit();
@@ -1178,7 +1207,12 @@ impl Editor {
     fn inner_code(&mut self, op: Operator) -> Effects {
         let block = textobj::code_block(&self.blocks, self.cursor.line);
         let block = match block {
-            Some(b) if textobj::acts(op, Some(&b)) && (!self.reader || op == Operator::Yank) => b,
+            Some(b)
+                if textobj::acts(op, Some(&b))
+                    && (!self.refuses_edits() || op == Operator::Yank) =>
+            {
+                b
+            }
             _ => {
                 self.vim.discard();
                 return Effects {
@@ -1206,7 +1240,7 @@ impl Editor {
     /// Primary+X in Visual: copies the selection, then deletes it, as `d`
     /// does. Without a selection, or in reader mode, nothing.
     fn cut(&mut self) -> Effects {
-        if !self.visual() || self.reader {
+        if !self.visual() || self.refuses_edits() {
             return Effects::default();
         }
         self.vim.cancel();
@@ -1230,7 +1264,7 @@ impl Editor {
             return self.cmdline_input(&text);
         }
         let active = self.takes_keys() || self.mode == Mode::Insert;
-        if self.reader || !active {
+        if self.refuses_edits() || !active {
             return Effects::default();
         }
         let Some(mut text) = self
@@ -1290,7 +1324,7 @@ impl Editor {
     /// cursor where the last one says, on a grapheme where Normal mode may
     /// rest. With nothing to undo it does nothing.
     fn undo(&mut self, redo: bool, count: usize) -> Effects {
-        if self.reader {
+        if self.refuses_edits() {
             return Effects::default();
         }
         let mut at = None;
@@ -1328,7 +1362,7 @@ impl Editor {
 
     /// `.`: replays the last change at the cursor.
     fn repeat(&mut self, count: Option<usize>) -> Effects {
-        if self.reader {
+        if self.refuses_edits() {
             return Effects::default();
         }
         let last = self.search.as_ref().map(|s| (s.query.clone(), s.forward));
@@ -1357,16 +1391,17 @@ impl Editor {
         fx
     }
 
-    /// Applies an operator. Reader mode only yanks.
+    /// Applies an operator. Reader mode (and a document opened read-only)
+    /// only yanks.
     fn operate(&mut self, op: Operator, range: OpRange) -> Effects {
-        if self.reader && op != Operator::Yank {
+        if self.refuses_edits() && op != Operator::Yank {
             return Effects::default();
         }
         self.run(|ctx| operator::operate(ctx, op, range))
     }
 
     fn put(&mut self, before: bool, count: usize) -> Effects {
-        if self.reader {
+        if self.refuses_edits() {
             return Effects::default();
         }
         self.run(|ctx| operator::put(ctx, before, count))
@@ -1428,7 +1463,7 @@ impl Editor {
 
     fn insert(&mut self, text: &str) -> Effects {
         let at = self.buf.clamp(self.cursor);
-        if !self.reader {
+        if !self.refuses_edits() {
             self.vim.typed(text);
         }
         self.edit(at..at, text)
@@ -1438,7 +1473,7 @@ impl Editor {
         let Some(r) = operator::backspace_range(&self.buf, self.cursor) else {
             return Effects::default();
         };
-        if !self.reader {
+        if !self.refuses_edits() {
             self.vim.backspaced();
         }
         self.edit(r, "")
@@ -1467,7 +1502,7 @@ impl Editor {
     /// after it, and redraws the lines whose text or kind changed plus the
     /// blocks the cursor left and entered.
     fn edit(&mut self, r: Range<Pos>, text: &str) -> Effects {
-        if self.reader {
+        if self.refuses_edits() {
             return Effects::default();
         }
         self.run(|ctx| {
@@ -1707,8 +1742,7 @@ impl ViewSource for Editor {
             };
             match typed {
                 Some((prefix, text)) => {
-                    // A composition shows after what is typed. TODO(Task 33b):
-                    // and after a Prompt's answer.
+                    // A composition shows after what is typed.
                     let (pre, at) = self.preedit().unwrap_or_default();
                     StatusLeft::Input {
                         prefix,
@@ -1734,7 +1768,7 @@ impl ViewSource for Editor {
             left,
             file: self.title.clone(),
             dirty: self.dirty,
-            warnings: self.warnings.clone(),
+            warnings: self.shown_warnings(),
             showcmd: self.showcmd(),
             position,
         }
@@ -1825,6 +1859,19 @@ mod tests {
             std::env::temp_dir().join(format!("abc_def-editor-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// `Editor::open` on `r`, with the state directory in `dir` rather
+    /// than the one the environment names.
+    fn open_in(r: OpenRequest, dir: &std::path::Path) -> Editor {
+        let state = StateDir::at(dir.join("state"));
+        Editor::open_with_state(
+            r,
+            Config::default(),
+            Platform::Mac,
+            Box::new(FakeHost::default()),
+            Some(&state),
+        )
     }
 
     #[test]
@@ -2033,13 +2080,9 @@ mod tests {
 
     #[test]
     fn missing_file_opens_empty_with_name() {
-        let path = scratch("missing").join("nothing-here.md");
-        let e = Editor::open(
-            req(path.to_str().unwrap()),
-            Config::default(),
-            Platform::Mac,
-            Box::new(FakeHost::default()),
-        );
+        let dir = scratch("missing");
+        let path = dir.join("nothing-here.md");
+        let e = open_in(req(path.to_str().unwrap()), &dir);
         assert_eq!(e.title(), "nothing-here.md");
         assert_eq!(e.text(), "");
         assert_eq!(e.line_count(), 1);
@@ -2050,16 +2093,12 @@ mod tests {
 
     #[test]
     fn existing_file_opens_with_its_text() {
-        let path = scratch("existing").join("doc.md");
+        let dir = scratch("existing");
+        let path = dir.join("doc.md");
         std::fs::write(&path, "# Title\n\nbody\n").unwrap();
         let mut r = req(path.to_str().unwrap());
         r.display_name = Some("Shown Name".into());
-        let e = Editor::open(
-            r,
-            Config::default(),
-            Platform::Mac,
-            Box::new(FakeHost::default()),
-        );
+        let e = open_in(r, &dir);
         assert_eq!(e.text(), "# Title\n\nbody\n");
         assert_eq!(e.line_count(), 3);
         assert_eq!(e.title(), "Shown Name");
@@ -2070,12 +2109,7 @@ mod tests {
     fn unreadable_file_opens_empty_with_a_message() {
         // A directory exists but cannot be read as text.
         let dir = scratch("unreadable");
-        let e = Editor::open(
-            req(dir.to_str().unwrap()),
-            Config::default(),
-            Platform::Mac,
-            Box::new(FakeHost::default()),
-        );
+        let e = open_in(req(dir.to_str().unwrap()), &dir);
         assert_eq!(e.text(), "");
         assert_eq!(e.message(), Some(strings::READ_FAILED));
     }

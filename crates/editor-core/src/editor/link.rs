@@ -100,7 +100,7 @@ impl Editor {
             self.mode,
             Mode::Normal | Mode::Insert | Mode::Visual | Mode::VisualLine
         );
-        if self.reader || !editing {
+        if self.refuses_edits() || !editing {
             return Effects::default();
         }
         let before = self.selection_lines();

@@ -23,7 +23,7 @@ impl Editor {
     pub(super) fn ctrl_space(&mut self, k: KeyEvent) -> Effects {
         // The link prompt is a line being typed: the document stays as
         // it is, so the range the link wraps stays right.
-        if self.reader || self.linking() {
+        if self.refuses_edits() || self.linking() {
             return Effects::default();
         }
         if !self.cfg.vim {
@@ -41,7 +41,7 @@ impl Editor {
     /// does on a plain line (`operator::insert_list_key`). The Insert
     /// session records the key, so `.` presses it again.
     pub(super) fn insert_list_key(&mut self, key: ListKey) -> Effects {
-        if self.reader {
+        if self.refuses_edits() {
             return Effects::default();
         }
         let plan = operator::list_plan(key, &self.buf, &self.blocks, self.cursor);
@@ -55,7 +55,7 @@ impl Editor {
     /// A list key in Normal (`Step::List`). Where it does not apply it does
     /// nothing, and is not the change `.` repeats.
     pub(super) fn normal_list_key(&mut self, key: ListKey) -> Effects {
-        let plan = if self.reader {
+        let plan = if self.refuses_edits() {
             None
         } else {
             operator::list_plan(key, &self.buf, &self.blocks, self.cursor)

@@ -648,10 +648,14 @@ fn request_close() {
     }
 }
 
-/// Stops the main loop; `run` then returns `code`.
+/// Stops the main loop; `run` then returns `code`. The lock record goes
+/// first, so no way out (a bench deadline) leaves it behind.
 fn finish(code: i32) {
     EXIT.with(|e| e.set(Some(code)));
-    with_state(|st| st.window.set_visible(false));
+    with_state(|st| {
+        st.editor.release_lock();
+        st.window.set_visible(false);
+    });
     MAIN_LOOP.with(|l| l.quit());
 }
 

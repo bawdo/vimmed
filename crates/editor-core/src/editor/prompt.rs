@@ -1,9 +1,11 @@
 //! Prompt mode: a question in the status bar answered with one key, such
 //! as `unsaved changes: [s]ave [d]iscard [c]ancel` when the window is
-//! closed with unsaved changes. Esc is the same as cancel; any other key
-//! waits for an answer. The input method is off while a prompt asks, so
-//! the answers arrive as plain keys (committed text is taken a char at a
-//! time all the same).
+//! closed with unsaved changes, or the already-open prompt at open
+//! (`locking`). Esc is the close prompt's cancel; the already-open prompt
+//! has no cancel, so Esc does nothing there. Any other key waits for an
+//! answer. The input method is off while a prompt asks, so the answers
+//! arrive as plain keys; committed text of one char answers like the key,
+//! and longer text is no answer.
 //!
 //! What is being asked is an `Ask`; each kind maps its answer keys to what
 //! they do. Cancelling goes back to the mode the prompt was asked from.
@@ -20,12 +22,24 @@ use super::Editor;
 pub(super) enum Ask {
     /// The window was asked to close with unsaved changes.
     Close,
+    /// At open, another live window (process `pid`) has the file open.
+    AlreadyOpen { pid: u32 },
 }
 
 impl Ask {
-    fn question(self) -> &'static str {
+    fn question(self) -> String {
         match self {
-            Ask::Close => strings::UNSAVED_CHANGES_PROMPT,
+            Ask::Close => strings::UNSAVED_CHANGES_PROMPT.to_owned(),
+            Ask::AlreadyOpen { pid } => strings::already_open(pid),
+        }
+    }
+
+    /// The answer Esc gives, if any. The already-open prompt has none, so
+    /// it cannot be dismissed into editing without a choice.
+    fn esc(self) -> Option<char> {
+        match self {
+            Ask::Close => Some('c'),
+            Ask::AlreadyOpen { .. } => None,
         }
     }
 }
@@ -38,7 +52,7 @@ pub(super) struct Prompt {
 }
 
 impl Prompt {
-    pub(super) fn question(&self) -> &'static str {
+    pub(super) fn question(&self) -> String {
         self.ask.question()
     }
 }
@@ -63,8 +77,9 @@ impl Editor {
         })
     }
 
-    /// A key while a prompt asks: an answer (either case), or Esc to
-    /// cancel. Other keys, and keys with Ctrl, Alt or Cmd, wait.
+    /// A key while a prompt asks: an answer (either case), or Esc (which
+    /// cancels, where the prompt has a cancel). Other keys, and keys with
+    /// Ctrl, Alt or Cmd, wait.
     pub(super) fn prompt_key(&mut self, k: KeyEvent) -> Effects {
         // Only a plain key (Shift allowed) answers: Primary+D must not
         // discard.
@@ -72,22 +87,24 @@ impl Editor {
             return Effects::default();
         }
         match k.key {
-            Key::Esc => self.answer('c'),
+            Key::Esc => match self.asking.and_then(|p| p.ask.esc()) {
+                Some(c) => self.answer(c),
+                None => Effects::default(),
+            },
             Key::Char(c) => self.answer(c.to_ascii_lowercase()),
             _ => Effects::default(),
         }
     }
 
-    /// Committed text while a prompt asks: each char is a key.
+    /// Committed text while a prompt asks (an input method's commit, or
+    /// a composition `commit_preedit` committed): one char answers like
+    /// the key; anything longer is no answer, and is dropped.
     pub(super) fn prompt_text(&mut self, text: &str) -> Effects {
-        let mut fx = Effects::default();
-        for c in text.chars() {
-            if self.asking.is_none() {
-                break;
-            }
-            fx = fx.merge(self.answer(c.to_ascii_lowercase()));
+        let mut chars = text.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => self.answer(c.to_ascii_lowercase()),
+            _ => Effects::default(),
         }
-        fx
     }
 
     fn answer(&mut self, c: char) -> Effects {
@@ -107,6 +124,21 @@ impl Editor {
                 fx.merge(self.close(0))
             }
             (Ask::Close, 'c') => self.end_prompt(p),
+            (Ask::AlreadyOpen { .. }, 'o') => {
+                let fx = self.end_prompt(p);
+                self.open_read_only();
+                self.say_held_lock_warning();
+                fx
+            }
+            (Ask::AlreadyOpen { .. }, 'e') => {
+                let fx = self.end_prompt(p);
+                self.say_held_lock_warning();
+                fx
+            }
+            (Ask::AlreadyOpen { .. }, 'q') => {
+                let fx = self.end_prompt(p);
+                fx.merge(self.close(0))
+            }
             _ => Effects::default(),
         }
     }
@@ -238,6 +270,33 @@ mod tests {
         e.handle(Input::CloseRequested);
         assert_eq!(e.handle(Input::Text("d".into())).close, Some(0));
         assert_eq!(files.calls(), [FileCall::Close { code: 0 }]);
+    }
+
+    #[test]
+    fn a_committed_composition_answers_only_as_one_char() {
+        let (mut e, files) = ed_with_files("hello");
+        keys(&mut e, "x");
+        e.handle(Input::CloseRequested);
+        // More than one char is no answer: `dc` neither discards nor
+        // cancels.
+        assert_eq!(e.handle(Input::Text("dc".into())).close, None);
+        assert!(asks(&e));
+        // A composition left over when the prompt came up is committed as
+        // one char, which answers like the key.
+        e.preedit = Some(("d".into(), 1));
+        assert_eq!(e.commit_preedit().close, Some(0));
+        assert_eq!(e.preedit(), None);
+        assert_eq!(files.calls(), [FileCall::Close { code: 0 }]);
+        // A longer one is dropped, never typed.
+        let (mut e, files) = ed_with_files("hello");
+        keys(&mut e, "x");
+        e.handle(Input::CloseRequested);
+        e.preedit = Some(("にほ".into(), 6));
+        assert_eq!(e.commit_preedit().close, None);
+        assert_eq!(e.preedit(), None);
+        assert!(asks(&e));
+        assert_eq!(e.text(), "ello");
+        assert!(files.calls().is_empty());
     }
 
     #[test]

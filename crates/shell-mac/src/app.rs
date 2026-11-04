@@ -707,10 +707,13 @@ pub fn request_close() {
     }
 }
 
-/// Stops the event loop; `run` then returns `code`.
+/// Stops the event loop; `run` then returns `code`. The lock record goes
+/// first, so no way out (a bench deadline, the router, the exit below)
+/// leaves it behind.
 pub(crate) fn finish(code: i32) {
     EXIT.with(|e| e.set(Some(code)));
     with_state(|st| {
+        st.editor.release_lock();
         st.link.pause();
         st.window.orderOut(None);
     });
