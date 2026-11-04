@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cosmic_text::{
-    Attrs, Buffer, CacheKey, Color, Family, Metrics, Shaping, Style, SwashCache, SwashContent,
-    UnderlineStyle, Weight, Wrap,
+    Attrs, Buffer, CacheKey, Color, Family, Metrics, ShapeRunCache, Shaping, Style, SwashCache,
+    SwashContent, UnderlineStyle, Weight, Wrap,
 };
 use editor_core::tokens::{Rgba, TokenId, Tokens};
 
@@ -144,6 +144,14 @@ fn pieces(text: &str, spans: &[StyledSpan]) -> Vec<(usize, std::ops::Range<usize
     out
 }
 
+/// True for a codepoint worth a font lookup: not white space, a control or a
+/// format character (joiners, variation selectors), which no face draws.
+fn wants_face(c: char) -> bool {
+    !c.is_whitespace()
+        && !c.is_control()
+        && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{206F}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0000}'..='\u{E01EF}')
+}
+
 impl TextLayout for CosmicLayout {
     fn layout_line(&mut self, text: &str, spans: &[StyledSpan], width_px: f32) -> LaidLine {
         let Some(first) = spans.first() else {
@@ -161,14 +169,31 @@ impl TextLayout for CosmicLayout {
         buffer.shape_until_scroll(&mut self.fonts.system, false);
 
         let mut geom: Vec<RowGeom> = Vec::new();
+        let mut missing = false;
         for run in buffer.layout_runs() {
             let glyphs: Vec<GlyphGeom> = run
                 .glyphs
                 .iter()
-                .map(|g| GlyphGeom {
-                    bytes: g.start..g.end,
-                    x: g.x,
-                    w: g.w,
+                .map(|g| {
+                    // Only a drawable codepoint makes a `.notdef` count: a
+                    // joiner, selector or tab would flag the line forever.
+                    if g.glyph_id == 0 {
+                        let cluster = text.get(g.start..g.end).unwrap_or_default();
+                        if cluster.chars().any(wants_face) {
+                            missing = true;
+                            if let Some(f) = self.fonts.fallback.as_mut() {
+                                cluster
+                                    .chars()
+                                    .filter(|&c| wants_face(c))
+                                    .for_each(|c| f.ask(c));
+                            }
+                        }
+                    }
+                    GlyphGeom {
+                        bytes: g.start..g.end,
+                        x: g.x,
+                        w: g.w,
+                    }
                 })
                 .collect();
             let prev_end = geom.last().map_or(0, |r| r.text.end);
@@ -193,7 +218,9 @@ impl TextLayout for CosmicLayout {
             last.text.end = text.len().max(last.text.start);
         }
         let colors = spans.iter().map(|s| s.color).collect();
-        LaidLine::new(geom, Some(Box::new(CosmicLine { buffer, colors })))
+        let mut laid = LaidLine::new(geom, Some(Box::new(CosmicLine { buffer, colors })));
+        laid.missing_glyphs = missing;
+        laid
     }
 
     fn draw(&mut self, line: &LaidLine, sink: &mut dyn FnMut(GlyphMask)) {
@@ -267,6 +294,29 @@ impl TextLayout for CosmicLayout {
     fn end_frame(&mut self) {
         self.fonts.system.shape_run_cache.trim(RUN_CACHE_KEEP_AGES);
     }
+
+    fn start_font_fallback(&mut self) {
+        if let Some(f) = self.fonts.fallback.as_mut() {
+            f.start();
+        }
+    }
+
+    fn poll_fonts(&mut self) -> bool {
+        let Some(f) = self.fonts.fallback.as_mut() else {
+            return false;
+        };
+        let faces = f.take();
+        if faces.is_empty() {
+            return false;
+        }
+        let db = self.fonts.system.db_mut();
+        for face in faces {
+            db.push_face_info(face);
+        }
+        // Cached runs were shaped without the new faces.
+        self.fonts.system.shape_run_cache = ShapeRunCache::default();
+        true
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +364,24 @@ mod tests {
         let (ys, h) = solids(&mut l, true);
         assert_eq!(ys.len(), 1, "one underline");
         assert!(ys[0] as f32 > h / 2.0, "below the middle of the row");
+    }
+
+    #[test]
+    fn only_drawable_codepoints_are_looked_up() {
+        for c in ['\u{2610}', '\u{1F600}', '\u{4E2D}', 'a'] {
+            assert!(wants_face(c), "{c:?}");
+        }
+        for c in [
+            ' ',
+            '\u{3000}',
+            '\t',
+            '\u{200D}',
+            '\u{FE0F}',
+            '\u{2060}',
+            '\u{E0101}',
+        ] {
+            assert!(!wants_face(c), "{c:?}");
+        }
     }
 
     #[test]

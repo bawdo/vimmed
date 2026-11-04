@@ -54,6 +54,8 @@ pub struct Fake {
     pub reader: bool,
     pub selection: Option<Selection>,
     pub matches: Vec<Vec<Range<usize>>>,
+    /// The file name the status bar shows.
+    pub file: String,
 }
 
 impl Fake {
@@ -72,6 +74,7 @@ impl Fake {
             reader: false,
             selection: None,
             matches,
+            file: "notes.md".to_string(),
         }
     }
 
@@ -155,7 +158,7 @@ impl ViewSource for Fake {
     fn status(&self) -> StatusModel {
         StatusModel {
             mode: "INSERT",
-            file: "notes.md".to_string(),
+            file: self.file.clone(),
             dirty: self.dirty,
             position: format!("{}:{}", self.cursor.line + 1, self.cursor.col + 1),
         }

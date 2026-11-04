@@ -95,6 +95,8 @@ pub struct RowGeom {
 pub struct LaidLine {
     pub height: f32,
     pub rows: u32,
+    /// Some glyph was shaped as `.notdef`: no loaded face covered it.
+    pub missing_glyphs: bool,
     geom: Vec<RowGeom>,
     inner: Option<Box<dyn Any>>,
 }
@@ -105,6 +107,7 @@ impl LaidLine {
         LaidLine {
             height: geom.iter().map(|r| r.height).sum(),
             rows: geom.len() as u32,
+            missing_glyphs: false,
             geom,
             inner,
         }
@@ -235,6 +238,17 @@ pub trait TextLayout {
     /// Called once after each painted frame. The cosmic-text implementation
     /// trims its shape-run cache here; other implementations may do nothing.
     fn end_frame(&mut self) {}
+
+    /// Lets queued font lookups start (called once the first frame is out).
+    /// Implementations without lazy fallback do nothing.
+    fn start_font_fallback(&mut self) {}
+
+    /// Loads faces that lazy fallback found since the last call. Returns
+    /// true when any were loaded: lines with `missing_glyphs` should then be
+    /// laid out again.
+    fn poll_fonts(&mut self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

@@ -206,6 +206,12 @@ impl TableGeom {
     pub(crate) fn matches(&self, key: &(Vec<String>, [f32; 5])) -> bool {
         self.key == *key
     }
+
+    /// True when some cell shaped a glyph as `.notdef`.
+    pub(crate) fn missing_glyphs(&self) -> bool {
+        let cells = self.rows.iter().flat_map(|r| &r.cells);
+        cells.filter_map(Cell::laid).any(|l| l.missing_glyphs)
+    }
 }
 
 /// Lays a table out. Cell layouts from `old` whose inputs are unchanged are

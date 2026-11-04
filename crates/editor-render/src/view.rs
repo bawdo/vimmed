@@ -22,6 +22,9 @@
 //! `size.hanging_prefix` above zero, list markers and revealed block
 //! prefixes (`#`, `>`, list markers) hang in the left margin instead, so
 //! revealing them does not move the text.
+//!
+//! Fonts: a line that shaped a glyph as `.notdef` is laid out again when lazy
+//! fallback lands a face for it (`poll_fonts`).
 
 use std::ops::Range;
 use std::path::Path;
@@ -241,6 +244,25 @@ impl LineSlot {
             img.scaled = None;
             img.opaque = false;
         }
+    }
+
+    /// The line's own layouts (not a table's cells).
+    fn layouts(&self) -> impl Iterator<Item = &Cached> {
+        let hung = self.hung.as_ref().map(|(c, _)| c);
+        [&self.text, &self.prefix, &self.label, &self.code_label]
+            .into_iter()
+            .flatten()
+            .chain(hung)
+    }
+
+    /// Drops the line's layouts so the next relayout shapes them again,
+    /// keeping its height, display and overlays.
+    fn drop_layouts(&mut self) {
+        self.text = None;
+        self.prefix = None;
+        self.hung = None;
+        self.label = None;
+        self.code_label = None;
     }
 }
 
@@ -530,6 +552,86 @@ impl DocView {
     /// Line `i`'s height in pixels: measured once shaped, estimated before.
     pub fn line_height_px(&self, i: usize) -> Option<f32> {
         self.lines.get(i).map(|s| s.height)
+    }
+
+    /// True when line `i` is shaped and some glyph on it (its text, prefix,
+    /// labels or table cells) is `.notdef`.
+    pub fn has_missing_glyphs(&self, i: usize) -> bool {
+        let Some(slot) = self.lines.get(i) else {
+            return false;
+        };
+        let own = slot.layouts().any(|c| c.laid.missing_glyphs);
+        own || slot.table.is_some_and(|first| self.table_missing(first))
+    }
+
+    fn table_missing(&self, first: usize) -> bool {
+        let mut t = self.tables.iter().filter(|g| g.lines.start == first);
+        t.any(|g| g.missing_glyphs())
+    }
+
+    /// Lets lazy font fallback start looking up the codepoints no loaded face
+    /// covers. Shells call it once the first frame is out, so no lookup (and
+    /// no Core Text warm-up) lands before it.
+    pub fn start_font_fallback(&mut self) {
+        self.layout.start_font_fallback();
+    }
+
+    /// Loads faces that lazy fallback found, then lays out again and paints
+    /// every on-screen line that showed `.notdef`. Each such line damages
+    /// only its own rows; one whose height changed repaints from there to
+    /// the bottom. Returns true when faces were loaded; the shell then copies
+    /// `take_damage()` to the screen.
+    pub fn poll_fonts(&mut self, src: &dyn ViewSource) -> bool {
+        if !self.layout.poll_fonts() {
+            return false;
+        }
+        self.begin_frame();
+        if self.sync(src) {
+            // The source changed shape without a paint: paint all of it.
+            self.paint_all(src);
+            return true;
+        }
+        let stale: Vec<usize> = self
+            .tables
+            .iter()
+            .filter(|g| g.missing_glyphs())
+            .map(|g| g.lines.start)
+            .collect();
+        self.tables.retain(|g| !stale.contains(&g.lines.start));
+        let todo: Vec<usize> = (0..self.lines.len())
+            .filter(|&i| {
+                let s = &self.lines[i];
+                s.layouts().any(|c| c.laid.missing_glyphs)
+                    || s.table.is_some_and(|f| stale.contains(&f))
+            })
+            .collect();
+        for &i in &todo {
+            self.lines[i].drop_layouts();
+        }
+        let g = self.geo();
+        for i in todo {
+            let top = self.line_top(i);
+            let before = self.lines[i].height;
+            if top >= g.text_bottom || top + before <= 0.0 {
+                self.lines[i].forget();
+                continue;
+            }
+            if self.relayout(src, i) != before {
+                self.repaint_to_bottom(src, i);
+                break;
+            }
+            self.draw_line(src, i, top);
+            self.damage.add(rows(top, before, g.text_bottom));
+        }
+        // The status bar keeps its layouts until its model changes: shape
+        // and paint it again (its own rows) when one of them missed a glyph.
+        if self.status_cache.iter().any(|c| c.laid.missing_glyphs) {
+            self.status_cache.clear();
+            self.last_status = None;
+            self.paint_status(src);
+        }
+        self.layout.end_frame();
+        true
     }
 
     /// Turns images on: local paths resolve against `base_dir`, and `waker`

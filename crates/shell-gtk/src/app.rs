@@ -21,7 +21,7 @@ use editor_core::input::Input;
 use editor_core::platform::Platform;
 use editor_core::tokens::TokenId;
 use editor_core::view_model::ViewSource;
-use editor_render::fonts::{FontPaths, FontSet};
+use editor_render::fonts::FontSet;
 use editor_render::layout_cosmic::CosmicLayout;
 use editor_render::view::DocView;
 use gtk::glib::translate::IntoGlib;
@@ -32,7 +32,7 @@ use marks::names;
 
 use crate::canvas::{self, Canvas};
 use crate::clipboard::Clipboard;
-use crate::fonts_fc::LinuxFonts;
+use crate::fonts_fc::{LinuxFonts, cache_file};
 use crate::strips::{self, StripSet};
 use crate::timing::{self, FirstFrame, KeyTimes};
 use crate::{env, input};
@@ -195,7 +195,7 @@ pub fn run(args: WindowArgs) -> i32 {
         tokens.family(TokenId::FontBody),
         tokens.family(TokenId::FontMono),
     );
-    let fonts = FontSet::load(&FontPaths::from_resolver(&resolver));
+    let fonts = FontSet::with_lookup(Box::new(resolver), cache_file(), waker.clone());
     marks::mark(names::FONTS_LOADED);
 
     if let Err(e) = gtk::init() {
@@ -395,6 +395,8 @@ fn on_after_paint(clock: &gdk::FrameClock) {
         if st.first.after_paint() {
             marks::mark(names::FIRST_FRAME);
             st.progress.first_frame_ns = Some(now);
+            // Fallback lookups wait for the first frame.
+            st.doc.start_font_fallback();
             st.glass.push((frame, Glass::First, 0));
             log_refresh(st);
             changed = true;
@@ -491,6 +493,7 @@ fn on_wake() {
             now_ns: marks::now_ns(),
         });
         let close = apply(st, fx);
+        st.doc.poll_fonts(&st.editor);
         if st.doc.poll_async() {
             st.image_damaged = true;
         }

@@ -19,7 +19,7 @@ use editor_core::platform::Platform;
 use editor_core::tokens::TokenId;
 use editor_core::view_model::ViewSource;
 use editor_render::damage::Damage;
-use editor_render::fonts::{FontPaths, FontSet};
+use editor_render::fonts::FontSet;
 use editor_render::layout_cosmic::CosmicLayout;
 use editor_render::view::DocView;
 use marks::bench::{BenchPlan, Progress};
@@ -36,7 +36,7 @@ use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString, NSUserDe
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::displaylink::Link;
-use crate::fonts_ct::MacFonts;
+use crate::fonts_ct::{MacFonts, cache_file};
 use crate::glass::{KeyTimes, Tick, key_values};
 use crate::present::{IoSurface, Presenter};
 use crate::startup::{FirstFrame, fit_content};
@@ -166,7 +166,7 @@ pub fn run(args: WindowArgs) -> i32 {
         display_name: args.display_name,
     };
     let editor = Editor::open(req, Config::default(), Platform::Mac, Box::new(host));
-    let fonts = FontSet::load(&FontPaths::from_resolver(&MacFonts::load()));
+    let fonts = FontSet::with_lookup(Box::new(MacFonts::load()), cache_file(), waker.clone());
     marks::mark(names::FONTS_LOADED);
     PREPARED.with(|p| {
         *p.borrow_mut() = Some(Prepared {
@@ -402,6 +402,8 @@ pub fn on_tick() {
         if committed && st.first.tick_committed() {
             marks::mark(names::FIRST_FRAME);
             st.progress.first_frame_ns = Some(now_ns);
+            // Lookups and the Core Text warm-up wait for the first frame.
+            st.doc.start_font_fallback();
             changed = true;
         }
         if !st.keys.is_empty() {
@@ -465,8 +467,11 @@ fn on_wake() {
             now_ns: marks::now_ns(),
         });
         let close = apply(st, fx);
+        let fonts = st.doc.poll_fonts(&st.editor);
         if st.doc.poll_async() && stage(st) {
             st.image_staged = true;
+        } else if fonts {
+            stage(st);
         }
         close
     });

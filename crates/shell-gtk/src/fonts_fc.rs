@@ -8,7 +8,9 @@
 //! and config files plus the configured families. When the key still
 //! matches and every file exists, fontconfig is never called.
 //!
-//! Only `FcFontMatch` is used: nothing ever lists every system font.
+//! Only `FcFontMatch` is used: nothing ever lists every system font. A
+//! codepoint the start-up set lacks is looked up lazily, on the fallback
+//! worker, by matching a pattern holding just that codepoint's charset.
 
 use std::path::{Path, PathBuf};
 
@@ -102,6 +104,8 @@ pub fn parse_cache(
             "sans" => sans = Some(PathBuf::from(rest)),
             "mono" => mono = Some(PathBuf::from(rest)),
             "fallback" => fallback.push(PathBuf::from(rest)),
+            // Codepoints the renderer's lazy fallback found (its own lines).
+            "glyph" => {}
             _ => return None,
         }
     }
@@ -166,7 +170,7 @@ pub fn fallback_files(
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::LinuxFonts;
+pub use linux::{LinuxFonts, cache_file};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -178,7 +182,7 @@ mod linux {
     use editor_render::fonts::{FontPaths, FontResolver};
     use fontconfig_sys as fc;
     use fontconfig_sys::constants::{
-        FC_FAMILY, FC_FILE, FC_SLANT, FC_SLANT_ITALIC, FC_WEIGHT, FC_WEIGHT_BOLD,
+        FC_CHARSET, FC_FAMILY, FC_FILE, FC_SLANT, FC_SLANT_ITALIC, FC_WEIGHT, FC_WEIGHT_BOLD,
     };
 
     use super::*;
@@ -218,9 +222,8 @@ mod linux {
     /// fontconfig's best file for `q`, through the default configuration.
     fn fc_match(q: Query) -> Option<PathBuf> {
         let name = CString::new(q.name).ok()?;
-        // SAFETY: `FcInit` may be called repeatedly. The pattern is created,
-        // used and destroyed here; the file name is copied out of the match
-        // before the match is destroyed. A null config means the current one.
+        // SAFETY: `FcInit` may be called repeatedly. The pattern is created
+        // here and `match_file` consumes it.
         unsafe {
             if fc::FcInit() == 0 {
                 return None;
@@ -236,6 +239,45 @@ mod linux {
             if q.italic {
                 fc::FcPatternAddInteger(pat, FC_SLANT.as_ptr(), FC_SLANT_ITALIC);
             }
+            match_file(pat, None)
+        }
+    }
+
+    /// The file of fontconfig's best match for a pattern holding only `c`'s
+    /// charset, when that match really covers `c`.
+    fn fc_covering(c: char) -> Option<PathBuf> {
+        // SAFETY: as in `fc_match`. The pattern takes its own reference to
+        // the charset, so ours is released straight after adding it.
+        unsafe {
+            if fc::FcInit() == 0 {
+                return None;
+            }
+            let cs = fc::FcCharSetCreate();
+            if cs.is_null() {
+                return None;
+            }
+            fc::FcCharSetAddChar(cs, u32::from(c));
+            let pat = fc::FcPatternCreate();
+            if !pat.is_null() {
+                fc::FcPatternAddCharSet(pat, FC_CHARSET.as_ptr(), cs);
+            }
+            fc::FcCharSetDestroy(cs);
+            if pat.is_null() {
+                return None;
+            }
+            match_file(pat, Some(c))
+        }
+    }
+
+    /// Fills in `pat`'s defaults, destroys it and returns the file of its
+    /// best match; with `need`, only when the match's charset holds it.
+    ///
+    /// # Safety
+    /// `pat` is a valid pattern the caller owns and does not use again.
+    unsafe fn match_file(pat: *mut fc::FcPattern, need: Option<char>) -> Option<PathBuf> {
+        // SAFETY: a null config means the current one. The file name is
+        // copied out of the match before the match is destroyed.
+        unsafe {
             fc::FcConfigSubstitute(std::ptr::null_mut(), pat, fc::FcMatchPattern);
             fc::FcDefaultSubstitute(pat);
             let mut res: fc::FcResult = fc::FcResultMatch;
@@ -244,15 +286,27 @@ mod linux {
             if found.is_null() {
                 return None;
             }
+            let covers = need.is_none_or(|c| {
+                let mut cs: *mut fc::FcCharSet = std::ptr::null_mut();
+                let got = fc::FcPatternGetCharSet(found, FC_CHARSET.as_ptr(), 0, &mut cs);
+                got == fc::FcResultMatch
+                    && !cs.is_null()
+                    && fc::FcCharSetHasChar(cs, u32::from(c)) != 0
+            });
             let mut file: *mut fc::FcChar8 = std::ptr::null_mut();
             let got = fc::FcPatternGetString(found, FC_FILE.as_ptr(), 0, &mut file);
-            let path = (got == fc::FcResultMatch && !file.is_null()).then(|| {
+            let path = (covers && got == fc::FcResultMatch && !file.is_null()).then(|| {
                 let bytes = CStr::from_ptr(file.cast_const().cast::<c_char>()).to_bytes();
                 PathBuf::from(OsStr::from_bytes(bytes))
             });
             fc::FcPatternDestroy(found);
             path
         }
+    }
+
+    /// The font cache file under this process's environment.
+    pub fn cache_file() -> Option<PathBuf> {
+        cache_path(env_path("XDG_CACHE_HOME"), env_path("HOME"))
     }
 
     fn plain(name: &str) -> Query<'_> {
@@ -268,7 +322,7 @@ mod linux {
         /// `mono` are the `font.body` and `font.mono` token values.
         pub fn load(body: &str, mono: &str) -> LinuxFonts {
             let names = [body, mono];
-            let cache = cache_path(env_path("XDG_CACHE_HOME"), env_path("HOME"));
+            let cache = cache_file();
             let key = current_key(&names);
             let cached = cache
                 .as_ref()
@@ -313,9 +367,8 @@ mod linux {
         fn fallback_set(&self) -> Vec<PathBuf> {
             self.paths.fallback.clone()
         }
-        fn lookup(&self, _c: char) -> Option<PathBuf> {
-            // TODO(Task 42): FcFontSort by charset, off the start-up path.
-            None
+        fn lookup(&self, c: char) -> Option<PathBuf> {
+            fc_covering(c)
         }
     }
 }
@@ -350,6 +403,9 @@ mod tests {
         let text = format_cache(&key(), &paths());
         assert!(text.starts_with("font-paths v1 linux\n"));
         assert_eq!(parse_cache(&text, &key(), |_| true), Some(paths()));
+        // The renderer appends codepoint lines; they don't spoil the cache.
+        let more = format!("{text}glyph\t2610\t/f/Symbols.ttf\n");
+        assert_eq!(parse_cache(&more, &key(), |_| true), Some(paths()));
     }
 
     #[test]
