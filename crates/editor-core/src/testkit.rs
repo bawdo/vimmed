@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::buffer::Pos;
+use crate::buffer::{Buffer, Pos};
 use crate::editor::{Config, Editor, OpenRequest};
 use crate::effects::Effects;
-use crate::file::StateDir;
+use crate::file::{DiskStat, Loaded, StateDir, WriteError};
 use crate::host::{Host, Waker, WindowRequest};
 use crate::input::{Input, Key, KeyEvent, Mods};
 use crate::platform::Platform;
@@ -181,19 +181,23 @@ impl FakeFiles {
 }
 
 impl Saver for FakeFiles {
-    fn write(&mut self, text: &str, force: bool) -> std::io::Result<()> {
+    fn write(&mut self, text: &str, force: bool) -> Result<(), WriteError> {
         let mut s = self.state.borrow_mut();
         s.calls.push(FileCall::Write { force });
         if s.fail_writes {
-            return Err(std::io::Error::other("No space left on device"));
+            let full = std::io::Error::other("No space left on device");
+            return Err(WriteError::Io(full));
         }
         s.disk = text.to_owned();
         Ok(())
     }
-    fn reload(&mut self) -> std::io::Result<String> {
+    fn reload(&mut self) -> Loaded {
         let mut s = self.state.borrow_mut();
         s.calls.push(FileCall::Reload);
-        Ok(s.disk.clone())
+        Loaded::Text {
+            buffer: Buffer::from_text(&s.disk),
+            stat: DiskStat::default(),
+        }
     }
     fn close(&mut self, code: i32) {
         self.state.borrow_mut().calls.push(FileCall::Close { code });

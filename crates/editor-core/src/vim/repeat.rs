@@ -1163,15 +1163,20 @@ mod tests {
     }
 
     #[test]
-    fn undo_redraws_and_marks_dirty() {
+    fn undo_redraws_and_tracks_dirty() {
         let mut e = ed("a\n```\ncode\n```");
         keys(&mut e, "jjdd");
         let fx = keys(&mut e, "u");
         assert_eq!(e.text(), "a\n```\ncode\n```");
         assert_eq!(fx.redraw, crate::effects::Redraw::All);
         assert!(fx.scroll_to_cursor);
-        assert!(e.dirty());
+        // Back at the text it opened with: clean again, as in vim.
+        assert!(!e.dirty());
+        assert_eq!(fx.dirty, Some(false));
         assert_eq!(e.status().left, StatusLeft::Mode("NORMAL"));
+        let fx = keys(&mut e, "<C-r>");
+        assert!(e.dirty());
+        assert_eq!(fx.dirty, Some(true));
     }
 
     #[test]

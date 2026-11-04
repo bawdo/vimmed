@@ -3,9 +3,12 @@
 //! `:s` (with `crate::substitute` finding the replacements), including the
 //! Confirm mode `:s///c` asks in.
 
-use crate::buffer::{Buffer, Pos};
+use std::io;
+
+use crate::buffer::Pos;
 use crate::effects::{Effects, Redraw};
 use crate::ex::{self, ExCmd, Sub};
+use crate::file::Loaded;
 use crate::grapheme;
 use crate::input::{Key, KeyEvent};
 use crate::search::{Hit, Search};
@@ -78,7 +81,7 @@ impl Editor {
     }
 
     /// Carries out a command from the command line.
-    fn ex(&mut self, cmd: ExCmd) -> Effects {
+    pub(super) fn ex(&mut self, cmd: ExCmd) -> Effects {
         match cmd {
             ExCmd::Write { force } => self.write_step(force).1,
             ExCmd::Quit { force } if !force && self.dirty => {
@@ -101,34 +104,47 @@ impl Editor {
     }
 
     /// Writes the document through the `Saver`: true when it was written,
-    /// which leaves the buffer clean. A failed write says why, as an Error.
+    /// which leaves the buffer clean, records the save point undo comes
+    /// back to and says `written`. A failed or refused write says why, as
+    /// an Error.
     pub fn write(&mut self, force: bool) -> bool {
         match self.saver.write(&self.buf.to_text(), force) {
             Ok(()) => {
                 self.dirty = false;
+                self.history.mark_saved();
+                self.say(strings::WRITTEN.to_owned());
                 true
             }
             Err(e) => {
-                let text = strings::write_failed(&e.to_string());
-                self.say_as(text, MsgKind::Error, status::MESSAGE_FOR_NS);
+                self.say_as(e.message(), MsgKind::Error, status::MESSAGE_FOR_NS);
                 false
             }
         }
     }
 
     /// Reloads the document from disk through the `Saver`, dropping the
-    /// changes, as one undo step. A failed reload says why, as an Error,
-    /// and changes nothing.
-    /// TODO(Task 31): take the file's line endings and BOM from disk too.
+    /// changes, as one undo step, and takes the file's line endings, BOM
+    /// and trailing newline with it. A failed reload says why, as an
+    /// Error, and changes nothing; so does a file that is no longer valid
+    /// UTF-8, which also makes the document read-only.
     pub fn reload(&mut self) -> Effects {
         let fresh = match self.saver.reload() {
-            Ok(text) => Buffer::from_text(&text),
-            Err(e) => {
-                let text = strings::reload_failed(&e.to_string());
-                self.say_as(text, MsgKind::Error, status::MESSAGE_FOR_NS);
+            Loaded::Text { buffer, .. } => buffer,
+            Loaded::NotUtf8 { .. } => {
+                self.read_only(true);
+                self.say_as(
+                    strings::NOT_UTF8_READ_ONLY.to_owned(),
+                    MsgKind::Error,
+                    status::MESSAGE_FOR_NS,
+                );
                 return Effects::default();
             }
+            Loaded::Missing => {
+                return self.reload_failed(&io::Error::from(io::ErrorKind::NotFound));
+            }
+            Loaded::Error(e) => return self.reload_failed(&e),
         };
+        self.read_only(false);
         let lines = (0..fresh.line_count()).map(|i| fresh.line(i));
         let text = lines.collect::<Vec<_>>().join("\n");
         let same = (0..self.buf.line_count())
@@ -156,6 +172,11 @@ impl Editor {
             self.cursor = vim::rest(&self.buf, self.cursor);
             fx
         };
+        // The text is the file's now; the file's buffer, line for line the
+        // same, brings its line endings, BOM and trailing newline. The
+        // history's positions hold, since the lines are the same.
+        self.buf = fresh;
+        self.history.mark_saved();
         self.dirty = false;
         fx.merge(Effects {
             redraw: Redraw::All,
@@ -173,8 +194,14 @@ impl Editor {
         }
     }
 
+    fn reload_failed(&mut self, e: &io::Error) -> Effects {
+        let text = strings::reload_failed(&e.to_string());
+        self.say_as(text, MsgKind::Error, status::MESSAGE_FOR_NS);
+        Effects::default()
+    }
+
     /// `write`, with the effects of the dirty state it changed.
-    fn write_step(&mut self, force: bool) -> (bool, Effects) {
+    pub(super) fn write_step(&mut self, force: bool) -> (bool, Effects) {
         let was_dirty = self.dirty;
         let written = self.write(force);
         let fx = Effects {

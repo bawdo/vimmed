@@ -323,6 +323,12 @@ pub fn launch(delegate: &Delegate) {
     };
     let bench = state.bench.is_some();
     STATE.with(|s| *s.borrow_mut() = Some(state));
+    // A message the open left (an unreadable file) fades like any other.
+    with_state(|st| {
+        if let Some(at) = st.editor.open_effects().wake_at {
+            arm_wake(st, at);
+        }
+    });
 
     window.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     window.makeKeyAndOrderFront(None);
@@ -356,8 +362,7 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     }
     // TODO(later tasks): reader mode changes (`fx.reader`).
     if let Some(at) = fx.wake_at {
-        let delay_s = at.saturating_sub(marks::now_ns()) as f64 / 1e9;
-        st.view.schedule_wake(delay_s);
+        arm_wake(st, at);
     }
     let mut redraw = fx.redraw;
     if fx.scroll_to_cursor && st.doc.scroll_to_cursor(st.editor.cursor()) {
@@ -372,6 +377,12 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     stage(st);
     sync_ime(st);
     fx.close
+}
+
+/// Ticks the editor at `at` (`marks::now_ns` clock).
+fn arm_wake(st: &State, at: u64) {
+    let delay_s = at.saturating_sub(marks::now_ns()) as f64 / 1e9;
+    st.view.schedule_wake(delay_s);
 }
 
 /// Keeps the input method in step with the editor: while text is being

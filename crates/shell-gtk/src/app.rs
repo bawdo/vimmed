@@ -269,6 +269,10 @@ pub fn run(args: WindowArgs) -> i32 {
     // An editor that opens taking text (vim off, bench mode) feeds the
     // input method from the first key.
     with_state(sync_ime);
+    // A message the open left (an unreadable file) fades like any other.
+    if let Some(Some(at)) = with_state(|st| st.editor.open_effects().wake_at) {
+        arm_wake(at);
+    }
     window.present();
     if bench {
         schedule_bench_check();
@@ -392,10 +396,7 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     // TODO(later tasks): reader mode changes (`fx.reader`). The dirty state
     // shows in the title and status bar; GTK has no edited flag.
     if let Some(at) = fx.wake_at {
-        // Millisecond resolution: never tick before it is due.
-        let ns = at.saturating_sub(marks::now_ns());
-        let delay = Duration::from_nanos(ns) + Duration::from_millis(1);
-        glib::timeout_add_local_once(delay, on_wake);
+        arm_wake(at);
     }
     let mut redraw = fx.redraw;
     if fx.scroll_to_cursor && st.doc.scroll_to_cursor(st.editor.cursor()) {
@@ -409,6 +410,14 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     }
     sync_ime(st);
     fx.close
+}
+
+/// Ticks the editor at `at` (`marks::now_ns` clock). Millisecond
+/// resolution: never tick before it is due.
+fn arm_wake(at: u64) {
+    let ns = at.saturating_sub(marks::now_ns());
+    let delay = Duration::from_nanos(ns) + Duration::from_millis(1);
+    glib::timeout_add_local_once(delay, on_wake);
 }
 
 /// Keeps the input method in step with the editor: the key controller

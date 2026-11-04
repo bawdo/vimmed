@@ -25,7 +25,8 @@
 //!
 //! The command line (`:`), what it runs and `:s///c`'s Confirm mode live
 //! in `cmdline`. `:w`, `:e!` and closing reach the file through a
-//! `Saver` (`crate::saver`).
+//! `Saver` (`crate::saver`), which `open` sets up on the file it read
+//! (`crate::file`). Closing with unsaved changes asks first (`prompt`).
 //!
 //! The status bar: `ViewSource::status` picks what its left side shows (a
 //! message, then a prompt, then the line being typed, then the mode).
@@ -51,14 +52,15 @@
 mod cmdline;
 mod ime;
 mod list_keys;
+mod prompt;
 
-use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::PathBuf;
 
 use crate::buffer::{Buffer, Pos, ShiftMark};
 use crate::effects::{Effects, Redraw};
-use crate::file::{RegisterStore, StateDir};
+use crate::ex::ExCmd;
+use crate::file::{self, Loaded, RegisterStore, StateDir};
 use crate::grapheme;
 use crate::host::Host;
 use crate::input::{Input, Key, KeyEvent, Mods};
@@ -67,7 +69,8 @@ use crate::markdown::{
     line_display, ordered_display, parse_line,
 };
 use crate::platform::Platform;
-use crate::saver::{Saver, Unwired};
+use crate::saver::{FileSaver, Saver, Unwired};
+
 use crate::search::{self, Hit, Search};
 use crate::status::{self, Mode};
 use crate::strings;
@@ -81,6 +84,7 @@ use crate::vim::operator::{self, EditCtx, ListKey, OpOutcome, OpRange, Operator,
 use crate::vim::register::{Register, Registers};
 use crate::vim::repeat::Change;
 use crate::vim::{self, Cursor, Step, Vim, Want, textobj, visual};
+use prompt::{Ask, Prompt};
 
 /// What to open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +196,8 @@ pub struct Editor {
     saver: Box<dyn Saver>,
     /// The text an input method is composing and its cursor (`ime`).
     preedit: Option<(String, usize)>,
+    /// The question Prompt mode asks (`prompt`).
+    asking: Option<Prompt>,
 }
 
 impl Editor {
@@ -215,15 +221,22 @@ impl Editor {
         host: Box<dyn Host>,
         state: Option<&StateDir>,
     ) -> Editor {
-        let (text, message) = match std::fs::read_to_string(&req.path) {
-            Ok(text) => (text, None),
-            Err(e) if e.kind() == ErrorKind::NotFound => (String::new(), None),
-            // TODO(Task 31): real loading (invalid UTF-8, permissions, large
-            // files). Until then any other failure opens empty.
-            Err(_) => (String::new(), Some(strings::READ_FAILED)),
-        };
+        let loaded = file::load(&req.path);
         marks::mark(marks::names::FILE_READ);
-        let mut editor = Editor::build(req, &text, message, cfg, platform, host, bench_enabled());
+        let saver = FileSaver::new(req.path.clone(), &loaded);
+        let not_utf8 = matches!(loaded, Loaded::NotUtf8 { .. });
+        // A file that is missing opens empty under its name; one that is
+        // not valid UTF-8 opens empty and read-only (it is never written
+        // back); one that cannot be read opens empty, saying so.
+        let (buf, message) = match loaded {
+            Loaded::Text { buffer, .. } => (buffer, None),
+            Loaded::Missing | Loaded::NotUtf8 { .. } => (Buffer::from_text(""), None),
+            Loaded::Error(_) => (Buffer::from_text(""), Some(strings::READ_FAILED)),
+        };
+        let mut editor =
+            Editor::build_from(req, buf, message, cfg, platform, host, bench_enabled());
+        editor.set_saver(Box::new(saver));
+        editor.read_only(not_utf8);
         if let Some(state) = state {
             editor.share_registers(state);
         }
@@ -231,6 +244,8 @@ impl Editor {
         editor
     }
 
+    /// An editor on `text`, with no file behind it (the tests' editors).
+    #[cfg(test)]
     pub(crate) fn build(
         req: OpenRequest,
         text: &str,
@@ -241,6 +256,21 @@ impl Editor {
         bench: bool,
     ) -> Editor {
         let buf = Buffer::from_text(text);
+        Editor::build_from(req, buf, message, cfg, platform, host, bench)
+    }
+
+    /// An editor on `buf`, with no file behind it until `set_saver`.
+    /// `message` shows from the start and fades like any other (the
+    /// shell arms the timer from `open_effects`).
+    fn build_from(
+        req: OpenRequest,
+        buf: Buffer,
+        message: Option<&'static str>,
+        cfg: Config,
+        platform: Platform,
+        host: Box<dyn Host>,
+        bench: bool,
+    ) -> Editor {
         let blocks = Blocks::new(&buf);
         let title = req.display_name.clone().unwrap_or_else(|| {
             req.path.file_name().map_or_else(
@@ -278,15 +308,34 @@ impl Editor {
             dirty: false,
             reader: req.view,
             title,
-            // Said before any input, it stays until replaced or cleared.
             message: message.map(|m| (m.to_owned(), MsgKind::Warning)),
-            message_until: None,
+            message_until: message.map(|_| host.now_ns().saturating_add(status::MESSAGE_FOR_NS)),
             warnings: Vec::new(),
             cfg,
             platform,
             host,
             saver: Box::new(Unwired),
             preedit: None,
+            asking: None,
+        }
+    }
+
+    /// What the shell does once the window is up: arm the timer for a
+    /// message the open left, so it fades like any other.
+    pub fn open_effects(&self) -> Effects {
+        Effects {
+            wake_at: self.message_until,
+            ..Effects::default()
+        }
+    }
+
+    /// Marks the document read-only because its file is not valid UTF-8,
+    /// or clears that, with the warning beside the file name. The `Saver`
+    /// is what refuses the writes.
+    fn read_only(&mut self, on: bool) {
+        self.warnings.retain(|w| *w != strings::NOT_UTF8_READ_ONLY);
+        if on {
+            self.warnings.push(strings::NOT_UTF8_READ_ONLY);
         }
     }
 
@@ -340,7 +389,8 @@ impl Editor {
                 fx.merge(self.text_input(&ime::normalise_newlines(text)))
             }
             Input::Preedit { text, cursor } => self.set_preedit(text, cursor),
-            // TODO(later tasks): ask before closing with unsaved changes.
+            // With unsaved changes, ask (`prompt`).
+            Input::CloseRequested if self.dirty => self.ask(Ask::Close),
             Input::CloseRequested => self.close(0),
             // TODO(Task 34): write the recovery copy before closing.
             Input::Signal(s) => self.close(s.exit_code()),
@@ -354,6 +404,9 @@ impl Editor {
     /// Committed text types only in Insert. In Normal and Visual it is a
     /// run of keys, so an input method never types into the buffer there.
     fn text_input(&mut self, text: &str) -> Effects {
+        if self.mode == Mode::Prompt {
+            return self.prompt_text(text);
+        }
         if !self.cfg.vim || self.mode == Mode::Insert {
             return self.insert(text);
         }
@@ -371,7 +424,6 @@ impl Editor {
                     time_ns: 0,
                 }))
             }),
-            // TODO(Task 33b): committed text answers a Prompt.
             _ => Effects::default(),
         }
     }
@@ -459,8 +511,11 @@ impl Editor {
         &self.cmdline
     }
 
-    /// The question Confirm mode asks, while it asks it.
+    /// The question Prompt or Confirm mode asks, while it asks it.
     pub fn prompt(&self) -> Option<String> {
+        if let Some(p) = &self.asking {
+            return Some(p.question().to_owned());
+        }
         self.confirm.as_ref().map(ConfirmSession::prompt)
     }
 
@@ -505,6 +560,10 @@ impl Editor {
     }
 
     fn key(&mut self, k: KeyEvent) -> Effects {
+        // A prompt takes every key, with or without vim.
+        if self.mode == Mode::Prompt {
+            return self.prompt_key(k);
+        }
         let ctrl_c = self.cfg.vim
             && k.key == Key::Char('c')
             && k.mods
@@ -519,6 +578,13 @@ impl Editor {
             Key::Char('c') if (primary || ctrl_c) && self.visual() => return self.copy(),
             Key::Char('x') if primary => return self.cut(),
             Key::Char('v') if primary => return self.paste(),
+            // Primary+S is `:w`, from any mode.
+            Key::Char('s') if primary && !k.mods.shift && !k.mods.alt => {
+                return self.ex(ExCmd::Write { force: false }).merge(Effects {
+                    redraw: Redraw::Status,
+                    ..Effects::default()
+                });
+            }
             _ => {}
         }
         let ctrl_only = Mods {
@@ -551,7 +617,7 @@ impl Editor {
                 };
         // The modifiers after Ctrl+C became Esc.
         if (k.mods.ctrl || self.platform.primary(k.mods)) && !redo {
-            // Shortcuts arrive with later tasks.
+            // Shortcuts arrive with later tasks (Primary+Shift+R: Task 40).
             return Effects::default();
         }
         if self.cfg.vim {
@@ -562,7 +628,7 @@ impl Editor {
                 Mode::Command => return self.command_key(k),
                 Mode::Search => return self.search_key(k),
                 Mode::Confirm => return self.confirm_key(k),
-                // A later task builds Prompt; nothing enters it yet.
+                // Taken at the top.
                 Mode::Prompt => return Effects::default(),
             }
         }
@@ -678,6 +744,14 @@ impl Editor {
         };
         match step {
             Step::Pending => status,
+            Step::Quit { write } => {
+                let cmd = if write {
+                    ExCmd::Exit
+                } else {
+                    ExCmd::Quit { force: true }
+                };
+                status.merge(self.ex(cmd))
+            }
             Step::Visual { linewise } => {
                 if !self.visual() {
                     self.anchor = Some(self.cursor);
@@ -1150,10 +1224,12 @@ impl Editor {
         }
         self.cursor = vim::rest(&self.buf, at);
         self.goal = None;
-        let was_dirty = std::mem::replace(&mut self.dirty, true);
+        // Landing on the save point is the text on disk again.
+        let dirty = !self.history.at_saved();
+        let was_dirty = std::mem::replace(&mut self.dirty, dirty);
         Effects {
             redraw: Redraw::All,
-            dirty: (!was_dirty).then_some(true),
+            dirty: (was_dirty != dirty).then_some(dirty),
             scroll_to_cursor: true,
             ..Effects::default()
         }
@@ -1671,9 +1747,10 @@ mod tests {
 
     #[test]
     fn shortcut_chars_do_not_insert() {
+        // Not Primary+S, which is `:w`.
         let mut e = ed("ab");
         let fx = e.handle(Input::Key(KeyEvent {
-            key: Key::Char('s'),
+            key: Key::Char('k'),
             mods: Mods {
                 cmd: true,
                 ..Mods::default()

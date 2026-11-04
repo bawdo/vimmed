@@ -57,9 +57,24 @@ pub fn reload_failed(reason: &str) -> String {
     format!("reload failed: {reason}")
 }
 
-/// Why a write or reload fails while no file is behind the editor.
-/// TODO(Task 31): gone once the editor writes files for real.
+/// Why a write or reload fails in an editor built with no file behind it
+/// (the tests' editors).
 pub const NO_FILE_ACCESS: &str = "file access is not wired up yet";
+
+/// A write that succeeded.
+pub const WRITTEN: &str = "written";
+
+/// `:w` when the file on disk is not the version that was read.
+pub const CHANGED_ON_DISK_REFUSED: &str = "file changed on disk: :w! to overwrite, :e! to reload";
+
+/// The warning beside the file name when the file is not valid UTF-8.
+pub const NOT_UTF8_READ_ONLY: &str = "read-only: not valid UTF-8";
+
+/// `:w` or `:w!` on a document read from a file that is not valid UTF-8.
+pub const NOT_UTF8_REFUSED: &str = "E: not valid UTF-8; refusing to write";
+
+/// Asked when the window is closed with unsaved changes.
+pub const UNSAVED_CHANGES_PROMPT: &str = "unsaved changes: [s]ave [d]iscard [c]ancel";
 
 /// A command line that is no command.
 pub fn not_a_command(input: &str) -> String {
