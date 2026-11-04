@@ -153,8 +153,12 @@ pub trait ViewSource {
     fn status(&self) -> StatusModel;
     fn tokens(&self) -> &Tokens;
     fn theme(&self) -> Theme;
-    /// True in reader mode (no caret).
+    /// True in reader mode: no caret, nothing revealed.
     fn reader(&self) -> bool;
+    /// While the help overlay shows, the first of `help::rows` it shows.
+    fn help(&self) -> Option<usize> {
+        None
+    }
     fn selection(&self) -> Option<Selection>;
     /// Search match ranges on line `i`, as source byte ranges.
     fn matches(&self, i: usize) -> &[Range<usize>];

@@ -96,9 +96,9 @@ impl Editor {
             },
             ExCmd::CQuit => self.close(1),
             ExCmd::ReloadForce => self.reload(),
-            // TODO(Task 40): `:help` shows the help overlay.
+            ExCmd::Help => self.open_help(),
             // TODO(Task 37): `:table` inserts a table or opens the picker.
-            ExCmd::Help | ExCmd::Table(_) => Effects::default(),
+            ExCmd::Table(_) => Effects::default(),
             ExCmd::Substitute(sub) => self.substitute(sub),
         }
     }

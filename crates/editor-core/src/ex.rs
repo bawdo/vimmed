@@ -669,12 +669,12 @@ mod tests {
     }
 
     #[test]
-    fn reader_mode_runs_commands_but_not_edits() {
+    fn reader_mode_refuses_the_command_line() {
         let mut e = build_reader("foo");
         colon(&mut e, "s/foo/bar/");
         assert_eq!(e.text(), "foo");
         assert_eq!(e.mode(), Mode::Normal);
-        assert_eq!(colon(&mut e, "q").close, Some(0));
+        assert_eq!(colon(&mut e, "q").close, None);
     }
 
     // vim_engine_command_test.dart: substitute command execution.

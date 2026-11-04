@@ -289,6 +289,22 @@ impl Vim {
         }
     }
 
+    /// True while a named register (`"a`) waits for its command; `showcmd`
+    /// does not show it.
+    pub fn register_waiting(&self) -> bool {
+        self.register.is_some()
+    }
+
+    /// An Insert session going on after a pause (reader view toggled off
+    /// in it): what is typed from here is a fresh insert, as after an
+    /// arrow key.
+    pub fn resume_insert(&mut self) {
+        self.pending = Some(Change::Insert {
+            entry: 'i',
+            text: Typed::default(),
+        });
+    }
+
     /// Replays the last change at `ctx.cursor`. A `count` replaces the
     /// recorded one, for this and later repeats. With no change recorded
     /// it does nothing. `search` is the last search's query and direction,

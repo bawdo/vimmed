@@ -72,6 +72,8 @@ pub struct Fake {
     pub caret: CaretShape,
     /// An input method's composition at the cursor and its cursor.
     pub preedit: Option<(String, usize)>,
+    /// The help overlay's first row, while it shows.
+    pub help: Option<usize>,
 }
 
 impl Fake {
@@ -97,6 +99,7 @@ impl Fake {
             showcmd: String::new(),
             caret: CaretShape::Bar,
             preedit: None,
+            help: None,
         }
     }
 
@@ -222,6 +225,9 @@ impl ViewSource for Fake {
     fn preedit(&self) -> Option<(&str, usize)> {
         self.preedit.as_ref().map(|(t, c)| (t.as_str(), *c))
     }
+    fn help(&self) -> Option<usize> {
+        self.help
+    }
 }
 
 /// Geometry from tokens, in pixels at `scale`.
@@ -341,11 +347,16 @@ impl Host for NoHost {
 
 /// An editor (vim keys, Normal mode) over `text`, saved as `doc.md` in `dir`.
 pub fn editor(dir: &Path, text: &str) -> Editor {
+    open_editor(dir, text, false)
+}
+
+/// `editor`, opened in reader view (`--view`) when `view` is set.
+pub fn open_editor(dir: &Path, text: &str, view: bool) -> Editor {
     let path = dir.join("doc.md");
     std::fs::write(&path, text).unwrap();
     let req = OpenRequest {
         path,
-        view: false,
+        view,
         display_name: None,
     };
     Editor::open_with_state(
@@ -359,13 +370,26 @@ pub fn editor(dir: &Path, text: &str) -> Editor {
 
 /// Sends `k` to the editor and paints what it asks for, as a shell does.
 pub fn press(ed: &mut Editor, v: &mut DocView, k: Key) {
+    press_with(ed, v, k, Mods::default());
+}
+
+/// `press`, with modifiers held.
+pub fn press_with(ed: &mut Editor, v: &mut DocView, k: Key, mods: Mods) {
     let fx = ed.handle(Input::Key(KeyEvent {
         key: k,
-        mods: Mods::default(),
+        mods,
         time_ns: 0,
     }));
     let mut redraw = fx.redraw;
+    if let Some(on) = fx.reader {
+        v.set_reader(on);
+    }
     if fx.scroll_to_cursor && v.scroll_to_cursor(ed.cursor()) {
+        redraw = Redraw::All;
+    }
+    if let Some(s) = fx.scroll
+        && v.scroll_by(s)
+    {
         redraw = Redraw::All;
     }
     match redraw {

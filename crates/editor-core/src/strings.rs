@@ -12,6 +12,8 @@ pub const MODE_SEARCH: &str = "SEARCH";
 pub const MODE_COMMAND: &str = "COMMAND";
 pub const MODE_CONFIRM: &str = "CONFIRM";
 pub const MODE_PROMPT: &str = "PROMPT";
+/// Reader view, in place of Normal (or Insert, with vim off).
+pub const MODE_READER: &str = "READER";
 
 /// Shown in the status bar after the file name while there are changes not
 /// saved.
@@ -60,6 +62,9 @@ pub fn reload_failed(reason: &str) -> String {
 /// Why a write or reload fails in an editor built with no file behind it
 /// (the tests' editors).
 pub const NO_FILE_ACCESS: &str = "file access is not wired up yet";
+
+/// `ZZ` in reader view with unsaved changes: reader view never writes.
+pub const READ_ONLY_ZQ: &str = "read-only: ZQ to discard";
 
 /// A write that succeeded.
 pub const WRITTEN: &str = "written";

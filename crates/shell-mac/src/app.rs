@@ -360,12 +360,22 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     if let Some(d) = fx.dirty {
         st.window.setDocumentEdited(d);
     }
-    // TODO(later tasks): reader mode changes (`fx.reader`).
+    // A reader mode change reaches the view before the scroll below, and
+    // a full repaint comes with it; the input method follows in
+    // `sync_ime`.
+    if let Some(on) = fx.reader {
+        st.doc.set_reader(on);
+    }
     if let Some(at) = fx.wake_at {
         arm_wake(st, at);
     }
     let mut redraw = fx.redraw;
     if fx.scroll_to_cursor && st.doc.scroll_to_cursor(st.editor.cursor()) {
+        redraw = Redraw::All;
+    }
+    if let Some(s) = fx.scroll
+        && st.doc.scroll_by(s)
+    {
         redraw = Redraw::All;
     }
     match redraw {

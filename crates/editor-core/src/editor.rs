@@ -45,6 +45,11 @@
 //! Input methods (`ime`): committed text and the composition, which is
 //! held beside the buffer and drawn at the caret until it commits.
 //!
+//! Reader view and the help overlay (`reader`): Primary+Shift+R (or
+//! `--view`) hides the caret and makes the document
+//! read-only, with keys that scroll the view; `:help` shows the cheat
+//! sheet over the document until Esc.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
@@ -53,6 +58,7 @@ mod cmdline;
 mod ime;
 mod list_keys;
 mod prompt;
+mod reader;
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -181,7 +187,14 @@ pub struct Editor {
     register: Option<char>,
     history: History,
     dirty: bool,
+    /// Reader view (`reader`): no caret, read-only.
     reader: bool,
+    /// Where reader view goes back to when it is toggled off.
+    reader_return: Option<reader::Return>,
+    /// A `g` reader view holds, waiting to see whether `gg` follows.
+    reader_g: bool,
+    /// The help overlay's first row, while `:help` shows it.
+    help: Option<usize>,
     title: String,
     message: Option<(String, MsgKind)>,
     /// When the message goes (`marks::now_ns` clock); `None` keeps it until
@@ -307,6 +320,9 @@ impl Editor {
             history: History::new(),
             dirty: false,
             reader: req.view,
+            reader_return: None,
+            reader_g: false,
+            help: None,
             title,
             message: message.map(|m| (m.to_owned(), MsgKind::Warning)),
             message_until: message.map(|_| host.now_ns().saturating_add(status::MESSAGE_FOR_NS)),
@@ -406,6 +422,16 @@ impl Editor {
     fn text_input(&mut self, text: &str) -> Effects {
         if self.mode == Mode::Prompt {
             return self.prompt_text(text);
+        }
+        // The help overlay takes each char as a key.
+        if self.help.is_some() {
+            return text.chars().fold(Effects::default(), |fx, c| {
+                fx.merge(self.help_key(KeyEvent {
+                    key: Key::Char(c),
+                    mods: Mods::default(),
+                    time_ns: 0,
+                }))
+            });
         }
         if !self.cfg.vim || self.mode == Mode::Insert {
             return self.insert(text);
@@ -564,6 +590,10 @@ impl Editor {
         if self.mode == Mode::Prompt {
             return self.prompt_key(k);
         }
+        // So does the help overlay.
+        if self.help.is_some() {
+            return self.help_key(k);
+        }
         let ctrl_c = self.cfg.vim
             && k.key == Key::Char('c')
             && k.mods
@@ -578,12 +608,16 @@ impl Editor {
             Key::Char('c') if (primary || ctrl_c) && self.visual() => return self.copy(),
             Key::Char('x') if primary => return self.cut(),
             Key::Char('v') if primary => return self.paste(),
+            // Primary+Shift+R turns reader view on and off.
+            Key::Char('r' | 'R') if primary && k.mods.shift && !k.mods.alt => {
+                return self.toggle_reader();
+            }
             // Primary+S is `:w`, from any mode but Confirm, whose `:s///c`
-            // session is one undo step a save point must not split.
-            // TODO(Task 40): reader view decides whether writes (this and
-            // `:w`) are allowed there; today they are.
+            // session is one undo step a save point must not split. Reader
+            // view is read-only, so it does nothing there (nor can `:w`
+            // run, with `:` disabled).
             Key::Char('s') if primary && !k.mods.shift && !k.mods.alt => {
-                if self.mode == Mode::Confirm {
+                if self.mode == Mode::Confirm || self.reader {
                     return Effects::default();
                 }
                 return self.ex(ExCmd::Write { force: false }).merge(Effects {
@@ -623,8 +657,15 @@ impl Editor {
                 };
         // The modifiers after Ctrl+C became Esc.
         if (k.mods.ctrl || self.platform.primary(k.mods)) && !redo {
-            // Shortcuts arrive with later tasks (Primary+Shift+R: Task 40).
+            // Shortcuts arrive with later tasks.
             return Effects::default();
+        }
+        // Reader view's keys scroll the view (`reader`).
+        if self.reader
+            && matches!(self.mode, Mode::Normal | Mode::Insert)
+            && let Some(fx) = self.reader_key(k)
+        {
+            return fx;
         }
         if self.cfg.vim {
             match self.mode {
@@ -750,6 +791,16 @@ impl Editor {
         };
         match step {
             Step::Pending => status,
+            // Reader view never writes: with changes, `ZZ` refuses and
+            // says how to leave without them, as vim does read-only.
+            Step::Quit { write: true } if self.reader && self.dirty => {
+                self.say_as(
+                    strings::READ_ONLY_ZQ.to_owned(),
+                    MsgKind::Error,
+                    status::MESSAGE_FOR_NS,
+                );
+                status
+            }
             Step::Quit { write } => {
                 let cmd = if write {
                     ExCmd::Exit
@@ -773,6 +824,8 @@ impl Editor {
                 self.leave_visual();
                 status
             }
+            // Reader view disables the command line.
+            Step::Cmdline if self.reader => status,
             Step::Cmdline => {
                 // From Visual, the selection is remembered for `'<,'>`
                 // (it stays remembered, as vim's marks do).
@@ -788,6 +841,9 @@ impl Editor {
                 self.mode = Mode::Command;
                 status
             }
+            // Reader view refuses searching too (R57): its line would be
+            // typed in the hidden status bar.
+            Step::Search { .. } | Step::SearchNext { .. } if self.reader => status,
             Step::Search { forward, op, count } => self.start_search(forward, op, count),
             Step::SearchNext { reverse, op, count } => {
                 status.merge(self.search_next(reverse, op, count))
@@ -1630,8 +1686,19 @@ impl ViewSource for Editor {
                         cursor: text.len() + at,
                     }
                 }
+                // Reader view names itself in place of Normal (or Insert,
+                // with vim off); a selection made in it keeps its name.
+                None if self.reader && matches!(self.mode, Mode::Normal | Mode::Insert) => {
+                    StatusLeft::Mode(strings::MODE_READER)
+                }
                 None => StatusLeft::Mode(self.mode.name()),
             }
+        };
+        // Reader view hides the cursor, so its position would mislead.
+        let position = if self.reader {
+            String::new()
+        } else {
+            status::position(&self.buf, self.cursor)
         };
         StatusModel {
             left,
@@ -1639,7 +1706,7 @@ impl ViewSource for Editor {
             dirty: self.dirty,
             warnings: self.warnings.clone(),
             showcmd: self.showcmd(),
-            position: status::position(&self.buf, self.cursor),
+            position,
         }
     }
     fn tokens(&self) -> &Tokens {
@@ -1651,6 +1718,9 @@ impl ViewSource for Editor {
     }
     fn reader(&self) -> bool {
         self.reader
+    }
+    fn help(&self) -> Option<usize> {
+        self.help
     }
     fn selection(&self) -> Option<Selection> {
         self.shown_selection()
