@@ -7,17 +7,25 @@
 //! failure before the rename removes the temporary file and leaves the
 //! original as it was.
 //!
+//! The replacement keeps the original's permission bits, and its owner
+//! and group when they are not the writer's (`fchown`). When the owner
+//! cannot be kept, or a sticky directory refuses the rename of another
+//! user's file, the file is written in place instead (as vim does with
+//! `backupcopy=auto`). Extended attributes, ACLs and the macOS quarantine
+//! flag are not carried over to the replacement.
+//!
 //! A hard-linked file is written in place (truncated, written and synced),
 //! since a rename would split it from its other names. So is a file whose
 //! directory cannot be written but which itself can.
 //!
 //! `force` (`:w!`) skips only the check that the file did not change on
-//! disk since it was read. It never changes permissions.
+//! disk since it was read. It never changes permissions: a file this
+//! process may not write fails with the OS's reason (`access`).
 
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::load::DiskStat;
@@ -61,13 +69,30 @@ pub trait WriteOps {
     fn stat(&mut self, path: &Path) -> io::Result<DiskStat> {
         fs::metadata(path).map(|m| DiskStat::of(&m))
     }
-    /// True when this process may write `path` (`access(W_OK)`).
-    fn writable(&mut self, path: &Path) -> bool {
-        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-            return false;
-        };
+    /// Whether this process may write `path` (`access(W_OK)`): the OS
+    /// error when it may not.
+    fn writable(&mut self, path: &Path) -> io::Result<()> {
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         // SAFETY: `c` is a valid NUL-terminated path for the call.
-        unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+        if unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    /// The owner and group of `path`, following links.
+    fn owner(&mut self, path: &Path) -> io::Result<(u32, u32)> {
+        fs::metadata(path).map(|m| (m.uid(), m.gid()))
+    }
+    /// The effective user and group this process writes as.
+    fn me(&mut self) -> (u32, u32) {
+        // SAFETY: neither call can fail or touch memory.
+        unsafe { (libc::geteuid(), libc::getegid()) }
+    }
+    /// Gives an open file `uid` and `gid`.
+    fn set_owner(&mut self, file: &File, uid: u32, gid: u32) -> io::Result<()> {
+        std::os::unix::fs::fchown(file, Some(uid), Some(gid))
     }
     /// Creates `path`, which must not exist, with `mode` (less the umask).
     fn create_new(&mut self, path: &Path, mode: u32) -> io::Result<File> {
@@ -149,16 +174,16 @@ pub fn write_with(
     let dir = target.parent().unwrap_or(Path::new("/")).to_path_buf();
     if let Some(cur) = &current {
         // A read-only file stays read-only: a rename would get round its
-        // permissions, so the write fails as the OS would fail it.
-        if !ops.writable(&target) {
-            return Err(io::Error::from_raw_os_error(libc::EACCES).into());
-        }
-        if cur.nlink > 1 || !ops.writable(&dir) {
+        // permissions, so the write fails with the OS's own reason.
+        ops.writable(&target)?;
+        if cur.nlink > 1 || ops.writable(&dir).is_err() {
             write_in_place(ops, &target, text.as_bytes())?;
             return Ok(ops.stat(&target)?);
         }
     }
-    write_atomic(ops, &target, &dir, text.as_bytes(), current.as_ref())?;
+    if !write_atomic(ops, &target, &dir, text.as_bytes(), current.as_ref())? {
+        write_in_place(ops, &target, text.as_bytes())?;
+    }
     Ok(ops.stat(&target)?)
 }
 
@@ -186,17 +211,41 @@ fn write_in_place(ops: &mut dyn WriteOps, target: &Path, bytes: &[u8]) -> io::Re
     ops.sync(&f)
 }
 
+/// How staging the temporary file ended short of the rename.
+enum Staged {
+    /// The replacement cannot keep the original's owner, or the directory
+    /// will not let it replace a file another user owns (sticky): write
+    /// in place instead.
+    InPlace,
+    Failed(io::Error),
+}
+
+impl From<io::Error> for Staged {
+    fn from(e: io::Error) -> Staged {
+        Staged::Failed(e)
+    }
+}
+
+/// True for the error a refused owner change or sticky-directory rename
+/// gives.
+fn not_permitted(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EPERM)
+}
+
 /// Writes `bytes` to `.<name>.<pid>.tmp` in `dir` and renames it over
-/// `target`. The temporary file is removed if anything before the rename
-/// fails. A new file gets the usual mode (0666 less the umask); an
-/// existing one keeps its permission bits.
+/// `target`: true once done. The temporary file is removed if anything
+/// before the rename fails. A new file gets the usual mode (0666 less the
+/// umask); an existing one keeps its permission bits and its owner and
+/// group. False (nothing changed, the temporary file gone) when the owner
+/// cannot be kept or the rename is not permitted, so the caller writes in
+/// place, as vim does with `backupcopy=auto`.
 fn write_atomic(
     ops: &mut dyn WriteOps,
     target: &Path,
     dir: &Path,
     bytes: &[u8],
     current: Option<&DiskStat>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let name = target.file_name().unwrap_or_default();
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(name);
@@ -205,24 +254,44 @@ fn write_atomic(
     // Left by an earlier run of this process id that died mid-write.
     let _ = ops.remove(&tmp);
     let mode = if current.is_some() { 0o600 } else { 0o666 };
+    let owner = match current {
+        Some(_) => Some(ops.owner(target)?),
+        None => None,
+    };
     let mut f = ops.create_new(&tmp, mode)?;
-    let staged = (|| {
+    let staged = (|| -> Result<(), Staged> {
         ops.write_all(&mut f, bytes)?;
         ops.sync(&f)?;
         if let Some(cur) = current {
             ops.set_mode(&f, cur.mode & 0o7777)?;
         }
+        if let Some((uid, gid)) = owner
+            && (uid, gid) != ops.me()
+        {
+            match ops.set_owner(&f, uid, gid) {
+                Ok(()) => {}
+                Err(e) if not_permitted(&e) => return Err(Staged::InPlace),
+                Err(e) => return Err(e.into()),
+            }
+        }
         drop(f);
-        ops.rename(&tmp, target)
+        match ops.rename(&tmp, target) {
+            Ok(()) => Ok(()),
+            Err(e) if current.is_some() && not_permitted(&e) => Err(Staged::InPlace),
+            Err(e) => Err(e.into()),
+        }
     })();
-    if let Err(e) = staged {
+    if let Err(failed) = staged {
         let _ = ops.remove(&tmp);
-        return Err(e);
+        return match failed {
+            Staged::InPlace => Ok(false),
+            Staged::Failed(e) => Err(e),
+        };
     }
     // The rename is done and the text is in place; a directory that will
     // not sync (some network file systems) does not undo that.
     let _ = ops.sync_dir(dir);
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -241,6 +310,27 @@ mod tests {
 
     fn set_mode(path: &Path, mode: u32) {
         fs::set_permissions(path, Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// True when running as root, which permission bits deny nothing (the
+    /// Linux check container). A test that needs a denial says so and
+    /// skips it.
+    fn root_skips(test: &str) -> bool {
+        // SAFETY: `geteuid` cannot fail or touch memory.
+        let root = unsafe { libc::geteuid() } == 0;
+        if root {
+            eprintln!("{test}: running as root, permission bits deny nothing; skipped");
+        }
+        root
+    }
+
+    fn names_in(dir: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
@@ -333,6 +423,9 @@ mod tests {
 
     #[test]
     fn unwritable_dir_writable_file_goes_in_place() {
+        if root_skips("unwritable_dir_writable_file_goes_in_place") {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("locked");
         fs::create_dir(&sub).unwrap();
@@ -391,6 +484,9 @@ mod tests {
 
     #[test]
     fn force_never_changes_permissions() {
+        if root_skips("force_never_changes_permissions") {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         fs::write(&path, "old").unwrap();
@@ -405,6 +501,99 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "old");
         assert_eq!(mode_of(&path), 0o444);
+    }
+
+    /// Reports the file as owned by someone else, and keeps the owner
+    /// changes and renames it is asked for, failing them with `EPERM` as
+    /// told.
+    #[derive(Default)]
+    struct Foreign {
+        chown_denied: bool,
+        rename_denied: bool,
+        chowned: Vec<(u32, u32)>,
+    }
+
+    const ALICE: (u32, u32) = (40_001, 40_002);
+
+    impl WriteOps for Foreign {
+        fn owner(&mut self, _path: &Path) -> io::Result<(u32, u32)> {
+            Ok(ALICE)
+        }
+        fn set_owner(&mut self, _file: &File, uid: u32, gid: u32) -> io::Result<()> {
+            if self.chown_denied {
+                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            }
+            self.chowned.push((uid, gid));
+            Ok(())
+        }
+        fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+            if self.rename_denied {
+                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            }
+            fs::rename(from, to)
+        }
+    }
+
+    fn foreign_write(ops: &mut Foreign) -> (tempfile::TempDir, DiskStat, DiskStat) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.md");
+        fs::write(&path, "alice's").unwrap();
+        set_mode(&path, 0o664);
+        let before = stat_of(&path);
+        let after = write_with(ops, &path, "bob's", Some(&before), false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "bob's");
+        assert_eq!(mode_of(&path), 0o664);
+        assert_eq!(names_in(dir.path()), ["shared.md"]);
+        (dir, before, after)
+    }
+
+    #[test]
+    fn foreign_owner_is_given_to_the_replacement() {
+        let mut ops = Foreign::default();
+        let (_dir, before, after) = foreign_write(&mut ops);
+        assert_eq!(ops.chowned, [ALICE]);
+        assert_ne!(after.ino, before.ino);
+    }
+
+    #[test]
+    fn foreign_owner_that_cannot_be_kept_goes_in_place() {
+        let mut ops = Foreign {
+            chown_denied: true,
+            ..Foreign::default()
+        };
+        let (_dir, before, after) = foreign_write(&mut ops);
+        assert_eq!(after.ino, before.ino);
+    }
+
+    #[test]
+    fn refused_rename_in_a_sticky_dir_goes_in_place() {
+        let mut ops = Foreign {
+            rename_denied: true,
+            ..Foreign::default()
+        };
+        let (_dir, before, after) = foreign_write(&mut ops);
+        assert_eq!(after.ino, before.ino);
+    }
+
+    /// The file's file system is mounted read-only.
+    struct ReadOnlyFs;
+
+    impl WriteOps for ReadOnlyFs {
+        fn writable(&mut self, _path: &Path) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EROFS))
+        }
+    }
+
+    #[test]
+    fn an_unwritable_file_says_the_access_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+        let stat = stat_of(&path);
+        let err = write_with(&mut ReadOnlyFs, &path, "new", Some(&stat), true).unwrap_err();
+        let rofs = io::Error::from_raw_os_error(libc::EROFS).to_string();
+        assert_eq!(err.message(), format!("write failed: {rofs}"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
     }
 
     #[test]

@@ -140,7 +140,7 @@ impl Editor {
                 return Effects::default();
             }
             Loaded::Missing => {
-                return self.reload_failed(&io::Error::from(io::ErrorKind::NotFound));
+                return self.reload_failed(&io::Error::from_raw_os_error(libc::ENOENT));
             }
             Loaded::Error(e) => return self.reload_failed(&e),
         };
@@ -174,7 +174,9 @@ impl Editor {
         };
         // The text is the file's now; the file's buffer, line for line the
         // same, brings its line endings, BOM and trailing newline. The
-        // history's positions hold, since the lines are the same.
+        // history's positions hold, since the lines are the same. Undoing
+        // the reload brings the old lines back but keeps the disk's line
+        // endings and BOM: the format is not part of the history.
         self.buf = fresh;
         self.history.mark_saved();
         self.dirty = false;

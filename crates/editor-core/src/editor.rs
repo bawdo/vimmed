@@ -578,8 +578,14 @@ impl Editor {
             Key::Char('c') if (primary || ctrl_c) && self.visual() => return self.copy(),
             Key::Char('x') if primary => return self.cut(),
             Key::Char('v') if primary => return self.paste(),
-            // Primary+S is `:w`, from any mode.
+            // Primary+S is `:w`, from any mode but Confirm, whose `:s///c`
+            // session is one undo step a save point must not split.
+            // TODO(Task 40): reader view decides whether writes (this and
+            // `:w`) are allowed there; today they are.
             Key::Char('s') if primary && !k.mods.shift && !k.mods.alt => {
+                if self.mode == Mode::Confirm {
+                    return Effects::default();
+                }
                 return self.ex(ExCmd::Write { force: false }).merge(Effects {
                     redraw: Redraw::Status,
                     ..Effects::default()
@@ -1747,10 +1753,11 @@ mod tests {
 
     #[test]
     fn shortcut_chars_do_not_insert() {
-        // Not Primary+S, which is `:w`.
+        // A chord the spec leaves free: not Primary+S (`:w`), nor the
+        // link keys K and L, nor B, I, Z, F, W, Q, C, X or V.
         let mut e = ed("ab");
         let fx = e.handle(Input::Key(KeyEvent {
-            key: Key::Char('k'),
+            key: Key::Char('j'),
             mods: Mods {
                 cmd: true,
                 ..Mods::default()

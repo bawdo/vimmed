@@ -64,8 +64,13 @@ impl Editor {
     }
 
     /// A key while a prompt asks: an answer (either case), or Esc to
-    /// cancel. Other keys wait.
+    /// cancel. Other keys, and keys with Ctrl, Alt or Cmd, wait.
     pub(super) fn prompt_key(&mut self, k: KeyEvent) -> Effects {
+        // Only a plain key (Shift allowed) answers: Primary+D must not
+        // discard.
+        if k.mods.ctrl || k.mods.alt || k.mods.cmd {
+            return Effects::default();
+        }
         match k.key {
             Key::Esc => self.answer('c'),
             Key::Char(c) => self.answer(c.to_ascii_lowercase()),
@@ -168,6 +173,26 @@ mod tests {
         keys(&mut e, "<Esc>");
         assert_eq!(e.mode(), Mode::Insert);
         assert!(files.calls().is_empty());
+    }
+
+    #[test]
+    fn modified_keys_do_not_answer() {
+        let (mut e, files) = ed_with_files("hello");
+        keys(&mut e, "x");
+        e.handle(Input::CloseRequested);
+        assert_eq!(keys(&mut e, "<D-d><D-s><C-s><C-c>").close, None);
+        assert!(asks(&e));
+        assert!(files.calls().is_empty());
+        // Shift alone is still an answer.
+        let shift_d = crate::input::Mods {
+            shift: true,
+            ..crate::input::Mods::default()
+        };
+        let fx = e.handle(crate::testkit::key_with(
+            crate::input::Key::Char('D'),
+            shift_d,
+        ));
+        assert_eq!(fx.close, Some(0));
     }
 
     #[test]

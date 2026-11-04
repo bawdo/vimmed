@@ -28,6 +28,10 @@ pub struct FileSaver {
     stat: Option<DiskStat>,
     /// The file was not valid UTF-8: it is never written.
     not_utf8: bool,
+    /// The file exists but could not be read when the editor opened, so
+    /// the document is not its text: every write fails with this reason
+    /// (the OS error number, else the kind and text), until a reload reads it.
+    unreadable: Option<(Option<i32>, io::ErrorKind, String)>,
 }
 
 impl FileSaver {
@@ -37,22 +41,35 @@ impl FileSaver {
             path,
             stat: None,
             not_utf8: false,
+            unreadable: None,
         };
         saver.loaded(loaded);
         saver
     }
 
     /// Takes in what a read found. A file that could not be read keeps
-    /// the stat from before.
+    /// the stat from before; one never read refuses writes from now on.
     fn loaded(&mut self, loaded: &Loaded) {
         match loaded {
             Loaded::Text { stat, .. } => {
                 self.stat = Some(*stat);
                 self.not_utf8 = false;
+                self.unreadable = None;
             }
             Loaded::NotUtf8 { .. } => self.not_utf8 = true,
+            Loaded::Error(e) if self.stat.is_none() => {
+                self.unreadable = Some((e.raw_os_error(), e.kind(), e.to_string()));
+            }
             Loaded::Missing | Loaded::Error(_) => {}
         }
+    }
+
+    /// The read error a write fails with, rebuilt.
+    fn read_error(&self) -> Option<io::Error> {
+        self.unreadable.as_ref().map(|(raw, kind, text)| match raw {
+            Some(n) => io::Error::from_raw_os_error(*n),
+            None => io::Error::new(*kind, text.clone()),
+        })
     }
 }
 
@@ -60,6 +77,9 @@ impl Saver for FileSaver {
     fn write(&mut self, text: &str, force: bool) -> Result<(), WriteError> {
         if self.not_utf8 {
             return Err(WriteError::NotUtf8Source);
+        }
+        if let Some(e) = self.read_error() {
+            return Err(WriteError::Io(e));
         }
         self.stat = Some(file::write(&self.path, text, self.stat.as_ref(), force)?);
         Ok(())
@@ -90,6 +110,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use super::Saver;
     use crate::editor::{Config, Editor, OpenRequest};
     use crate::effects::Effects;
     use crate::input::Input;
@@ -265,6 +286,82 @@ mod tests {
         assert_eq!(e.open_effects().wake_at, Some(due));
         e.handle(Input::Tick { now_ns: due });
         assert_eq!(e.message(), None);
+    }
+
+    #[test]
+    fn an_unreadable_file_refuses_writes_with_the_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.md");
+        fs::write(&path, "secret").unwrap();
+        let denied = std::io::Error::from_raw_os_error(libc::EACCES);
+        let mut saver = super::FileSaver::new(path.clone(), &super::Loaded::Error(denied));
+        for force in [false, true] {
+            let err = saver.write("", force).unwrap_err();
+            let want = format!("write failed: {}", os_error(libc::EACCES));
+            assert_eq!(err.message(), want, "force {force}");
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "secret");
+    }
+
+    #[test]
+    fn an_unreadable_open_says_the_read_error_on_w() {
+        // A directory exists but cannot be read as text.
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = open(dir.path());
+        for cmd in ["w", "w!"] {
+            colon(&mut e, cmd);
+            let want = format!("write failed: {}", os_error(libc::EISDIR));
+            assert_eq!(error(&e), Some(want), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_write_only_file_is_never_blanked() {
+        // SAFETY: `geteuid` cannot fail or touch memory.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "a_write_only_file_is_never_blanked: running as root, mode 0200 denies nothing; skipped"
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drop-box.md");
+        fs::write(&path, "secret").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
+        let mut e = open(&path);
+        assert_eq!(e.message(), Some(strings::READ_FAILED));
+        colon(&mut e, "w!");
+        let want = format!("write failed: {}", os_error(libc::EACCES));
+        assert_eq!(error(&e), Some(want));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "secret");
+    }
+
+    #[test]
+    fn e_bang_on_a_missing_file_says_the_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "hello").unwrap();
+        let mut e = open(&path);
+        fs::remove_file(&path).unwrap();
+        colon(&mut e, "e!");
+        let want = format!("reload failed: {}", os_error(libc::ENOENT));
+        assert_eq!(error(&e), Some(want));
+        assert_eq!(e.text(), "hello");
+    }
+
+    #[test]
+    fn primary_s_is_ignored_while_confirming() {
+        let (mut e, files) = ed_with_files("a a");
+        keys(&mut e, ":s/a/b/gc<CR>y<D-s>");
+        assert!(files.calls().is_empty());
+        assert_eq!(e.mode(), Mode::Confirm);
+        keys(&mut e, "y");
+        assert_eq!(e.text(), "b b");
+        // The whole session is still one undo step.
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "a a");
     }
 
     #[test]
