@@ -134,7 +134,9 @@ impl Editor {
         let same = (0..self.buf.line_count())
             .map(|i| self.buf.line(i))
             .eq((0..fresh.line_count()).map(|i| fresh.line(i)));
-        let was_dirty = self.dirty;
+        // Clean afterwards: say so whenever it was dirty or the text was
+        // replaced (the edit itself reports dirty on the way).
+        let report_clean = self.dirty || !same;
         let fx = if same {
             Effects::default()
         } else {
@@ -157,7 +159,7 @@ impl Editor {
         self.dirty = false;
         fx.merge(Effects {
             redraw: Redraw::All,
-            dirty: was_dirty.then_some(false),
+            dirty: report_clean.then_some(false),
             ..Effects::default()
         })
     }

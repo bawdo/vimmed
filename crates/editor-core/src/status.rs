@@ -104,6 +104,22 @@ mod tests {
     }
 
     #[test]
+    fn an_early_tick_asks_to_be_woken_again() {
+        let (mut e, host) = ed_with_host("abc");
+        host.state().now = 1_000;
+        keys(&mut e, ":foo<CR>");
+        let due = 1_000 + MESSAGE_FOR_NS;
+        // A timer that fires a hair early: the message stays and the shell
+        // is asked again for the deadline.
+        let fx = e.handle(Input::Tick { now_ns: due - 1 });
+        assert!(e.message().is_some());
+        assert_eq!(fx.wake_at, Some(due));
+        let fx = e.handle(Input::Tick { now_ns: due });
+        assert_eq!(e.message(), None);
+        assert_eq!(fx.wake_at, None);
+    }
+
+    #[test]
     fn an_ordinary_message_is_info() {
         let mut e = ed("foo foo");
         keys(&mut e, ":s/foo/bar/g<CR>");

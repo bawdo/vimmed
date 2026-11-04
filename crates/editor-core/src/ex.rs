@@ -628,6 +628,17 @@ mod tests {
     }
 
     #[test]
+    fn e_bang_on_a_clean_buffer_reports_clean() {
+        let (mut e, files) = ed_with_files("hello world");
+        assert!(!e.dirty());
+        files.set_disk("changed on disk");
+        let fx = colon(&mut e, "e!");
+        assert_eq!(e.text(), "changed on disk");
+        assert_eq!(fx.dirty, Some(false));
+        assert!(!e.dirty());
+    }
+
+    #[test]
     fn closing_tells_the_saver() {
         let (mut e, files) = ed_with_files("hello world");
         assert_eq!(colon(&mut e, "cq").close, Some(1));

@@ -345,6 +345,22 @@ fn a_fresh_visual_selection_paints_the_grapheme_under_it() {
 }
 
 #[test]
+fn a_block_caret_on_an_empty_line_is_its_token_wide() {
+    let t = tokens(&[("color.caret", "#FF00FF"), ("size.caret.block_empty", "5")]);
+    let g = Geom::new(&t, 2.0);
+    let mut src = Fake::new(&["", "beta"], t.clone());
+    src.caret = CaretShape::Block;
+    let mut v = view(&t, 2.0);
+    v.paint_all(&src);
+    let x0 = v.text_left_px(0).unwrap() as u32;
+    let y = g.line_rows(0).start + 1;
+    let magenta = (x0.saturating_sub(4)..x0 + 100)
+        .filter(|&x| rgba(&v, x, y) == (255, 0, 255, 255))
+        .count();
+    assert_eq!(magenta, 10, "`size.caret.block_empty` at scale 2");
+}
+
+#[test]
 fn normal_mode_caret_is_a_block_and_insert_a_bar() {
     let t = tokens(&[("color.caret", "#FF00FF")]);
     let g = Geom::new(&t, 2.0);

@@ -343,10 +343,18 @@ impl Editor {
         self.message_until = None;
     }
 
-    /// The main loop woke: a timed message whose time is up goes.
+    /// The main loop woke: a timed message whose time is up goes. One not
+    /// due yet (a timer that fired early) asks to be woken again then.
     fn tick(&mut self, now_ns: u64) -> Effects {
-        if self.message_until.is_none_or(|until| now_ns < until) {
-            return Effects::default();
+        match self.message_until {
+            None => return Effects::default(),
+            Some(until) if now_ns < until => {
+                return Effects {
+                    wake_at: Some(until),
+                    ..Effects::default()
+                };
+            }
+            Some(_) => {}
         }
         self.unsay();
         Effects {

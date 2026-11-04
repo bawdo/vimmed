@@ -1346,8 +1346,8 @@ impl DocView {
                     .range_rects(from..to)
                     .first()
                     .map(|r| r.w)
-                    // Past the last grapheme (an empty line): half an em.
-                    .unwrap_or_else(|| (t.px(TokenId::FontSize) * s / 2.0).round()),
+                    // Past the last grapheme (an empty line).
+                    .unwrap_or_else(|| (t.px(TokenId::SizeCaretBlockEmpty) * s).round()),
                 _ => (t.px(TokenId::SizeCaret) * s).round().max(1.0),
             };
             RectF {
