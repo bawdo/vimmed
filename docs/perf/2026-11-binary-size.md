@@ -10,7 +10,8 @@ CSS, Bash, HCL, Markdown block and inline).
 - Profile: `release` (the workspace default), macOS arm64.
 - Tool: `cargo bloat --release -p window --crates`, then `ls -l` on
   `target/release/window`.
-- At the base commit the `window` crate is an empty `fn main() {}` and does not
+- Historical (Task 28 time; see the Checkpoint 1 re-measure below for the real
+  binary): at that commit the `window` crate is an empty `fn main() {}` and does not
   depend on `editor-render`, so a plain build measures nothing useful. For both
   measurements a throwaway edit (not committed) made `window` depend on
   `editor-render` and create a `Highlighter`, request one Rust block and poll
@@ -75,3 +76,100 @@ Total `.text`: 1.8 MiB. File size: 13.0 MiB.
 - If the size becomes a problem, the options are a feature flag per grammar
   (ship fewer languages) or stripping and link-time optimisation on the
   release profile. Neither is done here.
+
+## Re-measure on the real binaries (Checkpoint 1)
+
+Date 2026-11-04, sha 0337930, macOS arm64, `cargo build --release`.
+
+The numbers above came from a throwaway harness that forced `window` to link the
+highlighter. This section measures the real `window` and `launcher` as they are
+at Checkpoint 1.
+
+| Binary | Bytes | Size |
+|---|---:|---|
+| `target/release/window` | 3,023,616 | 2.9 MiB |
+| `target/release/launcher` | 337,184 | 329 KiB |
+
+`cargo bloat --release -p window --crates -n 20`: `.text` 2.3 MiB, file 3.4 MiB.
+
+| Crate | .text size |
+|---|---:|
+| std | 414.0 KiB |
+| harfrust | 358.4 KiB |
+| skrifa | 261.5 KiB |
+| read_fonts | 183.6 KiB |
+| zeno | 147.1 KiB |
+| tiny_skia | 134.5 KiB |
+| cosmic_text | 124.5 KiB |
+| image_webp | 119.5 KiB |
+| zune_jpeg | 112.0 KiB |
+| image | 106.4 KiB |
+| editor_core | 88.8 KiB |
+| editor_render | 64.6 KiB |
+| shell_mac | 47.2 KiB |
+| swash | 42.7 KiB |
+| png | 31.1 KiB |
+
+All figures here are macOS arm64 only; Linux sizes are not measured.
+
+The real binary (3.0 MB) is far below the 13.0 MiB "all twelve grammars"
+harness build. No shell or window code creates a `Highlighter` yet, so the
+linker drops the tree-sitter runtime and every grammar, the Rust grammar
+included. Its size is coincidentally close to the "Rust grammar only" harness
+figure, which did link that grammar, so do not read the two as the same content.
+Expect the 13 MiB figure once highlighting is wired into the view path.
+Re-measure at that point.
+
+Evidence that the grammars are absent. The shipped release profile sets
+`strip = true`, so `nm` on it shows only 178 symbols and proves nothing. The
+check below used an unstripped build of the same sha (identical code,
+`CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p window
+--target-dir <dir>`, 3,587,128 bytes, 3,080 symbols):
+
+```
+$ nm <dir>/release/window | grep -ci tree_sitter
+2
+$ nm <dir>/release/window | grep -i "tree_sitter\|highlight\|Highlighter"
+__RINvNtCs..._4core3ptr9drop_glueNtNtCs..._5alloc6string6StringECs..._11tree_sitter
+__RNvXs1i_NtCs..._4core3fmtRjNtB6_7Display3fmtCs..._11tree_sitter
+```
+
+The two hits are core/alloc generics (`drop_glue<String>` and `Display for &T`)
+instantiated inside the tree_sitter crate and merged by the linker; they are not
+tree-sitter code. There is no `tree_sitter_rust` (or any other grammar) symbol,
+no tree-sitter parser symbol, and no `Highlighter` symbol. On the shipped
+(stripped) binary `nm target/release/window | grep -c tree_sitter` prints 0.
+
+## Re-measure with grammars and font fallback linked (Checkpoint 1)
+
+The 3,023,616 B figure above was measured at 0337930, before any shell used the
+highlighter, so it describes a binary without the grammars. Since then Task 27b
+wired the highlighter into the shells and Task 42 added the lazy OS font
+fallback. The release `window` binary from `cargo xtask bundle-mac --release`
+(macOS arm64):
+
+| Sha | Change | `window` bytes |
+|---|---|---:|
+| 0337930 | grammars not linked | 3,023,616 |
+| b7a1355 | grammars linked (Task 27b) | 15,943,184 |
+| 8a937bf | plus lazy font fallback (Task 42) | 16,042,896 |
+
+The launcher is unchanged at 337,184 B. The font fallback adds 99,712 B. This
+is the jump flagged above: the harness estimate for the grammars alone was
+13.6 MB, and the real window with the grammars and everything else it now links
+is 15.9 MB (15.2 MiB).
+
+Relation to cold start (macOS, Mac16,6, laptop display, see
+`checkpoint-1.md`): against the Task 15 baseline at 935ed41, when the window
+was about 3.0 MB, first_frame median went from 186.8 to 205.7 ms (+18.9 ms) and
+p95 from 203.4 to 214.7 ms (+11.3 ms). Both are inside the 250 ms median and
+400 ms p95 thresholds. Most of the growth is before first paint, about 10.7
+of the 18.9 ms (toolkit_init 107.4 to 116.6 ms, window_created 129.4 to
+140.1 ms, first_paint 133.1 to 143.8 ms). The baselines differ: those three
+marks are compared with ff1a140, first_frame with 935ed41. That the extra time
+comes from mapping and relocating a binary about five times larger is an
+inference, not something the marks show. highlight_ready (179.5 ms median)
+lands about 36 ms after first_paint, inside the window, so highlighting is part
+of the later stretch to first_frame. If the inference holds, the size has a
+measurable but affordable cost on cold start; the options listed above (a feature flag per grammar, link-time
+optimisation) remain available if it needs to come down.
