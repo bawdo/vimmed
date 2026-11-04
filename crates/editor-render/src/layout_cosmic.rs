@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use cosmic_text::{
     Attrs, Buffer, CacheKey, Color, Family, Metrics, Shaping, Style, SwashCache, SwashContent,
-    Weight, Wrap,
+    UnderlineStyle, Weight, Wrap,
 };
 use editor_core::tokens::{Rgba, TokenId, Tokens};
 
@@ -86,6 +86,9 @@ impl CosmicLayout {
             .metadata(index)
             .metrics(self.metrics(s));
         a.text_decoration.strikethrough = s.strike;
+        if s.underline {
+            a.text_decoration.underline = UnderlineStyle::Single;
+        }
         a
     }
 
@@ -216,7 +219,9 @@ impl TextLayout for CosmicLayout {
                 }
             }
             for d in run.decorations {
-                if !d.data.text_decoration.strikethrough {
+                let td = &d.data.text_decoration;
+                let under = !matches!(td.underline, UnderlineStyle::None);
+                if !td.strikethrough && !under {
                     continue;
                 }
                 let glyphs = &run.glyphs[d.glyph_range.clone()];
@@ -231,11 +236,21 @@ impl TextLayout for CosmicLayout {
                     .iter()
                     .map(|g| g.x + g.w)
                     .fold(f32::NEG_INFINITY, f32::max);
-                // The font's own strikeout metrics, in ems, at the span's size.
-                let m = d.data.strikethrough_metrics;
-                let thickness = (m.thickness * d.font_size).max(1.0).ceil();
-                let y = run.line_y - m.offset * d.font_size;
-                if x1 > x0 {
+                if x1 <= x0 {
+                    continue;
+                }
+                // The font's own strikeout and underline metrics, in ems, at
+                // the span's size.
+                let lines = [
+                    (td.strikethrough, d.data.strikethrough_metrics),
+                    (under, d.data.underline_metrics),
+                ];
+                for (on, m) in lines {
+                    if !on {
+                        continue;
+                    }
+                    let thickness = (m.thickness * d.font_size).max(1.0).ceil();
+                    let y = run.line_y - m.offset * d.font_size;
                     sink(GlyphMask {
                         x: x0 as i32,
                         y: y as i32,
@@ -268,7 +283,37 @@ mod tests {
             italic: false,
             color: t.color(TokenId::ColorText),
             strike: false,
+            underline: false,
         }
+    }
+
+    #[test]
+    fn underline_draws_a_solid_line_below_the_baseline() {
+        let fonts = crate::fonts::FontSet::load(&crate::fonts::FontPaths {
+            sans: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fonts/NotoSans-Regular.ttf"),
+            mono: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fonts/NotoSansMono-Regular.ttf"),
+            fallback: Vec::new(),
+        });
+        let t = Tokens::defaults(editor_core::tokens::Theme::Light);
+        let mut l = CosmicLayout::new(fonts, &t);
+        let solids = |l: &mut CosmicLayout, underline: bool| {
+            let mut sp = span(0..4);
+            sp.underline = underline;
+            let laid = l.layout_line("link", &[sp], 500.0);
+            let mut n = Vec::new();
+            l.draw(&laid, &mut |m| {
+                if matches!(m.data, MaskData::Solid) {
+                    n.push(m.y);
+                }
+            });
+            (n, laid.row_geometry()[0].height)
+        };
+        assert!(solids(&mut l, false).0.is_empty());
+        let (ys, h) = solids(&mut l, true);
+        assert_eq!(ys.len(), 1, "one underline");
+        assert!(ys[0] as f32 > h / 2.0, "below the middle of the row");
     }
 
     #[test]

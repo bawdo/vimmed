@@ -143,6 +143,7 @@ fn caret_and_hit_round_trip_on_a_laid_line() {
         italic: false,
         color: t.color(TokenId::ColorText),
         strike: false,
+        underline: false,
     };
     let laid = l.layout_line("hello world", &[span], 1000.0);
     assert_eq!(laid.rows, 1);

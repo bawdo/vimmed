@@ -3,16 +3,19 @@
 
 #![allow(dead_code)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use editor_core::buffer::{Buffer, Pos};
-use editor_core::markdown::{Blocks, LineDisplay, Reveal, line_display, parse_line};
+use editor_core::markdown::{
+    Blocks, LineDisplay, LineKind, Prefix, Reveal, SpanBase, code_bg, line_display,
+    ordered_display, parse_line,
+};
 use editor_core::tokens::{Theme, TokenId, Tokens};
 use editor_render::fonts::{FontPaths, FontSet};
-use editor_render::layout::{GlyphMask, LaidLine, StyledSpan, TextLayout};
+use editor_render::layout::{GlyphMask, LaidLine, RowGeom, StyledSpan, TextLayout};
 use editor_render::layout_cosmic::CosmicLayout;
 use editor_render::view::DocView;
 use editor_render::{Selection, StatusModel, ViewSource};
@@ -37,9 +40,13 @@ pub fn view(tokens: &Tokens, scale: f32) -> DocView {
     DocView::new(Box::new(cosmic(tokens)), tokens, W_PT, H_PT, scale)
 }
 
-/// A `ViewSource` over plain lines, displayed through the real markdown model.
+/// A `ViewSource` over plain lines, displayed through the real markdown model
+/// the way the editor does it: code backgrounds from `code_bg`, a code line's
+/// language from its block, ordered numbers from `ordered_display`, and a
+/// cursor anywhere in a code block or table revealing all of it.
 pub struct Fake {
     pub lines: Vec<String>,
+    buf: Buffer,
     blocks: Blocks,
     pub tokens: Tokens,
     pub cursor: Pos,
@@ -52,10 +59,12 @@ pub struct Fake {
 impl Fake {
     pub fn new(lines: &[&str], tokens: Tokens) -> Fake {
         let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        let blocks = Blocks::new(&Buffer::from_text(&lines.join("\n")));
+        let buf = Buffer::from_text(&lines.join("\n"));
+        let blocks = Blocks::new(&buf);
         let matches = vec![Vec::new(); lines.len()];
         Fake {
             lines,
+            buf,
             blocks,
             tokens,
             cursor: Pos::default(),
@@ -68,7 +77,44 @@ impl Fake {
 
     pub fn set_line(&mut self, i: usize, text: &str) {
         self.lines[i] = text.to_string();
-        self.blocks = Blocks::new(&Buffer::from_text(&self.lines.join("\n")));
+        self.rebuild();
+    }
+
+    /// Inserts `text` as a new line before line `i`.
+    pub fn insert_line(&mut self, i: usize, text: &str) {
+        self.lines.insert(i, text.to_string());
+        self.matches.insert(i, Vec::new());
+        self.rebuild();
+    }
+
+    fn rebuild(&mut self) {
+        self.buf = Buffer::from_text(&self.lines.join("\n"));
+        self.blocks = Blocks::new(&self.buf);
+    }
+
+    /// The code block or table line `i` belongs to, grouped as the editor does.
+    fn group(&self, i: usize) -> Option<(bool, u32)> {
+        match *self.blocks.kind(i) {
+            LineKind::FenceOpen { block, .. }
+            | LineKind::FenceClose { block }
+            | LineKind::Code { block } => Some((true, block.0)),
+            LineKind::TableHeader { table }
+            | LineKind::TableSep { table }
+            | LineKind::TableRow { table } => Some((false, table.0)),
+            _ => None,
+        }
+    }
+
+    fn reveal(&self, i: usize) -> Reveal {
+        if self.reader {
+            Reveal::None
+        } else if self.cursor.line == i {
+            Reveal::Cursor(self.cursor.col)
+        } else if self.group(i).is_some() && self.group(i) == self.group(self.cursor.line) {
+            Reveal::Block
+        } else {
+            Reveal::None
+        }
     }
 }
 
@@ -82,12 +128,26 @@ impl ViewSource for Fake {
     fn display(&self, i: usize) -> LineDisplay {
         let l = &self.lines[i];
         let kind = self.blocks.kind(i);
-        let reveal = if self.cursor.line == i && !self.reader {
-            Reveal::Cursor(self.cursor.col)
-        } else {
-            Reveal::None
-        };
-        line_display(l, kind, &parse_line(l, kind), reveal)
+        let mut d = line_display(l, kind, &parse_line(l, kind), self.reveal(i));
+        match kind {
+            LineKind::FenceOpen { .. } | LineKind::FenceClose { .. } => {
+                d.deco = code_bg(&self.blocks, i);
+            }
+            LineKind::Code { block } => {
+                d.deco = code_bg(&self.blocks, i);
+                let lang = &self.blocks.code_block(*block).lang;
+                for s in &mut d.spans {
+                    if let SpanBase::CodeBlock { lang: l } = &mut s.style.base {
+                        l.clone_from(lang);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Prefix::Number(n) = &mut d.prefix {
+            *n = ordered_display(&self.blocks, &self.buf, i);
+        }
+        d
     }
     fn cursor(&self) -> Pos {
         self.cursor
@@ -164,4 +224,52 @@ impl TextLayout for Counting {
     fn end_frame(&mut self) {
         self.inner.end_frame()
     }
+}
+
+/// One `layout_line` call as `Recording` saw it.
+pub struct Laid {
+    pub text: String,
+    pub width_px: f32,
+    pub rows: Vec<RowGeom>,
+}
+
+/// A layout that records every line it lays out and delegates to cosmic-text.
+pub struct Recording {
+    pub inner: CosmicLayout,
+    pub laid: Rc<RefCell<Vec<Laid>>>,
+}
+
+impl TextLayout for Recording {
+    fn layout_line(&mut self, text: &str, spans: &[StyledSpan], width_px: f32) -> LaidLine {
+        let l = self.inner.layout_line(text, spans, width_px);
+        self.laid.borrow_mut().push(Laid {
+            text: text.to_string(),
+            width_px,
+            rows: l.row_geometry().to_vec(),
+        });
+        l
+    }
+    fn draw(&mut self, line: &LaidLine, sink: &mut dyn FnMut(GlyphMask)) {
+        self.inner.draw(line, sink)
+    }
+    fn end_frame(&mut self) {
+        self.inner.end_frame()
+    }
+}
+
+/// The text column's left edge and width in pixels, as `DocView` computes them.
+pub fn column(t: &Tokens, scale: f32) -> (f32, f32) {
+    let width = (W_PT * scale).round();
+    let side = t.px(TokenId::SpacePageSide) * scale;
+    let col_w = (t.px(TokenId::SpaceColumn) * scale)
+        .min(width - 2.0 * side)
+        .max(1.0)
+        .round();
+    (((width - col_w) / 2.0).max(0.0).floor(), col_w)
+}
+
+/// Line `i`'s top in frame pixels (no scroll), from the view's line heights.
+pub fn line_top(v: &DocView, t: &Tokens, scale: f32, i: usize) -> f32 {
+    let page_top = (t.px(TokenId::SpacePageTop) * scale).round();
+    page_top + (0..i).map(|j| v.line_height_px(j).unwrap()).sum::<f32>()
 }
