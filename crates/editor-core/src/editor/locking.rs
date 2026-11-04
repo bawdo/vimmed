@@ -43,7 +43,27 @@ impl Editor {
                 // The shell paints everything once the window is up.
                 let _ = self.ask(Ask::AlreadyOpen { pid });
             }
-            LockOutcome::Unavailable(e) => self.lock_unavailable(&e.to_string()),
+            // A holder seen all the same still asks; the failure is said
+            // once the prompt is answered.
+            LockOutcome::Unavailable {
+                error,
+                holder: Some(pid),
+            } => {
+                self.lock_warning = Some(error.to_string());
+                let _ = self.ask(Ask::AlreadyOpen { pid });
+            }
+            LockOutcome::Unavailable {
+                error,
+                holder: None,
+            } => self.lock_unavailable(&error.to_string()),
+        }
+    }
+
+    /// After `o` or `e` at the already-open prompt: says the lock failure
+    /// it held back, if any.
+    pub(super) fn say_held_lock_warning(&mut self) {
+        if let Some(reason) = self.lock_warning.take() {
+            self.lock_unavailable(&reason);
         }
     }
 
@@ -55,20 +75,31 @@ impl Editor {
         );
     }
 
-    /// Lets the lock record go, as the window closes.
-    pub(super) fn release_lock(&mut self) {
+    /// Lets the lock record go. `close` does this; a shell that exits
+    /// without closing the editor or dropping it (a bench run at its
+    /// deadline, the router quitting) calls it first. Doing it twice is
+    /// harmless.
+    pub fn release_lock(&mut self) {
         if let Some(lock) = self.lock.take() {
             lock.release();
         }
     }
 
     /// `o` at the already-open prompt: the document refuses edits and
-    /// writes from now on, with `read-only` beside the file name.
+    /// writes from now on, with `read-only` beside the file name (unless
+    /// `read-only: not valid UTF-8` already says so: `shown_warnings`).
     pub(super) fn open_read_only(&mut self) {
         self.read_only_chosen = true;
-        if !self.warnings.contains(&strings::READ_ONLY) {
-            self.warnings.push(strings::READ_ONLY);
+    }
+
+    /// The warnings beside the file name: the file's own, then `read-only`
+    /// once chosen, which a not-UTF-8 warning already covers.
+    pub(super) fn shown_warnings(&self) -> Vec<&'static str> {
+        let mut w = self.warnings.clone();
+        if self.read_only_chosen && !w.contains(&strings::NOT_UTF8_READ_ONLY) {
+            w.push(strings::READ_ONLY);
         }
+        w
     }
 
     /// True while the document refuses edits: reader view, or opened
@@ -428,6 +459,74 @@ mod tests {
         let f = Fixture::new();
         let _e = open(&f.dir.path().join("new.md"), Some(&f.state()));
         assert_eq!(f.records().len(), 1);
+    }
+
+    /// Puts a directory where this process's record for the document
+    /// goes, so writing it fails (even for root), and returns why.
+    fn block_our_record(f: &Fixture) -> String {
+        let state = f.state();
+        state.ensure().unwrap();
+        let canon = fs::canonicalize(f.doc()).unwrap();
+        let hash = fnv1a64(canon.to_string_lossy().as_bytes());
+        let ours = state
+            .locks()
+            .join(format!("{hash:016x}-{}.lock", std::process::id()));
+        fs::create_dir(&ours).unwrap();
+        fs::write(&ours, "").unwrap_err().to_string()
+    }
+
+    fn warns(e: &Editor, text: &str) -> bool {
+        e.status().left
+            == StatusLeft::Message {
+                text: text.to_owned(),
+                kind: MsgKind::Warning,
+            }
+    }
+
+    #[test]
+    fn a_held_file_asks_even_when_the_lock_cannot_be_written() {
+        for answer in ["e", "o"] {
+            let f = Fixture::new();
+            let holder = Holder::spawn();
+            let reason = block_our_record(&f);
+            let mut e = open_held(&f, &holder);
+            assert!(asks_already_open(&e, &holder), "{answer}");
+            // The answer is carried out, then the lock failure is said.
+            let fx = keys(&mut e, answer);
+            assert_eq!(fx.close, None, "{answer}");
+            assert_eq!(e.mode(), Mode::Normal, "{answer}");
+            assert!(warns(&e, &strings::lock_unavailable(&reason)), "{answer}");
+            assert_eq!(fx.wake_at, Some(1_000 + status::MESSAGE_FOR_NS), "{answer}");
+            keys(&mut e, "x");
+            let want = if answer == "e" { "ello" } else { "hello" };
+            assert_eq!(e.text(), want, "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_held_file_quit_with_a_failed_lock_exits_0() {
+        let f = Fixture::new();
+        let holder = Holder::spawn();
+        block_our_record(&f);
+        let mut e = open_held(&f, &holder);
+        assert_eq!(keys(&mut e, "q").close, Some(0));
+    }
+
+    #[test]
+    fn a_held_not_utf8_file_opened_read_only_shows_one_warning() {
+        let f = Fixture::new();
+        fs::write(f.doc(), b"caf\xe9\n").unwrap();
+        let holder = Holder::spawn();
+        let mut e = open_held(&f, &holder);
+        keys(&mut e, "o");
+        assert_eq!(e.status().warnings, [strings::NOT_UTF8_READ_ONLY]);
+        // Once the file is valid UTF-8 again, the choice still stands.
+        fs::write(f.doc(), "hello").unwrap();
+        keys(&mut e, ":e!<CR>");
+        assert_eq!(e.text(), "hello");
+        assert_eq!(e.status().warnings, [strings::READ_ONLY]);
+        keys(&mut e, "x");
+        assert_eq!(e.text(), "hello");
     }
 
     #[test]

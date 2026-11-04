@@ -233,6 +233,9 @@ pub struct Editor {
     /// `o` at the already-open prompt: edits and writes are refused
     /// (`locking`).
     read_only_chosen: bool,
+    /// Why the lock record could not be written, held back while the
+    /// already-open prompt asks (`locking`).
+    lock_warning: Option<String>,
 }
 
 impl Editor {
@@ -370,6 +373,7 @@ impl Editor {
             linking: None,
             lock: None,
             read_only_chosen: false,
+            lock_warning: None,
         }
     }
 
@@ -1764,7 +1768,7 @@ impl ViewSource for Editor {
             left,
             file: self.title.clone(),
             dirty: self.dirty,
-            warnings: self.warnings.clone(),
+            warnings: self.shown_warnings(),
             showcmd: self.showcmd(),
             position,
         }

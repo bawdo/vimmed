@@ -35,8 +35,12 @@ pub enum LockOutcome {
     HeldBy { pid: u32, lock: Lock },
     /// No record could be written (the state directory could not be made,
     /// or the record could not be written), so no lock is held and no
-    /// other window will see this one. Opening goes on regardless.
-    Unavailable(std::io::Error),
+    /// other window will see this one. Opening goes on regardless. `holder`
+    /// is a live process seen holding the file all the same, if any.
+    Unavailable {
+        error: std::io::Error,
+        holder: Option<u32>,
+    },
 }
 
 impl Lock {
@@ -53,8 +57,8 @@ impl Lock {
     /// and no `$XDG_STATE_HOME`); what the user sees then is decided by the
     /// editor wiring, not here. When the state directory cannot be made or
     /// our record cannot be written, the outcome is
-    /// [`LockOutcome::Unavailable`] with the reason, whether or not another
-    /// holder was seen: no lock is held then.
+    /// [`LockOutcome::Unavailable`] with the reason and any live holder
+    /// the scan saw: no lock is held then.
     ///
     /// The reported holder is never our own pid, even when a record of a
     /// recycled pid of ours is lying about.
@@ -63,9 +67,9 @@ impl Lock {
         let hash = format!("{:016x}", fnv1a64(abs.to_string_lossy().as_bytes()));
         let me = std::process::id();
         let dir = state.locks();
-        if let Err(e) = state.ensure() {
-            return LockOutcome::Unavailable(e);
-        }
+        // Scan even when the directory cannot be made ours: a holder seen
+        // there still asks the prompt.
+        let ensured = state.ensure();
 
         let mut holder: Option<u32> = None;
         if let Ok(entries) = fs::read_dir(&dir) {
@@ -85,12 +89,15 @@ impl Lock {
             }
         }
 
+        if let Err(error) = ensured {
+            return LockOutcome::Unavailable { error, holder };
+        }
         let record = dir.join(format!("{hash}-{me}.lock"));
         let body = format!("{me}\n{}\n", abs.display());
-        if let Err(e) = fs::write(&record, body) {
+        if let Err(error) = fs::write(&record, body) {
             // A half-written record is no record.
             let _ = fs::remove_file(&record);
-            return LockOutcome::Unavailable(e);
+            return LockOutcome::Unavailable { error, holder };
         }
         let lock = Lock { record };
         match holder {
@@ -338,9 +345,33 @@ mod tests {
         fs::write(d.0.join("state"), "x").unwrap();
         let outcome = Lock::acquire(&d.state(), &f);
         assert!(
-            matches!(outcome, LockOutcome::Unavailable(_)),
+            matches!(outcome, LockOutcome::Unavailable { holder: None, .. }),
             "{outcome:?}"
         );
+    }
+
+    #[test]
+    fn a_live_holder_is_reported_when_our_record_cannot_be_written() {
+        let d = Dir::new("unwritable-held");
+        let f = d.file("a.md");
+        let state = d.state();
+        let holder = Sleeper::spawn();
+        let theirs = plant(&state, &f, holder.pid());
+        // A directory sits where our record goes, so writing it fails,
+        // even for root.
+        let canon = fs::canonicalize(&f).unwrap();
+        let ours = state.locks().join(format!(
+            "{:016x}-{}.lock",
+            fnv1a64(canon.to_string_lossy().as_bytes()),
+            std::process::id()
+        ));
+        fs::create_dir(&ours).unwrap();
+        let outcome = Lock::acquire(&state, &f);
+        let LockOutcome::Unavailable { holder: seen, .. } = outcome else {
+            panic!("expected Unavailable, got {outcome:?}");
+        };
+        assert_eq!(seen, Some(holder.pid()));
+        assert!(theirs.exists());
     }
 
     #[test]

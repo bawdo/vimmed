@@ -127,9 +127,14 @@ impl Editor {
             (Ask::AlreadyOpen { .. }, 'o') => {
                 let fx = self.end_prompt(p);
                 self.open_read_only();
+                self.say_held_lock_warning();
                 fx
             }
-            (Ask::AlreadyOpen { .. }, 'e') => self.end_prompt(p),
+            (Ask::AlreadyOpen { .. }, 'e') => {
+                let fx = self.end_prompt(p);
+                self.say_held_lock_warning();
+                fx
+            }
             (Ask::AlreadyOpen { .. }, 'q') => {
                 let fx = self.end_prompt(p);
                 fx.merge(self.close(0))
