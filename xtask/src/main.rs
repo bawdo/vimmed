@@ -4,6 +4,7 @@ mod ci;
 mod fixture;
 mod lint;
 mod literals;
+mod package_linux;
 mod rename;
 mod shell_lines;
 mod templates;
@@ -35,8 +36,10 @@ fn main() -> ExitCode {
                 .and_then(|i| rest.get(i + 1))
                 .map(String::as_str)
                 .unwrap_or(rename::DEFAULT_NAME);
-            rename::run(&root(), name)
+            rename::run(&root(), name, rest.iter().any(|a| a == "--linux"))
         }
+        Some("install-mac") => bundle_mac::install_mac(&root(), rest),
+        Some("package-linux") => package_linux::run(&root(), rest),
         Some("fixture") => return fixture::run(rest.first().cloned()),
         Some("bench") => return bench::run(rest.to_vec()),
         Some(other) => {
@@ -60,6 +63,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | bundle-mac [--release] | rename-test [--name SLUG] | fixture [DIR] | bench ...>"
+        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | bundle-mac [--release] | install-mac | package-linux | rename-test [--name SLUG] [--linux] | fixture [DIR] | bench ...>"
     );
 }

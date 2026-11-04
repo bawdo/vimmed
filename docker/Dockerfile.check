@@ -1,14 +1,26 @@
-# The image `cargo xtask linux-check` builds and tests in: Debian trixie with
+# The image `cargo xtask linux-check` builds and tests in, and where
+# `cargo xtask rename-test --linux` builds the packages: Debian trixie with
 # the GTK 4 and fontconfig development files, weston for a headless Wayland
-# session, and one font family. The workspace is mounted at /work and the
-# cargo registry and target directory live on a named volume, so this image
-# holds only the toolchain and system packages.
+# session, one font family, and the `.deb` and `.rpm` packagers. The
+# workspace is mounted at /work and the cargo registry and target directory
+# live on a named volume, so this image holds only the toolchain, the
+# packagers and system packages.
 FROM rust:1-trixie
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libgtk-4-dev libfontconfig-dev pkg-config weston fonts-dejavu-core \
+        dpkg-dev rpm2cpio cpio \
     && rm -rf /var/lib/apt/lists/*
+
+# The packagers `cargo xtask package-linux` drives, at the versions its flags
+# were checked against. They land in /usr/local/cargo/bin, which stays on PATH
+# when a run points CARGO_HOME at the cargo volume. dpkg-dev provides
+# dpkg-shlibdeps for the `.deb`'s automatic dependencies; rpm2cpio and cpio
+# let the rename test unpack the `.rpm`.
+RUN cargo install --locked cargo-deb --version 3.8.0 \
+    && cargo install --locked cargo-generate-rpm --version 0.21.1 \
+    && rm -rf /usr/local/cargo/registry
 
 # The toolchain rust-toolchain.toml pins, installed once here rather than on
 # every run. xtask passes the channel.

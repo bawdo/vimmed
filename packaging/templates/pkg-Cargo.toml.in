@@ -1,0 +1,41 @@
+# Staging manifest for `cargo xtask package-linux`. It describes no code: it
+# only carries the `.deb` and `.rpm` metadata. xtask renders it into
+# `<target>/pkg/` beside the renamed binaries and the rendered desktop and
+# metainfo files, so every asset source below is relative to this file.
+
+[package]
+name = "{{kebab}}"
+version = "{{version}}"
+edition = "2024"
+description = "A fast, keyboard-driven Markdown editor"
+license = "LicenseRef-Proprietary"
+authors = ["Keith Bawden"]
+publish = false
+
+# A workspace of its own, so cargo never treats it as a stray member of the
+# workspace it is staged under.
+[workspace]
+
+[package.metadata.deb]
+name = "{{kebab}}"
+maintainer = "Keith Bawden"
+section = "editors"
+priority = "optional"
+depends = "$auto"
+extended-description = "A Markdown editor with vim keys that shows the document as it will read, one window per file."
+assets = [
+    ["bin/{{slug}}", "/usr/bin/{{slug}}", "755"],
+    ["bin/{{slug}}-window", "{{libexec}}/{{slug}}-window", "755"],
+    ["{{bundle_id}}.desktop", "/usr/share/applications/{{bundle_id}}.desktop", "644"],
+    ["{{bundle_id}}.metainfo.xml", "/usr/share/metainfo/{{bundle_id}}.metainfo.xml", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "{{kebab}}"
+summary = "A fast, keyboard-driven Markdown editor"
+assets = [
+    { source = "bin/{{slug}}", dest = "/usr/bin/{{slug}}", mode = "755" },
+    { source = "bin/{{slug}}-window", dest = "{{libexec}}/{{slug}}-window", mode = "755" },
+    { source = "{{bundle_id}}.desktop", dest = "/usr/share/applications/{{bundle_id}}.desktop", mode = "644" },
+    { source = "{{bundle_id}}.metainfo.xml", dest = "/usr/share/metainfo/{{bundle_id}}.metainfo.xml", mode = "644" },
+]

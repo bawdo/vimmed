@@ -1,11 +1,26 @@
-//! Packaging templates: `{{KEY}}` placeholders filled from `app_meta`, so
-//! the files under `packaging/templates/` never spell the project name.
+//! Packaging templates: `{{key}}` placeholders filled from a `Names`, so the
+//! files under `packaging/templates/` never spell the project name.
+//!
+//! Keys: `slug`, `kebab`, `bundle_name`, `bundle_id`, `display_name`,
+//! `version` and `libexec` (the Linux directory holding the window binary).
 
-/// Replaces every `{{KEY}}` with its value. A placeholder without a value
-/// is an error, so a typo can't ship as literal braces.
-pub fn render(template: &str, vars: &[(&str, &str)]) -> Result<String, String> {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
+use app_meta::derive::Names;
+use std::path::Path;
+
+/// Replaces every `{{key}}` with its value from `n`. An unknown key is an
+/// error, so a typo can't ship as literal braces.
+pub fn render(src: &str, n: &Names) -> Result<String, String> {
+    let vars = [
+        ("slug", n.slug.as_str()),
+        ("kebab", n.kebab.as_str()),
+        ("bundle_name", n.bundle_name.as_str()),
+        ("bundle_id", n.bundle_id.as_str()),
+        ("display_name", n.display_name.as_str()),
+        ("version", app_meta::VERSION),
+        ("libexec", n.linux_libexec_dir.as_str()),
+    ];
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
     while let Some(start) = rest.find("{{") {
         out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
@@ -17,7 +32,7 @@ pub fn render(template: &str, vars: &[(&str, &str)]) -> Result<String, String> {
             .iter()
             .find(|(k, _)| *k == key)
             .map(|(_, v)| *v)
-            .ok_or_else(|| format!("template placeholder `{key}` has no value"))?;
+            .ok_or_else(|| format!("unknown template placeholder `{key}`"))?;
         out.push_str(value);
         rest = &after[end + 2..];
     }
@@ -25,46 +40,107 @@ pub fn render(template: &str, vars: &[(&str, &str)]) -> Result<String, String> {
     Ok(out)
 }
 
-/// The values every template may use.
-pub fn app_vars() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("SLUG", app_meta::SLUG),
-        ("DISPLAY_NAME", app_meta::DISPLAY_NAME),
-        ("BUNDLE_NAME", app_meta::BUNDLE_NAME),
-        ("BUNDLE_ID", app_meta::BUNDLE_ID),
-        ("VERSION", app_meta::VERSION),
-    ]
+/// The names this build was compiled with, from the `app_meta` constants.
+pub fn current_names() -> Names {
+    Names {
+        slug: app_meta::SLUG.into(),
+        kebab: app_meta::KEBAB.into(),
+        display_name: app_meta::DISPLAY_NAME.into(),
+        bundle_name: app_meta::BUNDLE_NAME.into(),
+        bundle_id: app_meta::BUNDLE_ID.into(),
+        env_prefix: app_meta::ENV_PREFIX.into(),
+        window_bin: app_meta::WINDOW_BIN.into(),
+        linux_libexec_dir: app_meta::LINUX_LIBEXEC_DIR.into(),
+    }
+}
+
+/// Reads `packaging/templates/<file>` under `root` and renders it.
+pub fn render_file(root: &Path, file: &str, n: &Names) -> Result<String, String> {
+    let path = root.join("packaging/templates").join(file);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    render(&text, n)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use app_meta::derive::Names;
 
-    #[test]
-    fn fills_placeholders() {
-        let got = render("<a>{{X}}</a><b>{{Y}}{{X}}</b>", &[("X", "1"), ("Y", "2")]);
-        assert_eq!(got.unwrap(), "<a>1</a><b>21</b>");
+    fn names() -> Names {
+        Names::from_slug("abc_def", "com.bawdo").unwrap()
+    }
+
+    fn template(file: &str) -> String {
+        let path = format!(
+            "{}/../packaging/templates/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(path).unwrap()
     }
 
     #[test]
-    fn unknown_or_unclosed_placeholders_fail() {
-        assert!(render("{{NOPE}}", &[]).is_err());
-        assert!(render("{{X", &[("X", "1")]).is_err());
-        assert_eq!(render("plain", &[]).unwrap(), "plain");
+    fn render_replaces_all_placeholders() {
+        let src = "{{slug}}|{{kebab}}|{{bundle_name}}|{{bundle_id}}|{{display_name}}|{{version}}|{{libexec}}";
+        let got = render(src, &names()).unwrap();
+        assert_eq!(
+            got,
+            format!(
+                "abc_def|abc-def|AbcDef|com.bawdo.abc-def|abc_def|{}|/usr/lib/abc_def",
+                app_meta::VERSION
+            )
+        );
+    }
+
+    #[test]
+    fn unknown_placeholder_errors() {
+        assert!(render("{{nope}}", &names()).is_err());
+        assert!(render("{{SLUG}}", &names()).is_err());
+        assert!(render("{{slug", &names()).is_err());
+        assert_eq!(render("plain", &names()).unwrap(), "plain");
+    }
+
+    #[test]
+    fn desktop_exec_uses_background_and_single_file() {
+        let desktop = render(&template("app.desktop.in"), &names()).unwrap();
+        let lines: Vec<&str> = desktop.lines().collect();
+        assert!(lines.contains(&"Exec=abc_def -b %f"));
+        assert!(lines.contains(&"MimeType=text/markdown;text/x-markdown;"));
+        assert!(lines.contains(&"Terminal=false"));
+        assert!(lines.contains(&"Type=Application"));
     }
 
     #[test]
     fn info_plist_template_renders() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../packaging/templates/Info.plist.in"
-        );
-        let text = std::fs::read_to_string(path).unwrap();
-        let plist = render(&text, &app_vars()).unwrap();
-        assert!(plist.contains(&format!("<string>{}</string>", app_meta::BUNDLE_ID)));
+        let plist = render(&template("Info.plist.in"), &names()).unwrap();
+        assert!(plist.contains("<string>com.bawdo.abc-def</string>"));
+        assert!(plist.contains("<string>AbcDef</string>"));
         assert!(plist.contains("<string>14.0</string>"));
         assert!(plist.contains("net.daringfireball.markdown"));
         assert!(plist.contains("public.plain-text"));
         assert!(!plist.contains("{{"));
+    }
+
+    #[test]
+    fn every_template_renders_without_leftovers() {
+        for file in [
+            "Info.plist.in",
+            "app.desktop.in",
+            "metainfo.xml.in",
+            "PKGBUILD.in",
+            "pkg-Cargo.toml.in",
+        ] {
+            let text = render(&template(file), &names()).unwrap();
+            assert!(!text.contains("{{"), "{file} kept a placeholder");
+            assert!(!text.contains("}}"), "{file} kept a placeholder");
+        }
+    }
+
+    #[test]
+    fn current_names_match_app_meta() {
+        let n = current_names();
+        assert_eq!(n.slug, app_meta::SLUG);
+        assert_eq!(n.bundle_id, app_meta::BUNDLE_ID);
+        assert_eq!(n.linux_libexec_dir, app_meta::LINUX_LIBEXEC_DIR);
     }
 }

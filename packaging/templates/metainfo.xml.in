@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>{{bundle_id}}</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>{{display_name}}</name>
+  <summary>A fast, keyboard-driven Markdown editor</summary>
+  <description>
+    <p>
+      A Markdown editor with vim keys that shows the document as it will read,
+      one window per file.
+    </p>
+  </description>
+  <launchable type="desktop-id">{{bundle_id}}.desktop</launchable>
+  <provides>
+    <binary>{{slug}}</binary>
+  </provides>
+  <supports>
+    <control>keyboard</control>
+  </supports>
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+  <releases>
+    <release version="{{version}}"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

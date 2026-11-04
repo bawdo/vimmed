@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name={{display_name}}
+GenericName=Markdown Editor
+Comment=Edit Markdown files
+Exec={{slug}} -b %f
+TryExec={{slug}}
+Terminal=false
+MimeType=text/markdown;text/x-markdown;
+Categories=Utility;TextEditor;
+Keywords=markdown;text;editor;
+StartupNotify=false
