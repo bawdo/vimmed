@@ -42,13 +42,14 @@ pub fn find_forms(haystack: &[u8], forms: &[String]) -> Vec<(String, usize)> {
     hits
 }
 
-const LINT_PATHS: [&str; 6] = [
+const LINT_PATHS: [&str; 7] = [
     "crates/",
     "xtask/",
     "packaging/",
     "docker/",
     "scripts/",
     "README.md",
+    "LICENSE",
 ];
 
 /// A `git grep -n` line is allowed only when it is the `name = ...` line of

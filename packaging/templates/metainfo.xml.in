@@ -2,6 +2,7 @@
 <component type="desktop-application">
   <id>{{bundle_id}}</id>
   <metadata_license>CC0-1.0</metadata_license>
+  <project_license>{{license}}</project_license>
   <name>{{display_name}}</name>
   <summary>A fast, keyboard-driven Markdown editor</summary>
   <description>

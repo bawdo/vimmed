@@ -2,12 +2,14 @@
 # the source tarball and the rendered desktop and metainfo files it lists.
 # Build it there with `makepkg`.
 
+# Maintainer: {{maintainer}}
+
 pkgname={{kebab}}
 pkgver={{version}}
 pkgrel=1
 pkgdesc='A fast, keyboard-driven Markdown editor'
 arch=('x86_64' 'aarch64')
-license=('LicenseRef-Proprietary')
+license=('{{license}}')
 depends=('gtk4' 'fontconfig' 'glibc' 'gcc-libs')
 makedepends=('rustup')
 source=("{{kebab}}-{{version}}.tar.gz"
@@ -36,4 +38,5 @@ package() {
     "$pkgdir/usr/share/applications/{{bundle_id}}.desktop"
   install -Dm644 "$srcdir/{{bundle_id}}.metainfo.xml" \
     "$pkgdir/usr/share/metainfo/{{bundle_id}}.metainfo.xml"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

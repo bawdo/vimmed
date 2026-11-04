@@ -1,15 +1,16 @@
 # Staging manifest for `cargo xtask package-linux`. It describes no code: it
 # only carries the `.deb` and `.rpm` metadata. xtask renders it into
-# `<target>/pkg/` beside the renamed binaries and the rendered desktop and
-# metainfo files, so every asset source below is relative to this file.
+# `<target>/pkg/` beside the renamed binaries, the rendered desktop and
+# metainfo files and a copy of LICENSE, so every asset source below is
+# relative to this file.
 
 [package]
 name = "{{kebab}}"
 version = "{{version}}"
 edition = "2024"
 description = "A fast, keyboard-driven Markdown editor"
-license = "LicenseRef-Proprietary"
-authors = ["Keith Bawden"]
+license = "{{license}}"
+authors = ["{{maintainer}}"]
 publish = false
 
 # A workspace of its own, so cargo never treats it as a stray member of the
@@ -18,7 +19,9 @@ publish = false
 
 [package.metadata.deb]
 name = "{{kebab}}"
-maintainer = "Keith Bawden"
+maintainer = "{{maintainer}}"
+# The generated /usr/share/doc/<package>/copyright carries LICENSE in full.
+license-file = ["LICENSE", "0"]
 section = "editors"
 priority = "optional"
 depends = "$auto"
@@ -38,4 +41,5 @@ assets = [
     { source = "bin/{{slug}}-window", dest = "{{libexec}}/{{slug}}-window", mode = "755" },
     { source = "{{bundle_id}}.desktop", dest = "/usr/share/applications/{{bundle_id}}.desktop", mode = "644" },
     { source = "{{bundle_id}}.metainfo.xml", dest = "/usr/share/metainfo/{{bundle_id}}.metainfo.xml", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/{{kebab}}/LICENSE", mode = "644", doc = true },
 ]

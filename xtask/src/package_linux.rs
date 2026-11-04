@@ -119,6 +119,9 @@ pub fn stage(root: &Path, bin: &Path, pkg: &Path, n: &Names) -> Result<(), Strin
     let write =
         |path: &Path, text: &str| fs::write(path, text).map_err(|e| io_err("write", path, e));
     write(&pkg.join("src/lib.rs"), "")?;
+    // The deb's copyright file and the rpm's licence asset are made from it.
+    let license = root.join("LICENSE");
+    fs::copy(&license, pkg.join("LICENSE")).map_err(|e| io_err("copy", &license, e))?;
     write(
         &pkg.join("Cargo.toml"),
         &templates::render_file(root, "pkg-Cargo.toml.in", n)?,
@@ -139,8 +142,9 @@ pub fn stage(root: &Path, bin: &Path, pkg: &Path, n: &Names) -> Result<(), Strin
     Ok(())
 }
 
-/// Top-level files `cargo build --frozen --release` reads.
-const BUILD_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"];
+/// Top-level files `cargo build --frozen --release` reads, plus the
+/// LICENSE the PKGBUILD installs.
+const BUILD_FILES: [&str; 4] = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "LICENSE"];
 /// Top-level directories it reads: the cargo config, every workspace member
 /// (all must exist for the workspace to load), and the packaging templates.
 /// Nothing in `crates/` reads files outside its crate except app-meta's
@@ -318,6 +322,24 @@ mod tests {
         ] {
             assert_eq!(manifest.matches(dest).count(), 2, "{dest} in deb and rpm");
         }
+        // The licence and maintainer, and LICENSE shipped by both packagers.
+        assert!(manifest.contains("license = \"MIT\""));
+        assert!(manifest.contains("authors = [\"Keith Bawden <keith@bawdo.com>\"]"));
+        assert!(manifest.contains("maintainer = \"Keith Bawden <keith@bawdo.com>\""));
+        assert!(
+            manifest.contains("license-file = [\"LICENSE\", \"0\"]"),
+            "deb copyright"
+        );
+        assert!(
+            manifest
+                .contains("source = \"LICENSE\", dest = \"/usr/share/licenses/abc-def/LICENSE\""),
+            "rpm licence asset"
+        );
+        assert!(!manifest.contains("LicenseRef"));
+        assert_eq!(
+            fs::read_to_string(pkg.join("LICENSE")).unwrap(),
+            fs::read_to_string(root().join("LICENSE")).unwrap()
+        );
         let desktop = fs::read_to_string(pkg.join("com.bawdo.abc-def.desktop")).unwrap();
         assert!(desktop.contains("Exec=abc_def -b %f"));
         assert!(pkg.join("com.bawdo.abc-def.metainfo.xml").is_file());
@@ -327,6 +349,12 @@ mod tests {
         assert!(pkgbuild.contains("cargo build --frozen --release"));
         assert!(pkgbuild.contains("\"$pkgdir/usr/bin/abc_def\""));
         assert!(pkgbuild.contains("\"$pkgdir/usr/lib/abc_def/abc_def-window\""));
+        assert!(pkgbuild.contains("# Maintainer: Keith Bawden <keith@bawdo.com>"));
+        assert!(pkgbuild.contains("license=('MIT')"));
+        assert!(
+            pkgbuild
+                .contains("install -Dm644 LICENSE \"$pkgdir/usr/share/licenses/$pkgname/LICENSE\"")
+        );
         assert!(arch.join("com.bawdo.abc-def.desktop").is_file());
         assert!(arch.join("com.bawdo.abc-def.metainfo.xml").is_file());
         fs::remove_dir_all(&s).unwrap();
@@ -338,6 +366,7 @@ mod tests {
         for f in [
             "Cargo.toml",
             "Cargo.lock",
+            "LICENSE",
             "rust-toolchain.toml",
             "crates/a/src/lib.rs",
             "xtask/src/main.rs",
@@ -366,6 +395,7 @@ mod tests {
                 ".cargo/config.toml",
                 "Cargo.lock",
                 "Cargo.toml",
+                "LICENSE",
                 "crates/a/src/lib.rs",
                 "packaging/templates/x.in",
                 "rust-toolchain.toml",
@@ -376,12 +406,23 @@ mod tests {
     }
 
     #[test]
+    fn license_is_mit_and_never_names_the_project() {
+        let text = fs::read_to_string(root().join("LICENSE")).unwrap();
+        assert!(text.starts_with("MIT License\n"));
+        assert!(text.contains("Copyright (c) 2026 Keith Bawden"));
+        assert!(text.contains("THE SOFTWARE IS PROVIDED \"AS IS\""));
+        let n = crate::templates::current_names();
+        assert!(crate::lint::find_forms(text.as_bytes(), &crate::lint::name_forms(&n)).is_empty());
+    }
+
+    #[test]
     fn source_files_from_git_keep_only_build_inputs() {
         let got = source_files(&root()).unwrap();
         assert!(got.iter().all(|f| is_build_input(f)), "{got:?}");
         for needed in [
             "Cargo.toml",
             "Cargo.lock",
+            "LICENSE",
             "rust-toolchain.toml",
             ".cargo/config.toml",
         ] {

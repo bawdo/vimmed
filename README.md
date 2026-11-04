@@ -2,6 +2,8 @@
 
 A fast, keyboard-driven Markdown editor with vim keys, one window per file, for macOS and Linux.
 
+It is MIT licensed: see `LICENSE`.
+
 ## The name
 
 This README never spells the project's name. Wherever it says `<name>`, read the value of this

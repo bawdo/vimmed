@@ -2,10 +2,17 @@
 //! files under `packaging/templates/` never spell the project name.
 //!
 //! Keys: `slug`, `kebab`, `bundle_name`, `bundle_id`, `display_name`,
-//! `version` and `libexec` (the Linux directory holding the window binary).
+//! `version`, `libexec` (the Linux directory holding the window binary),
+//! `license` and `maintainer` (the two constants below).
 
 use app_meta::derive::Names;
 use std::path::Path;
+
+/// The licence every package declares (the owner's decision), as an SPDX
+/// identifier. The text is in `LICENSE` at the workspace root.
+pub const LICENSE: &str = "MIT";
+/// The packages' maintainer and author, set here and nowhere else.
+pub const MAINTAINER: &str = "Keith Bawden <keith@bawdo.com>";
 
 /// Replaces every `{{key}}` with its value from `n`. An unknown key is an
 /// error, so a typo can't ship as literal braces.
@@ -18,6 +25,8 @@ pub fn render(src: &str, n: &Names) -> Result<String, String> {
         ("display_name", n.display_name.as_str()),
         ("version", app_meta::VERSION),
         ("libexec", n.linux_libexec_dir.as_str()),
+        ("license", LICENSE),
+        ("maintainer", MAINTAINER),
     ];
     let mut out = String::with_capacity(src.len());
     let mut rest = src;
@@ -81,15 +90,35 @@ mod tests {
 
     #[test]
     fn render_replaces_all_placeholders() {
-        let src = "{{slug}}|{{kebab}}|{{bundle_name}}|{{bundle_id}}|{{display_name}}|{{version}}|{{libexec}}";
+        let src = "{{slug}}|{{kebab}}|{{bundle_name}}|{{bundle_id}}|{{display_name}}|{{version}}|{{libexec}}|{{license}}|{{maintainer}}";
         let got = render(src, &names()).unwrap();
         assert_eq!(
             got,
             format!(
-                "abc_def|abc-def|AbcDef|com.bawdo.abc-def|abc_def|{}|/usr/lib/abc_def",
+                "abc_def|abc-def|AbcDef|com.bawdo.abc-def|abc_def|{}|/usr/lib/abc_def|MIT|Keith Bawden <keith@bawdo.com>",
                 app_meta::VERSION
             )
         );
+    }
+
+    #[test]
+    fn license_and_maintainer_come_from_one_place() {
+        assert_eq!(LICENSE, "MIT");
+        assert_eq!(MAINTAINER, "Keith Bawden <keith@bawdo.com>");
+        for file in [
+            "pkg-Cargo.toml.in",
+            "PKGBUILD.in",
+            "metainfo.xml.in",
+            "app.desktop.in",
+            "Info.plist.in",
+        ] {
+            let text = template(file);
+            assert!(!text.contains("LicenseRef"), "{file}");
+            assert!(!text.contains("Keith"), "{file} spells the maintainer");
+            assert!(!text.contains("MIT"), "{file} spells the licence");
+        }
+        let metainfo = render(&template("metainfo.xml.in"), &names()).unwrap();
+        assert!(metainfo.contains("<project_license>MIT</project_license>"));
     }
 
     #[test]
