@@ -7,6 +7,12 @@
 //! `end` closes it, and the pairs nest, so an insert session opened by its
 //! entry key stays one group while each keystroke inside it opens and
 //! closes its own.
+//!
+//! The save point: every group has an id, and the history's state is the
+//! id of the latest group undo would take back (or of the last one dropped
+//! off the front, or 0 at the start). A write records that state
+//! (`mark_saved`), and undo or redo that lands on it is back at the text
+//! on disk (`at_saved`), as vim resets 'modified'.
 
 use std::collections::VecDeque;
 
@@ -22,6 +28,8 @@ pub const MAX_UNDO_GROUPS: usize = 1_000;
 struct Group {
     edits: Vec<(Edit, Edit)>,
     first_cursor: Pos,
+    /// Unique in this history; never 0.
+    id: u64,
 }
 
 #[derive(Debug, Default)]
@@ -31,6 +39,14 @@ pub struct History {
     open: Option<Group>,
     /// How many `begin`s are waiting for their `end`.
     depth: usize,
+    /// The last group id handed out.
+    last_id: u64,
+    /// The state with nothing left to undo: 0, or the id of the last group
+    /// dropped off the front.
+    base: u64,
+    /// The state the text on disk matches. 0 to begin with: a history
+    /// starts at the text that was read.
+    saved: u64,
 }
 
 /// The forward edit for a replacement `Buffer::replace` carried out:
@@ -126,12 +142,46 @@ impl History {
     /// one given to its first `record`.
     pub fn begin(&mut self) {
         if self.depth == 0 {
-            self.open = Some(Group {
-                edits: Vec::new(),
-                first_cursor: Pos::default(),
-            });
+            self.open = Some(self.group(Pos::default()));
         }
         self.depth += 1;
+    }
+
+    /// A new empty group with the next id.
+    fn group(&mut self, first_cursor: Pos) -> Group {
+        self.last_id += 1;
+        Group {
+            edits: Vec::new(),
+            first_cursor,
+            id: self.last_id,
+        }
+    }
+
+    /// Where the history is: the id of the latest group undo would take
+    /// back, or `base` when there is none.
+    fn state(&self) -> u64 {
+        self.undo.back().map_or(self.base, |g| g.id)
+    }
+
+    /// The buffer now matches the file on disk. An open group with edits
+    /// (a write in the middle of an Insert session) is filed as a step of
+    /// its own and a fresh one opened in its place, so undo can come back
+    /// to exactly this text.
+    pub fn mark_saved(&mut self) {
+        if self.open.as_ref().is_some_and(|g| !g.edits.is_empty()) {
+            // Its first record sets the cursor, as for any group.
+            let fresh = self.group(Pos::default());
+            if let Some(g) = self.open.replace(fresh) {
+                self.push(g);
+            }
+        }
+        self.saved = self.state();
+    }
+
+    /// True when the buffer is at the text last saved (or read), as far
+    /// as the history knows.
+    pub fn at_saved(&self) -> bool {
+        self.open.as_ref().is_none_or(|g| g.edits.is_empty()) && self.state() == self.saved
     }
 
     /// Closes the group `begin` opened. The outermost `end` files it as
@@ -164,10 +214,8 @@ impl History {
                 g.edits.push((inverse, forward));
             }
             None => {
-                let g = Group {
-                    first_cursor: cursor,
-                    edits: vec![(inverse, forward)],
-                };
+                let mut g = self.group(cursor);
+                g.edits.push((inverse, forward));
                 self.push(g);
             }
         }
@@ -188,8 +236,10 @@ impl History {
     fn push(&mut self, g: Group) {
         self.redo.clear();
         self.undo.push_back(g);
-        if self.undo.len() > MAX_UNDO_GROUPS {
-            self.undo.pop_front();
+        if self.undo.len() > MAX_UNDO_GROUPS
+            && let Some(dropped) = self.undo.pop_front()
+        {
+            self.base = dropped.id;
         }
     }
 

@@ -27,8 +27,8 @@ pub use count::Count;
 pub use motion::{Motion, MotionKind, MotionResult};
 pub use operator::{OpRange, Operator};
 
-/// The editing mode. Prompt is the only one not built yet; Command is the
-/// `:` line and Confirm the `:s///c` question.
+/// The editing mode. Command is the `:` line, Confirm the `:s///c`
+/// question and Prompt a one-key question such as the close prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -117,6 +117,9 @@ pub enum Step {
     /// A list key in Normal: Tab, Shift+Tab, `gx` or Ctrl+Space
     /// (`operator::list_plan`). Where it does not apply, nothing happens.
     List(ListKey),
+    /// `ZZ` (`write`: `:x`, write if changed, then close) or `ZQ`
+    /// (`:q!`, close and discard).
+    Quit { write: bool },
 }
 
 /// The Normal-mode command being typed.
@@ -125,7 +128,8 @@ pub struct Vim {
     count: Count,
     /// `d`, `c` or `y`, waiting for its motion.
     op: Option<Operator>,
-    /// `g`, or `i` after an operator, or `"`, waiting for its second key.
+    /// `g`, or `i` after an operator, or `"`, or `Z`, waiting for its
+    /// second key.
     prefix: Option<char>,
     /// The named register (`"a` to `"z`) the command uses, until the
     /// editor takes it (`take_register`).
@@ -438,6 +442,15 @@ impl Vim {
                 _ => Step::Pending,
             };
         }
+        if self.prefix == Some('Z') {
+            // `ZZ` and `ZQ`; `Z` and any other key is nothing.
+            self.reset();
+            return match c {
+                'Z' => Step::Quit { write: true },
+                'Q' => Step::Quit { write: false },
+                _ => Step::Pending,
+            };
+        }
         if self.prefix == Some('g') && c == 'x' {
             // `gx` toggles a task (vim opens a link; Task 36 makes it this).
             self.prefix = None;
@@ -524,6 +537,10 @@ impl Vim {
             ':' if !after_op => {
                 self.reset();
                 Step::Cmdline
+            }
+            'Z' if !after_op => {
+                self.prefix = Some('Z');
+                Step::Pending
             }
             _ => {
                 self.reset();

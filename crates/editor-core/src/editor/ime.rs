@@ -2,8 +2,8 @@
 //! method is still composing (`Input::Preedit`).
 //!
 //! An input method is active only where text is typed: Insert (with vim
-//! off, always), the command line, a search and a prompt. Never in Normal,
-//! Visual, Confirm or reader mode, so `j` there is a key with no input
+//! off, always), the command line and a search. Never in Normal, Visual,
+//! Confirm, Prompt or reader mode, so `j` there is a key with no input
 //! method in the way. The shells ask `ime_active` before every key.
 //!
 //! Preedit never touches the buffer: it is held here and drawn at the
@@ -26,19 +26,14 @@ pub(super) fn normalise_newlines(text: String) -> String {
 }
 
 impl Editor {
-    /// True while an input method may compose: Insert (or vim off), and
-    /// the command line, search and prompt input. Never in reader mode.
+    /// True while an input method may compose: Insert (or vim off), the
+    /// command line and a search. Never in reader mode, and never while a
+    /// prompt asks: its answers are single keys.
     pub fn ime_active(&self) -> bool {
-        if self.reader {
+        if self.reader || self.mode == Mode::Prompt {
             return false;
         }
-        // TODO(Task 33b): Prompt takes text once the first prompt is built;
-        // until then nothing enters it.
-        !self.cfg.vim
-            || matches!(
-                self.mode,
-                Mode::Insert | Mode::Command | Mode::Search | Mode::Prompt
-            )
+        !self.cfg.vim || matches!(self.mode, Mode::Insert | Mode::Command | Mode::Search)
     }
 
     /// The text being composed and its cursor (a byte offset into it).
@@ -92,10 +87,10 @@ impl Editor {
     }
 
     /// Where a preedit shows: the cursor's line in the document, or the
-    /// status bar for the command line, a search or a prompt.
+    /// status bar for the command line or a search.
     fn preedit_redraw(&self) -> Effects {
         let redraw = match self.mode {
-            Mode::Command | Mode::Search | Mode::Prompt if self.cfg.vim => Redraw::Status,
+            Mode::Command | Mode::Search if self.cfg.vim => Redraw::Status,
             _ => {
                 let line = self
                     .cursor
