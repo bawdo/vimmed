@@ -16,4 +16,3 @@ marks = { path = "../marks" }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 detach = { path = "../detach" }
 yeslogic-fontconfig-sys = "6"
-libc = "0.2"
