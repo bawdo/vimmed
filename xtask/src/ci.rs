@@ -145,7 +145,7 @@ pub fn smoke_verdict(marks: &str, exit_code: &str, ldd: &str) -> Result<f64, Str
 /// The one-line summary of a passing run.
 pub fn summary(first_frame_ms: f64) -> String {
     format!(
-        "linux-check: build OK, tests OK, weston smoke first_frame={first_frame_ms:.1}, launcher ldd OK"
+        "linux-check: build OK, clippy OK, tests OK, weston smoke first_frame={first_frame_ms:.1}, launcher ldd OK"
     )
 }
 
@@ -252,6 +252,8 @@ pub fn linux_check(root: &Path) -> Result<(), String> {
     let run = |script: &str| in_container(root, &image, &volume, script);
     run("cargo build --workspace --all-targets")
         .map_err(|e| format!("linux-check: build failed: {e}"))?;
+    run("cargo clippy --workspace --all-targets -- -D warnings")
+        .map_err(|e| format!("linux-check: clippy failed: {e}"))?;
     run("cargo test --workspace").map_err(|e| format!("linux-check: tests failed: {e}"))?;
     let out = root.join(CHECK_OUT);
     let _ = std::fs::remove_dir_all(&out);
@@ -326,7 +328,7 @@ mod tests {
     fn summary_line_matches_the_brief() {
         assert_eq!(
             summary(95.25),
-            "linux-check: build OK, tests OK, weston smoke first_frame=95.2, launcher ldd OK"
+            "linux-check: build OK, clippy OK, tests OK, weston smoke first_frame=95.2, launcher ldd OK"
         );
     }
 
