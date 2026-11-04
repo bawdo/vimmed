@@ -8,6 +8,7 @@
 //! command itself would at the new cursor.
 
 use crate::markdown::Blocks;
+use crate::search;
 use crate::vim::motion::Motion;
 use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator};
 use crate::vim::textobj;
@@ -54,6 +55,17 @@ pub enum Change {
         op: Operator,
         inserted: Option<String>,
     },
+    /// An operator up to a match: of the last search as it is at the
+    /// repeat (`dn`, `cN`), or of the query and direction it typed
+    /// (`pattern`, from `d/foo` or `d?foo`), which `.` makes the last
+    /// search again, as vim does.
+    Search {
+        op: Operator,
+        reverse: bool,
+        count: usize,
+        pattern: Option<(String, bool)>,
+        inserted: Option<String>,
+    },
 }
 
 impl Change {
@@ -63,7 +75,8 @@ impl Change {
             Change::Op { inserted, .. }
             | Change::Line { inserted, .. }
             | Change::Visual { inserted, .. }
-            | Change::InnerCode { inserted, .. } => inserted.as_mut(),
+            | Change::InnerCode { inserted, .. }
+            | Change::Search { inserted, .. } => inserted.as_mut(),
             Change::Insert { text, .. } | Change::CapC(text) => Some(text),
             Change::X(_) | Change::Put { .. } | Change::CapD => None,
         }
@@ -76,7 +89,8 @@ impl Change {
             Change::X(count)
             | Change::Op { count, .. }
             | Change::Line { count, .. }
-            | Change::Put { count, .. } => *count = n,
+            | Change::Put { count, .. }
+            | Change::Search { count, .. } => *count = n,
             // The region's size is the selection's, and `ic` takes no
             // count.
             Change::Insert { .. } | Change::Visual { .. } | Change::InnerCode { .. } => {}
@@ -102,8 +116,8 @@ impl Change {
 
 /// Carries `change` out at `ctx.cursor`, ending in Normal mode: a change
 /// that opened an Insert session types its text and steps left, as Esc
-/// would.
-pub fn replay(ctx: &mut EditCtx, change: &Change) -> OpOutcome {
+/// would. `search` is the last search's query and direction.
+pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) -> OpOutcome {
     let stay = OpOutcome {
         cursor: ctx.cursor,
         insert: false,
@@ -166,6 +180,28 @@ pub fn replay(ctx: &mut EditCtx, change: &Change) -> OpOutcome {
                     type_in(ctx, out, inserted.as_deref())
                 }
                 _ => stay,
+            }
+        }
+        Change::Search {
+            op,
+            reverse,
+            count,
+            pattern,
+            inserted,
+        } => {
+            let typed = pattern.as_ref().map(|(q, f)| (q.as_str(), *f));
+            let target = match typed {
+                Some((query, forward)) => search::find(ctx.buf, query, cur.pos, forward, *count),
+                None => search.and_then(|(query, forward)| {
+                    search::find(ctx.buf, query, cur.pos, forward != *reverse, *count)
+                }),
+            };
+            match target.and_then(|hit| OpRange::exclusive(ctx.buf, cur.pos, hit.pos())) {
+                Some(r) => {
+                    let out = operator::operate(ctx, *op, r);
+                    type_in(ctx, out, inserted.as_deref())
+                }
+                None => stay,
             }
         }
         Change::Insert { entry, text } => {

@@ -152,6 +152,15 @@ impl OpRange {
         let r = motion::apply(m, buf, cur, count);
         r.moved.then(|| span(buf, p, r.cursor.pos, r.kind))
     }
+
+    /// The exclusive charwise range between `from` and `to` (in either
+    /// order), as an operator over a search match takes it, with vim's
+    /// `o_v` rules at a later line's start. `None` when they are the same
+    /// place.
+    pub fn exclusive(buf: &Buffer, from: Pos, to: Pos) -> Option<OpRange> {
+        let (from, to) = (buf.clamp(from), buf.clamp(to));
+        (from != to).then(|| span(buf, from, to, MotionKind::Exclusive))
+    }
 }
 
 /// `w` under an operator: the last step stops at its line's end.
