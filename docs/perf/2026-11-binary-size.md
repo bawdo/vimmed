@@ -139,3 +139,34 @@ instantiated inside the tree_sitter crate and merged by the linker; they are not
 tree-sitter code. There is no `tree_sitter_rust` (or any other grammar) symbol,
 no tree-sitter parser symbol, and no `Highlighter` symbol. On the shipped
 (stripped) binary `nm target/release/window | grep -c tree_sitter` prints 0.
+
+## Re-measure with grammars and font fallback linked (Checkpoint 1)
+
+The 3,023,616 B figure above was measured at 0337930, before any shell used the
+highlighter, so it describes a binary without the grammars. Since then Task 27b
+wired the highlighter into the shells and Task 42 added the lazy OS font
+fallback. The release `window` binary from `cargo xtask bundle-mac --release`
+(macOS arm64):
+
+| Sha | Change | `window` bytes |
+|---|---|---:|
+| 0337930 | grammars not linked | 3,023,616 |
+| b7a1355 | grammars linked (Task 27b) | 15,943,184 |
+| 8a937bf | plus lazy font fallback (Task 42) | 16,042,896 |
+
+The launcher is unchanged at 337,184 B. The font fallback adds 99,712 B. This
+is the jump flagged above: the harness estimate for the grammars alone was
+13.6 MB, and the real window with the grammars and everything else it now links
+is 15.9 MB.
+
+Relation to cold start (macOS, Mac16,6, laptop display, see
+`checkpoint-1.md`): against the Task 15 baseline at 935ed41, when the window
+was about 3.0 MB, first_frame median went from 186.8 to 205.7 ms (+18.9 ms) and
+p95 from 203.4 to 214.7 ms (+11.3 ms). Both are inside the 250 ms median and
+400 ms p95 thresholds. The extra time is before first paint (toolkit_init
+107.4 to 116.6 ms, window_created 129.4 to 140.1 ms, first_paint 133.1 to
+143.8 ms), which is consistent with mapping and relocating a binary about five
+times larger rather than with highlighting work. highlight_ready (179.5 ms
+median) lands before first_frame. The size has a measurable but affordable cost
+on cold start; the options listed above (a feature flag per grammar, link-time
+optimisation) remain available if it needs to come down.
