@@ -102,9 +102,18 @@ pub fn parse(input: &str) -> Result<ExCmd, String> {
     Ok(cmd)
 }
 
-/// `:table`'s columns and rows: exactly two positive numbers, or none.
+/// `:table`'s columns and rows: exactly two positive numbers, or none. A
+/// number too big for a `u32` is `u32::MAX`, still a size (one the editor
+/// refuses as too big).
 fn table_size(args: &str) -> Option<(u32, u32)> {
-    let mut nums = args.split_whitespace().map(|a| a.parse::<u32>().ok());
+    // Words from `split_whitespace` are never empty, so all digits is a
+    // number, and one that does not parse is too big.
+    let num = |a: &str| {
+        a.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| a.parse::<u32>().unwrap_or(u32::MAX))
+    };
+    let mut nums = args.split_whitespace().map(num);
     match (nums.next(), nums.next(), nums.next()) {
         (Some(Some(cols)), Some(Some(rows)), None) if cols > 0 && rows > 0 => Some((cols, rows)),
         _ => None,
@@ -361,6 +370,16 @@ mod tests {
     #[test]
     fn parses_table_with_dimensions() {
         assert_eq!(parse("table 3 4"), Ok(ExCmd::Table(Some((3, 4)))));
+    }
+
+    #[test]
+    fn table_dimensions_past_u32_saturate() {
+        // Too big to hold is still a size, so the editor refuses it as too
+        // big rather than opening the picker.
+        assert_eq!(
+            parse("table 99999999999 2"),
+            Ok(ExCmd::Table(Some((u32::MAX, 2))))
+        );
     }
 
     #[test]
@@ -649,15 +668,14 @@ mod tests {
     }
 
     #[test]
-    fn help_and_table_return_to_normal_quietly() {
+    fn help_returns_to_normal_quietly() {
+        // `:table` is tested with the table keys (`editor::table_keys`).
         let mut e = ed("hello world");
-        for cmd in ["help", "table 3 4", "table"] {
-            let fx = colon(&mut e, cmd);
-            assert_eq!(e.mode(), Mode::Normal, "{cmd}");
-            assert_eq!(e.message(), None, "{cmd}");
-            assert_eq!(fx.close, None, "{cmd}");
-            assert_eq!(e.text(), "hello world", "{cmd}");
-        }
+        let fx = colon(&mut e, "help");
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.message(), None);
+        assert_eq!(fx.close, None);
+        assert_eq!(e.text(), "hello world");
     }
 
     #[test]

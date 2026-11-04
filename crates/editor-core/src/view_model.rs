@@ -7,6 +7,7 @@ use std::ops::Range;
 use crate::buffer::{Buffer, LineShift, Pos, ShiftMark};
 use crate::grapheme;
 use crate::markdown::LineDisplay;
+use crate::tables::TablePicker;
 use crate::tokens::{Theme, Tokens};
 
 /// How a status message reads: as information, a warning or an error.
@@ -158,6 +159,11 @@ pub trait ViewSource {
     fn reader(&self) -> bool;
     /// While the help overlay shows, the first of `help::rows` it shows.
     fn help(&self) -> Option<usize> {
+        None
+    }
+    /// The grid picker `:table` opens, while it shows, drawn under the
+    /// cursor's line.
+    fn picker(&self) -> Option<&TablePicker> {
         None
     }
     fn selection(&self) -> Option<Selection>;

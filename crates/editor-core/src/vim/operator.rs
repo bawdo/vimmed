@@ -16,6 +16,7 @@ use crate::grapheme;
 use crate::host::Host;
 use crate::lists::{self, EditPlan};
 use crate::markdown::Blocks;
+use crate::tables::{self, CellMove};
 use crate::undo::{self, History};
 use crate::vim::motion::{self, Motion, MotionKind};
 use crate::vim::register::{Register, Registers};
@@ -395,6 +396,37 @@ pub fn list_plan(key: ListKey, buf: &Buffer, blocks: &Blocks, cursor: Pos) -> Op
         ListKey::Tab => lists::indent(buf, blocks, line, cursor),
         ListKey::BackTab => lists::outdent(buf, blocks, line, cursor),
         ListKey::Toggle => lists::toggle_task(buf, blocks, line, cursor),
+    }
+}
+
+/// Where `key` goes in a table (`crate::tables`) with the cursor at
+/// `cursor`: Tab to the next cell, Shift+Tab to the previous one (staying
+/// put at the first) and Enter, in Insert, down a row; past the last cell
+/// or row they grow the table. `None` off a table, and for the task
+/// toggle, which tables do not take. `blocks` must describe `buf` as it is
+/// now: the `crate::tables` moves do not check.
+pub fn table_move(key: ListKey, buf: &Buffer, blocks: &Blocks, cursor: Pos) -> Option<CellMove> {
+    let cursor = buf.clamp(cursor);
+    let info = tables::table_at(blocks, cursor.line)?;
+    Some(match key {
+        ListKey::Tab => tables::next_cell(info, buf, cursor),
+        ListKey::BackTab => CellMove::Move(tables::prev_cell(info, buf, cursor).unwrap_or(cursor)),
+        ListKey::Enter => tables::next_row(info, buf, cursor),
+        ListKey::Toggle => return None,
+    })
+}
+
+/// Carries out a `table_move`: a move only places the cursor (nothing to
+/// undo); a grown table is a plan, one undo step (`EditCtx::apply_plan`).
+/// Returns where the cursor goes.
+pub fn apply_move(ctx: &mut EditCtx, mv: CellMove) -> Pos {
+    match mv {
+        CellMove::Move(p) => {
+            let p = ctx.buf.clamp(p);
+            ctx.place(p);
+            p
+        }
+        CellMove::Edit(plan) => ctx.apply_plan(plan),
     }
 }
 

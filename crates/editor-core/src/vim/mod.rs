@@ -117,6 +117,10 @@ pub enum Step {
     /// A list key in Normal: Tab, Shift+Tab, `gx` or Ctrl+Space
     /// (`operator::list_plan`). Where it does not apply, nothing happens.
     List(ListKey),
+    /// `t` and a key in a table (`crate::tables::command`): `ta tA td tD
+    /// tc tC tx t> t< t=`. Any other key, or a cursor off a table, does
+    /// nothing. Not a change `.` repeats.
+    Table(char),
     /// `ZZ` (`write`: `:x`, write if changed, then close) or `ZQ`
     /// (`:q!`, close and discard).
     Quit { write: bool },
@@ -128,8 +132,8 @@ pub struct Vim {
     count: Count,
     /// `d`, `c` or `y`, waiting for its motion.
     op: Option<Operator>,
-    /// `g`, or `i` after an operator, or `"`, or `Z`, waiting for its
-    /// second key.
+    /// `g`, or `i` after an operator, or `"`, or `Z`, or `t` in a table
+    /// (`table_prefix`), waiting for its second key.
     prefix: Option<char>,
     /// The named register (`"a` to `"z`) the command uses, until the
     /// editor takes it (`take_register`).
@@ -287,6 +291,20 @@ impl Vim {
                 text: Typed::default(),
             });
         }
+    }
+
+    /// `t` with the cursor in a table, which the editor knows and the
+    /// engine does not: the prefix of a table command (`Step::Table`),
+    /// when no operator or other prefix waits. Returns false, changing
+    /// nothing, when one does; the key then goes to `key` as usual.
+    /// Counts do not apply.
+    pub fn table_prefix(&mut self) -> bool {
+        if self.op.is_some() || self.prefix.is_some() {
+            return false;
+        }
+        self.count = Count::default();
+        self.prefix = Some('t');
+        true
     }
 
     /// True while a named register (`"a`) waits for its command; `showcmd`
@@ -457,6 +475,10 @@ impl Vim {
                 }
                 _ => Step::Pending,
             };
+        }
+        if self.prefix == Some('t') {
+            self.reset();
+            return Step::Table(c);
         }
         if self.prefix == Some('Z') {
             // `ZZ` and `ZQ`; `Z` and any other key is nothing.

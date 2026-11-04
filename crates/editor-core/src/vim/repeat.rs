@@ -338,8 +338,18 @@ fn type_in(ctx: &mut EditCtx, out: OpOutcome, typed: Option<&Typed>) -> OpOutcom
                 ctx.replace(at..at, text);
             }
             Piece::Key(key) => {
-                let plan = operator::list_plan(*key, ctx.buf, &Blocks::new(ctx.buf), at);
-                operator::insert_list_key(ctx, *key, plan);
+                // In a table the key moves between cells, as it did when
+                // typed (`Editor::insert_list_key`).
+                let blocks = Blocks::new(ctx.buf);
+                match operator::table_move(*key, ctx.buf, &blocks, at) {
+                    Some(mv) => {
+                        operator::apply_move(ctx, mv);
+                    }
+                    None => {
+                        let plan = operator::list_plan(*key, ctx.buf, &blocks, at);
+                        operator::insert_list_key(ctx, *key, plan);
+                    }
+                }
             }
             Piece::Backspace => {
                 if let Some(r) = operator::backspace_range(ctx.buf, at) {

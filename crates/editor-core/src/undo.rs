@@ -28,6 +28,8 @@ pub const MAX_UNDO_GROUPS: usize = 1_000;
 struct Group {
     edits: Vec<(Edit, Edit)>,
     first_cursor: Pos,
+    /// True when undo and redo go to `first_cursor` itself (`pin_cursor`).
+    pinned: bool,
     /// Unique in this history; never 0.
     id: u64,
 }
@@ -96,6 +98,9 @@ pub fn forward(inverse: &Edit, inserted: &str) -> Edit {
 /// rests on. Otherwise it goes to the first non-blank of the top changed
 /// line. A change that only adds or takes whole lines below a line (an `o`,
 /// a linewise `dd` on the last line) counts from the line below.
+///
+/// A group whose cursor was pinned (`History::pin_cursor`) goes to that
+/// cursor instead, wherever the edits were.
 fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group) -> Pos {
     let mut top = usize::MAX;
     // How many lines the edit that set `top` leaves in its place.
@@ -118,6 +123,9 @@ fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group)
         buf.replace(e.range.clone(), &e.text);
     }
     let saved = g.first_cursor;
+    if g.pinned {
+        return vim::rest(buf, saved);
+    }
     let line = top.min(buf.line_count() - 1);
     // Vim: a saved cursor within the changed block, or the line either
     // side of it, is where the cursor goes back to.
@@ -153,6 +161,7 @@ impl History {
         Group {
             edits: Vec::new(),
             first_cursor,
+            pinned: false,
             id: self.last_id,
         }
     }
@@ -228,6 +237,18 @@ impl History {
     pub fn set_cursor(&mut self, cursor: Pos) {
         if let Some(g) = self.open.as_mut().filter(|g| !g.edits.is_empty()) {
             g.first_cursor = cursor;
+        }
+    }
+
+    /// Like `set_cursor`, but undo and redo of the group go to `cursor`
+    /// itself (on a grapheme Normal mode rests on) rather than by vim's
+    /// rule in `apply`: for a command whose undo puts the cursor back
+    /// where it was (the table commands). With no group open, or an empty
+    /// one, it does nothing.
+    pub fn pin_cursor(&mut self, cursor: Pos) {
+        if let Some(g) = self.open.as_mut().filter(|g| !g.edits.is_empty()) {
+            g.first_cursor = cursor;
+            g.pinned = true;
         }
     }
 
@@ -322,6 +343,32 @@ mod tests {
         h.set_cursor(pos(0, 4));
         h.end();
         assert_eq!(h.undo(&mut buf), Some(pos(0, 4)));
+    }
+
+    #[test]
+    fn a_pinned_cursor_is_where_undo_and_redo_go() {
+        // Line 3's edit is far from the cursor on line 0, so vim's rule
+        // would go to line 3's first non-blank; a pinned cursor stays.
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("abc\nd\ne\n  fgh");
+        // Nothing open, or nothing recorded yet: no effect.
+        h.pin_cursor(pos(0, 2));
+        h.begin();
+        h.pin_cursor(pos(0, 2));
+        edit(&mut h, &mut buf, pos(3, 2)..pos(3, 3), "F");
+        h.pin_cursor(pos(0, 2));
+        h.end();
+        assert_eq!(h.undo(&mut buf), Some(pos(0, 2)));
+        assert_eq!(buf.to_text(), "abc\nd\ne\n  fgh");
+        assert_eq!(h.redo(&mut buf), Some(pos(0, 2)));
+        // Unpinned, the same edit goes by vim's rule.
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("abc\nd\ne\n  fgh");
+        h.begin();
+        edit(&mut h, &mut buf, pos(3, 2)..pos(3, 3), "F");
+        h.set_cursor(pos(0, 2));
+        h.end();
+        assert_eq!(h.undo(&mut buf), Some(pos(3, 2)));
     }
 
     #[test]

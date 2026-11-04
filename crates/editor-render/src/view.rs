@@ -36,7 +36,8 @@
 //! Reader view: no caret and nothing revealed; the status bar stays at its
 //! height (owner decision D21). `scroll_by` scrolls without the cursor.
 //! The help overlay
-//! (`overlay`) covers the text area while the source shows it.
+//! (`overlay`) covers the text area while the source shows it, and the
+//! table picker sits under the cursor's line while the source shows that.
 
 use std::ops::Range;
 use std::path::Path;
@@ -49,6 +50,7 @@ use editor_core::markdown::{
     BlockDeco, BlockId, LineDisplay, Prefix, SpanBase, SpanStyle, display_to_src,
 };
 use editor_core::strings::IMAGE_NOT_FOUND;
+use editor_core::tables::TablePicker;
 use editor_core::tokens::{TokenId, Tokens};
 use editor_core::view_model::{CaretShape, StatusModel, ViewSource};
 
@@ -57,6 +59,7 @@ use crate::damage::Damage;
 use crate::frame::Frame;
 use crate::images::{ImageSlot, ImageState, Images, Scaled};
 use crate::layout::{LaidLine, RectF, StyledSpan, TextLayout};
+use crate::overlay::PickerLayout;
 use crate::paint::{
     Corners, HangPrefix, apply_classes, blend, blit, code_ranges, content_offset, fence_lang, fill,
     fill_rounded, hang_prefix, prefix_text, span_for, splice_preedit, src_to_display_clamped,
@@ -326,6 +329,15 @@ pub struct DocView {
     pub(crate) help: Option<usize>,
     /// The help overlay's layouts, kept while their text and spans hold.
     pub(crate) help_cache: Vec<Cached>,
+    /// The table picker as last painted (`overlay`).
+    pub(crate) picker: Option<TablePicker>,
+    /// The cursor's line when the picker was last painted: it goes under
+    /// that line.
+    pub(crate) picker_line: usize,
+    /// Where the picker was last painted, for `picker_cell_at`.
+    pub(crate) picker_at: Option<PickerLayout>,
+    /// The picker label's layout, kept while its text holds.
+    pub(crate) picker_cache: Option<Cached>,
 }
 
 impl DocView {
@@ -357,6 +369,10 @@ impl DocView {
             needs_all: false,
             help: None,
             help_cache: Vec::new(),
+            picker: None,
+            picker_line: 0,
+            picker_at: None,
+            picker_cache: None,
         };
         v.clear_frame();
         v
@@ -408,6 +424,8 @@ impl DocView {
         self.reader = src.reader();
         self.needs_all = false;
         self.help = src.help();
+        self.picker = src.picker().cloned();
+        self.picker_line = src.cursor().line;
         let g = self.geo();
         self.caret = None;
         self.cursor_drawn = None;
@@ -425,7 +443,7 @@ impl DocView {
         // Only the tables on screen keep their geometry.
         let f = self.frame_no;
         self.tables.retain(|t| t.frame == f);
-        self.paint_help();
+        self.paint_overlays();
         self.last_status = None;
         self.paint_status(src);
         self.damage.add(0..self.frame.height_px);
@@ -442,11 +460,15 @@ impl DocView {
     /// An edit in or next to a rendered table repaints the whole table: its
     /// column widths come from every row, so any row can move them all.
     ///
-    /// Reader view or the help overlay coming or going repaints it all
-    /// (`paint_all`); while the overlay shows, it is painted again over
-    /// whatever lines were.
+    /// Reader view, the help overlay or the table picker coming, going or
+    /// changing repaints it all (`paint_all`); while one shows, it is
+    /// painted again over whatever lines were.
     pub fn paint_lines(&mut self, src: &dyn ViewSource, lines: Range<usize>) {
-        if self.needs_all || src.reader() != self.reader || src.help() != self.help {
+        if self.needs_all
+            || src.reader() != self.reader
+            || src.help() != self.help
+            || src.picker() != self.picker.as_ref()
+        {
             self.paint_all(src);
             return;
         }
@@ -498,7 +520,7 @@ impl DocView {
         if let Some(f) = from {
             self.repaint_to_bottom(src, f);
         }
-        self.paint_help();
+        self.paint_overlays();
         self.paint_status(src);
         self.layout.end_frame();
     }
@@ -755,7 +777,14 @@ impl DocView {
         if self.help_cache.iter().any(|c| c.laid.missing_glyphs) {
             self.help_cache.clear();
         }
-        self.paint_help();
+        if self
+            .picker_cache
+            .as_ref()
+            .is_some_and(|c| c.laid.missing_glyphs)
+        {
+            self.picker_cache = None;
+        }
+        self.paint_overlays();
         self.layout.end_frame();
         true
     }
@@ -785,7 +814,7 @@ impl DocView {
         let images = self.poll_images();
         let code = self.poll_highlight();
         if images || code {
-            self.paint_help();
+            self.paint_overlays();
         }
         images || code
     }
@@ -1026,6 +1055,11 @@ impl DocView {
         );
         self.damage = Damage::new();
         self.damage.add(0..self.frame.height_px);
+    }
+
+    /// Line `i`'s top in frame pixels, or `None` past the last line.
+    pub(crate) fn line_top_px(&self, i: usize) -> Option<f32> {
+        (i < self.lines.len()).then(|| self.line_top(i))
     }
 
     /// Line `i`'s top in frame pixels.
