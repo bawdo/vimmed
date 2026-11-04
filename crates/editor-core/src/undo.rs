@@ -73,9 +73,25 @@ pub fn forward(inverse: &Edit, inserted: &str) -> Edit {
     }
 }
 
-/// Applies `edits` to `buf` and returns the cursor vim leaves after
-/// undoing or redoing `g` (`u_undoredo`, checked against vim 9.1 in the
-/// golden tests in `vim/repeat.rs`). Undo and redo use the same rule.
+/// Where an undo or redo leaves things (`History::undo_step`,
+/// `History::redo_step`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Landing {
+    /// The cursor by vim's rule (`apply`), before it is put on a grapheme
+    /// Normal mode rests on: `History::undo` and `History::redo` rest it;
+    /// with vim off it is clamped instead, so a cursor at a line end stays
+    /// there.
+    pub at: Pos,
+    /// Where the last edit applied ends: after the text a redo put back
+    /// (where the cursor goes on a redo with vim off).
+    pub end: Pos,
+}
+
+/// Applies `edits` to `buf` and returns where the cursor goes after
+/// undoing or redoing `g`: the cursor vim leaves (`u_undoredo`, checked
+/// against vim 9.1 in the golden tests in `vim/repeat.rs`), not yet rested
+/// on a grapheme, and the end of the last edit. Undo and redo use the
+/// same rule.
 ///
 /// The saved cursor is the one vim has at the group's first change, after
 /// the operator's motion has moved it. Vim's operator range starts at the
@@ -101,8 +117,9 @@ pub fn forward(inverse: &Edit, inserted: &str) -> Edit {
 ///
 /// A group whose cursor was pinned (`History::pin_cursor`) goes to that
 /// cursor instead, wherever the edits were.
-fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group) -> Pos {
+fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group) -> Landing {
     let mut top = usize::MAX;
+    let mut end = Pos::default();
     // How many lines the edit that set `top` leaves in its place.
     let mut size = 0;
     for e in edits {
@@ -120,11 +137,12 @@ fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group)
                 (true, false) => 0,
             };
         }
-        buf.replace(e.range.clone(), &e.text);
+        let inverse = buf.replace(e.range.clone(), &e.text);
+        end = inverse.range.end;
     }
     let saved = g.first_cursor;
     if g.pinned {
-        return vim::rest(buf, saved);
+        return Landing { at: saved, end };
     }
     let line = top.min(buf.line_count() - 1);
     // Vim: a saved cursor within the changed block, or the line either
@@ -138,7 +156,7 @@ fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group)
             col: vim::motion::caret_col(buf.line(line)),
         }
     };
-    vim::rest(buf, at)
+    Landing { at, end }
 }
 
 impl History {
@@ -267,20 +285,32 @@ impl History {
     /// Undoes the latest group in `buf` and returns where the cursor goes
     /// (see `apply`), or `None` when there is nothing to undo.
     pub fn undo(&mut self, buf: &mut Buffer) -> Option<Pos> {
+        let l = self.undo_step(buf)?;
+        Some(vim::rest(buf, l.at))
+    }
+
+    /// `undo`, handing back the `Landing` unrested.
+    pub fn undo_step(&mut self, buf: &mut Buffer) -> Option<Landing> {
         let g = self.undo.pop_back()?;
-        let at = apply(buf, g.edits.iter().rev().map(|(inverse, _)| inverse), &g);
+        let l = apply(buf, g.edits.iter().rev().map(|(inverse, _)| inverse), &g);
         self.redo.push(g);
-        Some(at)
+        Some(l)
     }
 
     /// Redoes the latest undone group in `buf` and returns where the
     /// cursor goes, by the same rule as `undo`, or `None` when there is
     /// nothing to redo.
     pub fn redo(&mut self, buf: &mut Buffer) -> Option<Pos> {
+        let l = self.redo_step(buf)?;
+        Some(vim::rest(buf, l.at))
+    }
+
+    /// `redo`, handing back the `Landing` unrested.
+    pub fn redo_step(&mut self, buf: &mut Buffer) -> Option<Landing> {
         let g = self.redo.pop()?;
-        let at = apply(buf, g.edits.iter().map(|(_, forward)| forward), &g);
+        let l = apply(buf, g.edits.iter().map(|(_, forward)| forward), &g);
         self.undo.push_back(g);
-        Some(at)
+        Some(l)
     }
 
     /// The id of the latest undo step, if there is one.

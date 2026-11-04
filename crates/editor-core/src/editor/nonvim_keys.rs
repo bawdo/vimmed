@@ -170,15 +170,20 @@ impl Editor {
     }
 
     /// Enter, Tab or Shift+Tab (`list_keys`), over a selection taking it
-    /// first, in the same step.
+    /// first, in the same step. In a table, where the key moves between
+    /// cells, it only drops the selection and moves.
     fn plain_list_key(&mut self, key: ListKey) -> Effects {
         let Some(r) = self.plain_range() else {
             return self.insert_list_key(key);
         };
-        if self.refuses_edits() {
-            return Effects::default();
-        }
         let before = self.selection_lines();
+        self.anchor = None;
+        if let Some(fx) = self.table_nav(key) {
+            return fx.merge(self.selection_redraw(before));
+        }
+        if self.refuses_edits() {
+            return self.selection_redraw(before);
+        }
         self.history.begin();
         let fx = self.edit(r, "");
         let fx = fx.merge(self.insert_list_key(key));
@@ -267,23 +272,40 @@ impl Editor {
         self.edit(r, &text).merge(self.selection_redraw(before))
     }
 
-    /// Primary+S with vim off: `:w`, except that a file changed on disk
-    /// asks `file changed on disk: [o]verwrite [r]eload [c]ancel` rather
-    /// than refusing. The file watch's warning asks at once; a change the
-    /// watch has not seen yet asks once the write finds it.
+    /// Primary+S with vim off (`plain_write`).
     pub(super) fn plain_save(&mut self) -> Effects {
+        self.plain_write(false).1
+    }
+
+    /// A write with vim off: `:w`, except that a file changed on disk
+    /// asks `file changed on disk: [o]verwrite [r]eload [c]ancel` rather
+    /// than refusing (`closing`: for the close prompt's `s`, whose close
+    /// goes ahead once `o` has written). The file watch's warning asks at
+    /// once; a change the watch has not seen yet asks once the write finds
+    /// it. True when written, with the effects of the dirty state it
+    /// changed.
+    pub(super) fn plain_write(&mut self, closing: bool) -> (bool, Effects) {
         if self.refuse_write() {
-            return Effects::default();
+            return (false, Effects::default());
         }
+        let ask = Ask::ChangedOnDisk { closing };
         if self.disk == Some(DiskEvent::Changed) {
-            return self.ask(Ask::ChangedOnDisk);
+            return (false, self.ask(ask));
         }
+        let was_dirty = self.dirty;
         match self.write_checked(false) {
             Ok(()) => self.say(strings::WRITTEN.to_owned()),
-            Err(WriteError::ChangedOnDisk) => return self.ask(Ask::ChangedOnDisk),
-            Err(e) => self.say_as(e.message(), MsgKind::Error, status::MESSAGE_FOR_NS),
+            Err(WriteError::ChangedOnDisk) => return (false, self.ask(ask)),
+            Err(e) => {
+                self.say_as(e.message(), MsgKind::Error, status::MESSAGE_FOR_NS);
+                return (false, Effects::default());
+            }
         }
-        Effects::default()
+        let fx = Effects {
+            dirty: was_dirty.then_some(false),
+            ..Effects::default()
+        };
+        (true, fx)
     }
 
     /// Primary+F: the find bar, searching from the cursor. The selection

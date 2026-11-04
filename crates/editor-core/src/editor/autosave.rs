@@ -3,7 +3,9 @@
 //! (the `Saver`'s changed-on-disk check and typed errors, the save point
 //! undo comes back to, the file watch rebased on the version written),
 //! without the `written` message. A refused or failed autosave says why,
-//! once, and is not tried again until the next change.
+//! once, and is not tried again until the next change. It never asks a
+//! prompt: with vim off, a file changed on disk says so without `:`
+//! commands (`CHANGED_ON_DISK_AUTOSAVE`), and Primary+S then asks.
 //!
 //! The wait is the shell's timer: a change asks to be woken
 //! (`Effects::wake_at`) when it falls due, and the tick then writes.
@@ -20,7 +22,10 @@
 
 use crate::buffer::ShiftMark;
 use crate::effects::Effects;
-use crate::status::Mode;
+use crate::file::WriteError;
+use crate::status::{self, Mode};
+use crate::strings;
+use crate::view_model::MsgKind;
 
 use super::Editor;
 
@@ -96,8 +101,17 @@ impl Editor {
         }
         self.autosave_due = None;
         // The dirty change it makes, and a refusal's message, reach the
-        // shell through `handle`.
-        self.write_quietly(false);
+        // shell through `handle`. With vim off a file changed on disk is
+        // said without `:` commands: saving asks what to keep.
+        match self.write_checked(false) {
+            Ok(()) => {}
+            Err(WriteError::ChangedOnDisk) if !self.cfg.vim => self.say_as(
+                strings::CHANGED_ON_DISK_AUTOSAVE.to_owned(),
+                MsgKind::Error,
+                status::MESSAGE_FOR_NS,
+            ),
+            Err(e) => self.say_as(e.message(), MsgKind::Error, status::MESSAGE_FOR_NS),
+        }
         Effects::default()
     }
 

@@ -45,6 +45,14 @@ fn all() -> Effects {
 impl Editor {
     /// Primary+Shift+R: reader view on, or off again.
     pub(super) fn toggle_reader(&mut self) -> Effects {
+        // Vim off, the selection goes either way: reader view has none,
+        // and the one before would come back under a cursor that moved.
+        if !self.cfg.vim && self.anchor.take().is_some() {
+            return self.toggle_reader().merge(Effects {
+                redraw: Redraw::All,
+                ..Effects::default()
+            });
+        }
         if self.reader {
             self.leave_reader()
         } else {

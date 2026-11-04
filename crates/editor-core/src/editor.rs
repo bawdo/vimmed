@@ -1505,24 +1505,25 @@ impl Editor {
 
     /// Undoes (or, with `redo`, redoes) up to `count` steps and puts the
     /// cursor where the last one says, on a grapheme where Normal mode may
-    /// rest. With nothing to undo it does nothing.
+    /// rest; with vim off, where it says unrested on an undo, and after the
+    /// text put back on a redo. With nothing to undo it does nothing.
     fn undo(&mut self, redo: bool, count: usize) -> Effects {
         if self.refuses_edits() {
             return Effects::default();
         }
-        let mut at = None;
+        let mut landed = None;
         for _ in 0..count.max(1) {
             let step = if redo {
-                self.history.redo(&mut self.buf)
+                self.history.redo_step(&mut self.buf)
             } else {
-                self.history.undo(&mut self.buf)
+                self.history.undo_step(&mut self.buf)
             };
             match step {
-                Some(p) => at = Some(p),
+                Some(l) => landed = Some(l),
                 None => break,
             }
         }
-        let Some(at) = at else {
+        let Some(landed) = landed else {
             return Effects::default();
         };
         // A step can touch many places, so rebuild and repaint it all.
@@ -1530,7 +1531,14 @@ impl Editor {
         if let Some(s) = self.search.as_mut() {
             s.refresh(&self.buf);
         }
-        self.cursor = vim::rest(&self.buf, at);
+        // Vim rests the cursor where Normal mode may. With vim off a
+        // cursor may sit at a line end, and a redo goes after the text it
+        // put back.
+        self.cursor = match (self.cfg.vim, redo) {
+            (true, _) => vim::rest(&self.buf, landed.at),
+            (false, false) => self.buf.clamp(landed.at),
+            (false, true) => self.buf.clamp(landed.end),
+        };
         self.goal = None;
         // Landing on the save point is the text on disk again.
         let dirty = !self.history.at_saved();
@@ -2354,6 +2362,27 @@ mod tests {
         assert_eq!(e.text(), "**b**");
         assert_eq!(fx.dirty, None);
         assert_eq!(e.reveal(0), Reveal::None);
+    }
+
+    #[test]
+    fn vim_off_read_only_and_reader_take_no_edits_nor_claim_insert() {
+        for which in ["read-only", "reader"] {
+            let (mut e, host) = crate::testkit::plain_with_host("- [ ] ab");
+            host.set_clipboard("XY");
+            match which {
+                "read-only" => e.read_only_chosen = true,
+                _ => e.reader = true,
+            }
+            crate::testkit::keys(
+                &mut e,
+                "<End>x<CR><BS><Del><Tab><S-Tab><C-Space><D-b><D-i><D-v><D-x><D-z>",
+            );
+            e.handle(Input::Text("typed".into()));
+            assert_eq!(e.text(), "- [ ] ab", "{which}");
+            assert!(!e.dirty(), "{which}");
+            assert_ne!(e.caret_shape(), CaretShape::Bar, "{which}");
+            assert_ne!(e.status().left, StatusLeft::Mode("INSERT"), "{which}");
+        }
     }
 
     #[test]

@@ -194,6 +194,11 @@ pub fn find_counter(at: usize, of: usize) -> String {
 /// disk: `o` is `:w!`, `r` is `:e!`, `c` cancels.
 pub const CHANGED_ON_DISK_PROMPT: &str = "file changed on disk: [o]verwrite [r]eload [c]ancel";
 
+/// With vim off, autosave found the file changed on disk and did not
+/// write: saving (Primary+S) asks what to keep. No `:` commands, as there
+/// are none with vim off.
+pub const CHANGED_ON_DISK_AUTOSAVE: &str = "file changed on disk, not saved; save to choose";
+
 /// The table picker's size label: `<columns> x <rows>`.
 pub fn table_size(cols: u32, rows: u32) -> String {
     format!("{cols} x {rows}")

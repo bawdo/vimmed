@@ -972,4 +972,141 @@ mod tests {
         assert_eq!(e.text(), "see [docs](u)[](v) here");
         assert_eq!(e.cursor(), pos(0, 14));
     }
+
+    #[test]
+    fn undo_at_a_line_end_leaves_the_cursor_there() {
+        // Vim's Normal-mode rest would put it one grapheme short.
+        let (mut e, _host) = plain_with_host("hello");
+        keys(&mut e, "<End> world<D-z>");
+        assert_eq!(e.text(), "hello");
+        assert_eq!(e.cursor(), pos(0, 5));
+        keys(&mut e, "!");
+        assert_eq!(e.text(), "hello!");
+    }
+
+    #[test]
+    fn redo_puts_the_cursor_after_the_redone_text() {
+        let (mut e, _host) = plain_with_host("hello");
+        keys(&mut e, "<End> world<D-z><D-S-z>");
+        assert_eq!(e.text(), "hello world");
+        assert_eq!(e.cursor(), pos(0, 11));
+        keys(&mut e, "!");
+        assert_eq!(e.text(), "hello world!");
+        // A run of Backspaces redone leaves the cursor where they ended.
+        keys(&mut e, "<BS><BS><D-z><D-S-z>");
+        assert_eq!(e.text(), "hello worl");
+        assert_eq!(e.cursor(), pos(0, 10));
+    }
+
+    /// A vim-off editor opened on the real file `name` holding `text` in a
+    /// temporary directory (the guard), with its state directory there
+    /// too and no recovery copy, and a handle on its host's clock.
+    fn open_plain(
+        text: &str,
+        autosave: bool,
+    ) -> (Editor, FakeHost, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, text).unwrap();
+        let state = StateDir::at(dir.path().join("state"));
+        let host = FakeHost::default();
+        let mut e = Editor::open_with_state(
+            OpenRequest {
+                path: path.clone(),
+                view: false,
+                display_name: None,
+            },
+            Config {
+                vim: false,
+                autosave,
+            },
+            Platform::Mac,
+            Box::new(host.clone()),
+            Some(&state),
+        );
+        e.discard_recovery();
+        (e, host, path, dir)
+    }
+
+    #[test]
+    fn close_save_over_changed_asks_o_r_c() {
+        let asks = |e: &Editor| e.prompt().as_deref() == Some(strings::CHANGED_ON_DISK_PROMPT);
+        // o writes over it, then the close goes ahead.
+        let (mut e, _host, path, _dir) = open_plain("hello\n", false);
+        keys(&mut e, "x");
+        fs::write(&path, "changed elsewhere\n").unwrap();
+        e.handle(Input::CloseRequested);
+        assert_eq!(e.prompt().as_deref(), Some(strings::UNSAVED_CHANGES_PROMPT));
+        let fx = keys(&mut e, "s");
+        assert_eq!(fx.close, None);
+        assert!(asks(&e));
+        assert_ne!(e.message(), Some(strings::CHANGED_ON_DISK_REFUSED));
+        let fx = keys(&mut e, "o");
+        assert_eq!(fx.close, Some(0));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "xhello\n");
+
+        // r reloads and stays open.
+        let (mut e, _host, path, _dir) = open_plain("hello\n", false);
+        keys(&mut e, "x");
+        fs::write(&path, "changed elsewhere\n").unwrap();
+        e.handle(Input::CloseRequested);
+        keys(&mut e, "s");
+        let fx = keys(&mut e, "r");
+        assert_eq!(fx.close, None);
+        assert_eq!(e.text(), "changed elsewhere\n");
+        assert!(!e.dirty());
+        assert_eq!(e.mode(), Mode::Insert);
+
+        // c cancels the close.
+        let (mut e, _host, path, _dir) = open_plain("hello\n", false);
+        keys(&mut e, "x");
+        fs::write(&path, "changed elsewhere\n").unwrap();
+        e.handle(Input::CloseRequested);
+        keys(&mut e, "s");
+        let fx = keys(&mut e, "c");
+        assert_eq!(fx.close, None);
+        assert_eq!(e.prompt(), None);
+        assert_eq!(e.mode(), Mode::Insert);
+        assert!(e.dirty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "changed elsewhere\n");
+    }
+
+    #[test]
+    fn autosave_over_changed_says_so_without_vim_commands() {
+        let (mut e, host, path, _dir) = open_plain("hello\n", true);
+        keys(&mut e, "x");
+        fs::write(&path, "changed elsewhere\n").unwrap();
+        host.state().now = 5_000_000_000;
+        e.handle(Input::Tick {
+            now_ns: 5_000_000_000,
+        });
+        assert_eq!(e.prompt(), None);
+        assert_eq!(e.message(), Some(strings::CHANGED_ON_DISK_AUTOSAVE));
+        assert!(!strings::CHANGED_ON_DISK_AUTOSAVE.contains(':'));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "changed elsewhere\n");
+    }
+
+    #[test]
+    fn a_table_key_over_a_selection_only_moves() {
+        let t = "| h1 | h2 |\n| --- | --- |\n| a | b |";
+        let (mut e, _host) = plain_with_host(t);
+        keys(&mut e, "<Down><Down><Right><Right><S-Right><Tab>");
+        assert_eq!(e.text(), t);
+        assert_eq!(e.cursor(), pos(2, 6));
+        assert_eq!(e.selection(), None);
+        assert_eq!(e.history().undo_len(), 0);
+    }
+
+    #[test]
+    fn reader_view_drops_the_selection() {
+        let (mut e, _host) = plain_with_host("abc");
+        keys(&mut e, "<S-Right><D-S-r>");
+        assert!(e.reader());
+        assert_eq!(e.selection(), None);
+        keys(&mut e, "<D-S-r>");
+        assert!(!e.reader());
+        assert_eq!(e.selection(), None);
+        keys(&mut e, "x");
+        assert_eq!(e.text(), "axbc");
+    }
 }

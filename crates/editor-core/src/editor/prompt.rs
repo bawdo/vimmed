@@ -30,9 +30,10 @@ pub(super) enum Ask {
     /// At open, a window that is gone left a recovery copy newer than the
     /// file (`recovering`).
     Recovery,
-    /// With vim off, Primary+S found the file changed on disk: `o` is
-    /// `:w!`, `r` is `:e!`.
-    ChangedOnDisk,
+    /// With vim off, Primary+S (or the close prompt's `s`, `closing`)
+    /// found the file changed on disk: `o` is `:w!` (then the close goes
+    /// ahead), `r` is `:e!` (the window stays open).
+    ChangedOnDisk { closing: bool },
 }
 
 impl Ask {
@@ -41,7 +42,7 @@ impl Ask {
             Ask::Close => strings::UNSAVED_CHANGES_PROMPT.to_owned(),
             Ask::AlreadyOpen { pid } => strings::already_open(pid),
             Ask::Recovery => strings::RECOVERY_PROMPT.to_owned(),
-            Ask::ChangedOnDisk => strings::CHANGED_ON_DISK_PROMPT.to_owned(),
+            Ask::ChangedOnDisk { .. } => strings::CHANGED_ON_DISK_PROMPT.to_owned(),
         }
     }
 
@@ -49,7 +50,7 @@ impl Ask {
     /// they cannot be dismissed into editing without a choice.
     fn esc(self) -> Option<char> {
         match self {
-            Ask::Close | Ask::ChangedOnDisk => Some('c'),
+            Ask::Close | Ask::ChangedOnDisk { .. } => Some('c'),
             Ask::AlreadyOpen { .. } | Ask::Recovery => None,
         }
     }
@@ -123,6 +124,15 @@ impl Editor {
             return Effects::default();
         };
         match (p.ask, c) {
+            // With vim off, a file changed on disk asks again
+            // (`nonvim_keys`).
+            (Ask::Close, 's') if !self.cfg.vim => {
+                let fx = self.end_prompt(p);
+                match self.plain_write(true) {
+                    (true, w) => fx.merge(w).merge(self.close(0)),
+                    (false, w) => fx.merge(w),
+                }
+            }
             (Ask::Close, 's') => {
                 let fx = self.end_prompt(p);
                 match self.write_step(false) {
@@ -134,12 +144,15 @@ impl Editor {
                 let fx = self.end_prompt(p);
                 fx.merge(self.close(0))
             }
-            (Ask::Close | Ask::ChangedOnDisk, 'c') => self.end_prompt(p),
-            (Ask::ChangedOnDisk, 'o') => {
+            (Ask::Close | Ask::ChangedOnDisk { .. }, 'c') => self.end_prompt(p),
+            (Ask::ChangedOnDisk { closing }, 'o') => {
                 let fx = self.end_prompt(p);
-                fx.merge(self.write_step(true).1)
+                match self.write_step(true) {
+                    (true, w) if closing => fx.merge(w).merge(self.close(0)),
+                    (_, w) => fx.merge(w),
+                }
             }
-            (Ask::ChangedOnDisk, 'r') => {
+            (Ask::ChangedOnDisk { .. }, 'r') => {
                 let fx = self.end_prompt(p);
                 fx.merge(self.reload())
             }
