@@ -102,8 +102,7 @@ impl Editor {
             ExCmd::CQuit => self.close(1),
             ExCmd::ReloadForce => self.reload(),
             ExCmd::Help => self.open_help(),
-            // TODO(Task 37): `:table` inserts a table or opens the picker.
-            ExCmd::Table(_) => Effects::default(),
+            ExCmd::Table(size) => self.table_ex(size),
             ExCmd::Substitute(sub) => self.substitute(sub),
         }
     }

@@ -1,6 +1,7 @@
 //! The list keys (`crate::lists`): Enter, Tab and Shift+Tab in Insert (and
 //! with vim off), Tab and Shift+Tab in Normal, and the task toggles, `gx`
-//! and Ctrl+Space.
+//! and Ctrl+Space. In a table, Tab, Shift+Tab and Insert-mode Enter go to
+//! `table_keys` instead.
 //!
 //! The plan is made from the editor's own blocks, which every edit and
 //! undo brings up to date before the next key, so they always describe the
@@ -37,10 +38,14 @@ impl Editor {
         }
     }
 
-    /// A list key in Insert, or with vim off: its plan, or what the key
-    /// does on a plain line (`operator::insert_list_key`). The Insert
-    /// session records the key, so `.` presses it again.
+    /// A list key in Insert, or with vim off: in a table the move between
+    /// cells (`table_keys`), else its plan, or what the key does on a
+    /// plain line (`operator::insert_list_key`). The Insert session
+    /// records the key, so `.` presses it again.
     pub(super) fn insert_list_key(&mut self, key: ListKey) -> Effects {
+        if let Some(fx) = self.table_nav(key) {
+            return fx;
+        }
         if self.refuses_edits() {
             return Effects::default();
         }
@@ -52,9 +57,15 @@ impl Editor {
         })
     }
 
-    /// A list key in Normal (`Step::List`). Where it does not apply it does
-    /// nothing, and is not the change `.` repeats.
+    /// A list key in Normal (`Step::List`). In a table, Tab and Shift+Tab
+    /// move between cells (`table_keys`), not a change `.` repeats.
+    /// Where it does not apply it does nothing, and is not the change `.`
+    /// repeats either.
     pub(super) fn normal_list_key(&mut self, key: ListKey) -> Effects {
+        if let Some(fx) = self.table_nav(key) {
+            self.vim.discard();
+            return fx;
+        }
         let plan = if self.refuses_edits() {
             None
         } else {

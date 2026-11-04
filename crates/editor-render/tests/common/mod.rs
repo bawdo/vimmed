@@ -19,6 +19,7 @@ use editor_core::markdown::{
     ordered_display, parse_line,
 };
 use editor_core::platform::Platform;
+use editor_core::tables::TablePicker;
 use editor_core::tokens::{Theme, TokenId, Tokens};
 use editor_core::view_model::{CaretShape, StatusLeft};
 use editor_render::fonts::{FontPaths, FontSet};
@@ -74,6 +75,8 @@ pub struct Fake {
     pub preedit: Option<(String, usize)>,
     /// The help overlay's first row, while it shows.
     pub help: Option<usize>,
+    /// The table picker, while it shows.
+    pub picker: Option<TablePicker>,
 }
 
 impl Fake {
@@ -100,6 +103,7 @@ impl Fake {
             caret: CaretShape::Bar,
             preedit: None,
             help: None,
+            picker: None,
         }
     }
 
@@ -227,6 +231,9 @@ impl ViewSource for Fake {
     }
     fn help(&self) -> Option<usize> {
         self.help
+    }
+    fn picker(&self) -> Option<&TablePicker> {
+        self.picker.as_ref()
     }
 }
 

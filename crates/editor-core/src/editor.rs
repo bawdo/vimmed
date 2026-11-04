@@ -57,6 +57,11 @@
 //! holding it asks the already-open prompt, and its `o` answer makes the
 //! document read-only, refusing edits as reader view does.
 //!
+//! Tables (`table_keys`): Tab, Shift+Tab and Insert-mode Enter move
+//! between cells, the `t` commands edit rows and columns, and `:table`
+//! inserts a table or opens the grid picker, which takes every key while
+//! it shows.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
@@ -68,6 +73,7 @@ mod list_keys;
 mod locking;
 mod prompt;
 mod reader;
+mod table_keys;
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -91,6 +97,7 @@ use crate::search::{self, Hit, Search};
 use crate::status::{self, Mode};
 use crate::strings;
 use crate::substitute::ConfirmSession;
+use crate::tables::TablePicker;
 use crate::tokens::{Theme, Tokens};
 use crate::undo::History;
 use crate::view_model::{
@@ -236,6 +243,8 @@ pub struct Editor {
     /// Why the lock record could not be written, held back while the
     /// already-open prompt asks (`locking`).
     lock_warning: Option<String>,
+    /// The grid picker `:table` opens, while it shows (`table_keys`).
+    picker: Option<TablePicker>,
 }
 
 impl Editor {
@@ -374,6 +383,7 @@ impl Editor {
             lock: None,
             read_only_chosen: false,
             lock_warning: None,
+            picker: None,
         }
     }
 
@@ -451,6 +461,9 @@ impl Editor {
             Input::CloseRequested => self.close(0),
             // TODO(Task 34): write the recovery copy before closing.
             Input::Signal(s) => self.close(s.exit_code()),
+            // TODO(Task 38): while the table picker shows, hover selects
+            // the cell under the pointer (`TablePicker::select`, the cell
+            // from `DocView::picker_cell_at`) and a click inserts it.
             Input::Mouse(_) | Input::Scroll { .. } | Input::Focus(_) | Input::Appearance(_) => {
                 Effects::default()
             }
@@ -468,6 +481,16 @@ impl Editor {
         if self.help.is_some() {
             return text.chars().fold(Effects::default(), |fx, c| {
                 fx.merge(self.help_key(KeyEvent {
+                    key: Key::Char(c),
+                    mods: Mods::default(),
+                    time_ns: 0,
+                }))
+            });
+        }
+        // So does the table picker.
+        if self.picker.is_some() {
+            return text.chars().fold(Effects::default(), |fx, c| {
+                fx.merge(self.picker_key(KeyEvent {
                     key: Key::Char(c),
                     mods: Mods::default(),
                     time_ns: 0,
@@ -637,6 +660,10 @@ impl Editor {
         // So does the help overlay.
         if self.help.is_some() {
             return self.help_key(k);
+        }
+        // And the table picker (`table_keys`).
+        if self.picker.is_some() {
+            return self.picker_key(k);
         }
         let ctrl_c = self.cfg.vim
             && k.key == Key::Char('c')
@@ -821,6 +848,21 @@ impl Editor {
     }
 
     fn normal_step(&mut self, k: KeyEvent) -> Effects {
+        // `t` in a table starts a table command (`table_keys`), which
+        // only the editor, holding the blocks, can tell. Where edits are
+        // refused it is no prefix (reader view's keys go on scrolling).
+        let plain_t = k.key == Key::Char('t') && k.mods == Mods::default();
+        if plain_t
+            && self.mode == Mode::Normal
+            && !self.refuses_edits()
+            && crate::tables::table_at(&self.blocks, self.cursor.line).is_some()
+            && self.vim.table_prefix()
+        {
+            return Effects {
+                redraw: Redraw::Status,
+                ..Effects::default()
+            };
+        }
         let cur = self.vim_cursor();
         let step = match self.shown_selection().filter(|_| self.visual()) {
             Some(sel) => self.vim.visual_key(&k, &self.buf, cur, sel),
@@ -924,6 +966,7 @@ impl Editor {
                 self.repeat(count)
             }
             Step::List(key) => self.normal_list_key(key),
+            Step::Table(key) => self.table_command(key),
         }
     }
 
@@ -1785,6 +1828,9 @@ impl ViewSource for Editor {
     }
     fn help(&self) -> Option<usize> {
         self.help
+    }
+    fn picker(&self) -> Option<&TablePicker> {
+        self.picker.as_ref()
     }
     fn selection(&self) -> Option<Selection> {
         self.shown_selection()

@@ -155,3 +155,8 @@ pub const LINK_PROMPT: &str = "link: ";
 pub fn table_size(cols: u32, rows: u32) -> String {
     format!("{cols} x {rows}")
 }
+
+/// `:table N M` past the largest table it makes (ruling R50).
+pub fn table_too_big(max_cols: u32, max_rows: u32) -> String {
+    format!("E474: A table has at most {max_cols} columns and {max_rows} rows")
+}
