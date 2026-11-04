@@ -374,15 +374,14 @@ mod tests {
     #[test]
     fn a_named_write_the_store_cannot_make_warns_and_still_works_here() {
         use crate::view_model::{MsgKind, StatusLeft};
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let locked = tmp.path().join("locked");
         std::fs::create_dir(&locked).unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // A regular file sits where the state dir must be made, so creation fails even for root.
+        std::fs::write(locked.join("state"), b"").unwrap();
         let (mut e, host) = ed_with_state("hello", &StateDir::at(locked.join("state")));
         host.state().now = 1_000;
         let fx = keys(&mut e, "\"ayy");
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             e.status().left,
             StatusLeft::Message {
