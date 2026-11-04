@@ -120,7 +120,9 @@ mod tests {
     use crate::testkit::{FakeHost, FileCall, ViewSource, ed_with_files, keys};
     use crate::view_model::{MsgKind, StatusLeft};
 
-    /// An editor opened on `path`, with a host whose clock reads 1000.
+    /// An editor opened on `path`, with a host whose clock reads 1000. Its
+    /// lock record goes in a temporary state directory (shared by these
+    /// tests; each file has its own record, gone when the editor is).
     fn open(path: &Path) -> Editor {
         let host = FakeHost::default();
         host.state().now = 1_000;
@@ -129,7 +131,16 @@ mod tests {
             view: false,
             display_name: None,
         };
-        Editor::open_with_state(req, Config::default(), Platform::Mac, Box::new(host), None)
+        let state = crate::file::StateDir::at(
+            std::env::temp_dir().join(format!("abc_def-saver-state-{}", std::process::id())),
+        );
+        Editor::open_with_state(
+            req,
+            Config::default(),
+            Platform::Mac,
+            Box::new(host),
+            Some(&state),
+        )
     }
 
     fn colon(e: &mut Editor, typed: &str) -> Effects {

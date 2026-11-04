@@ -359,12 +359,14 @@ pub fn open_editor(dir: &Path, text: &str, view: bool) -> Editor {
         view,
         display_name: None,
     };
+    // The lock record goes in `dir`, never the real state directory.
+    let state = editor_core::file::StateDir::at(dir.join("state"));
     Editor::open_with_state(
         req,
         Config::default(),
         Platform::Mac,
         Box::new(NoHost),
-        None,
+        Some(&state),
     )
 }
 

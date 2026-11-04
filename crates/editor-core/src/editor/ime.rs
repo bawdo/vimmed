@@ -28,10 +28,14 @@ pub(super) fn normalise_newlines(text: String) -> String {
 impl Editor {
     /// True while an input method may compose: Insert (or vim off), the
     /// command line and a search. Never in reader mode, and never while a
-    /// prompt asks: its answers are single keys.
+    /// prompt asks: its answers are single keys. Opened read-only, only
+    /// the command line and a search compose: the document takes no text.
     pub fn ime_active(&self) -> bool {
         if self.reader || self.mode == Mode::Prompt {
             return false;
+        }
+        if self.read_only_chosen {
+            return self.cfg.vim && matches!(self.mode, Mode::Command | Mode::Search);
         }
         !self.cfg.vim || matches!(self.mode, Mode::Insert | Mode::Command | Mode::Search)
     }
@@ -67,12 +71,14 @@ impl Editor {
     /// its text (newlines normalised, the same mode guard). AppKit ends a
     /// composition this way (`unmarkText` on an input source switch or
     /// focus loss). Nothing without a composition; outside an input mode a
-    /// stray one is dropped, never typed.
+    /// stray one is dropped, never typed. While a prompt asks, it is
+    /// committed text there: one char answers, anything longer is dropped
+    /// (`prompt`).
     pub fn commit_preedit(&mut self) -> Effects {
         let Some((text, _)) = self.preedit.clone() else {
             return Effects::default();
         };
-        if !self.ime_active() {
+        if !self.ime_active() && self.mode != Mode::Prompt {
             return self.clear_preedit();
         }
         self.handle(Input::Text(text))

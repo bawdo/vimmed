@@ -111,8 +111,12 @@ impl Editor {
     /// Writes the document through the `Saver`: true when it was written,
     /// which leaves the buffer clean, records the save point undo comes
     /// back to and says `written`. A failed or refused write says why, as
-    /// an Error.
+    /// an Error. A document opened read-only (`locking`) is never
+    /// written, with or without `force`.
     pub fn write(&mut self, force: bool) -> bool {
+        if self.refuse_write() {
+            return false;
+        }
         match self.saver.write(&self.buf.to_text(), force) {
             Ok(()) => {
                 self.dirty = false;
@@ -192,9 +196,11 @@ impl Editor {
         })
     }
 
-    /// Closes the window, exiting with `code`, and tells the `Saver`.
+    /// Closes the window, exiting with `code`, tells the `Saver` and lets
+    /// the lock record go (`locking`).
     pub fn close(&mut self, code: i32) -> Effects {
         self.saver.close(code);
+        self.release_lock();
         Effects {
             close: Some(code),
             ..Effects::default()
@@ -247,7 +253,7 @@ impl Editor {
         let fx = self.set_last_search(&sub.pattern);
         fx.merge(if sub.flags.n {
             self.count_matches(&sub, lines)
-        } else if self.reader {
+        } else if self.refuses_edits() {
             Effects::default()
         } else if sub.flags.c {
             self.start_confirm(&sub, lines)

@@ -23,7 +23,7 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 /// [`Lock::release`] or when the lock is dropped.
 #[derive(Debug)]
 pub struct Lock {
-    record: Option<PathBuf>,
+    record: PathBuf,
 }
 
 #[derive(Debug)]
@@ -33,6 +33,10 @@ pub enum LockOutcome {
     /// Another live process (`pid`) holds the file. We still hold our own
     /// record, so "edit anyway" is visible to a third window.
     HeldBy { pid: u32, lock: Lock },
+    /// No record could be written (the state directory could not be made,
+    /// or the record could not be written), so no lock is held and no
+    /// other window will see this one. Opening goes on regardless.
+    Unavailable(std::io::Error),
 }
 
 impl Lock {
@@ -47,8 +51,10 @@ impl Lock {
     ///
     /// The caller skips locking when there is no [`StateDir`] (no `$HOME`
     /// and no `$XDG_STATE_HOME`); what the user sees then is decided by the
-    /// editor wiring, not here. I/O failures are not fatal: if the record
-    /// cannot be written the lock is simply inert.
+    /// editor wiring, not here. When the state directory cannot be made or
+    /// our record cannot be written, the outcome is
+    /// [`LockOutcome::Unavailable`] with the reason, whether or not another
+    /// holder was seen: no lock is held then.
     ///
     /// The reported holder is never our own pid, even when a record of a
     /// recycled pid of ours is lying about.
@@ -57,7 +63,9 @@ impl Lock {
         let hash = format!("{:016x}", fnv1a64(abs.to_string_lossy().as_bytes()));
         let me = std::process::id();
         let dir = state.locks();
-        let _ = state.ensure();
+        if let Err(e) = state.ensure() {
+            return LockOutcome::Unavailable(e);
+        }
 
         let mut holder: Option<u32> = None;
         if let Ok(entries) = fs::read_dir(&dir) {
@@ -79,7 +87,11 @@ impl Lock {
 
         let record = dir.join(format!("{hash}-{me}.lock"));
         let body = format!("{me}\n{}\n", abs.display());
-        let record = fs::write(&record, body).ok().map(|()| record);
+        if let Err(e) = fs::write(&record, body) {
+            // A half-written record is no record.
+            let _ = fs::remove_file(&record);
+            return LockOutcome::Unavailable(e);
+        }
         let lock = Lock { record };
         match holder {
             Some(pid) => LockOutcome::HeldBy { pid, lock },
@@ -93,9 +105,7 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        if let Some(record) = self.record.take() {
-            let _ = fs::remove_file(record);
-        }
+        let _ = fs::remove_file(&self.record);
     }
 }
 
@@ -317,6 +327,20 @@ mod tests {
             Lock::acquire(&state, &f),
             LockOutcome::Acquired(_)
         ));
+    }
+
+    #[test]
+    fn an_unwritable_state_directory_is_unavailable() {
+        let d = Dir::new("unwritable");
+        let f = d.file("a.md");
+        // A regular file sits where the state directory must be made, so
+        // creating it fails even for root.
+        fs::write(d.0.join("state"), "x").unwrap();
+        let outcome = Lock::acquire(&d.state(), &f);
+        assert!(
+            matches!(outcome, LockOutcome::Unavailable(_)),
+            "{outcome:?}"
+        );
     }
 
     #[test]

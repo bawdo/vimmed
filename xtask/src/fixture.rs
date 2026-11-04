@@ -175,7 +175,9 @@ mod tests {
             .position(|l| l.contains("](img1.png)"))
             .expect("first image");
 
-        let editor = Editor::open(
+        // The lock record goes in `dir`, never the real state directory.
+        let state = editor_core::file::StateDir::at(dir.join("state"));
+        let editor = Editor::open_with_state(
             OpenRequest {
                 path: dir.join("test.md"),
                 view: false,
@@ -184,6 +186,7 @@ mod tests {
             Config::default(),
             Platform::current(),
             Box::new(NoHost),
+            Some(&state),
         );
         let fonts_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/editor-render/tests/fonts");

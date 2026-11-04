@@ -81,6 +81,29 @@ pub const NOT_UTF8_REFUSED: &str = "E: not valid UTF-8; refusing to write";
 /// Asked when the window is closed with unsaved changes.
 pub const UNSAVED_CHANGES_PROMPT: &str = "unsaved changes: [s]ave [d]iscard [c]ancel";
 
+/// Asked at open when another live window (process `pid`) has the file
+/// open.
+pub fn already_open(pid: u32) -> String {
+    format!("already open in another window (pid {pid}): [o]pen read-only [e]dit anyway [q]uit")
+}
+
+/// The warning beside the file name once `o` opened the document
+/// read-only.
+pub const READ_ONLY: &str = "read-only";
+
+/// `:w`, `:w!` or Primary+S on a document opened read-only.
+pub const READ_ONLY_REFUSED: &str = "E: opened read-only; refusing to write";
+
+/// Shown once at open when no lock record could be taken: the file opens
+/// as usual, but another window will not see it is open here.
+pub fn lock_unavailable(reason: &str) -> String {
+    format!("lock unavailable: {reason}")
+}
+
+/// Why no lock record was taken when the environment names no state
+/// directory (no `$XDG_STATE_HOME` and no `$HOME`).
+pub const NO_STATE_DIRECTORY: &str = "no state directory";
+
 /// A command line that is no command.
 pub fn not_a_command(input: &str) -> String {
     format!("E492: Not a command: {input}")
