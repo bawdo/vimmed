@@ -53,7 +53,8 @@ use crate::images::{ImageSlot, ImageState, Images, Scaled};
 use crate::layout::{LaidLine, RectF, StyledSpan, TextLayout};
 use crate::paint::{
     Corners, HangPrefix, apply_classes, blend, blit, code_ranges, content_offset, fence_lang, fill,
-    fill_rounded, hang_prefix, prefix_text, span_for, src_to_display_clamped, styled_line,
+    fill_rounded, hang_prefix, prefix_text, span_for, splice_preedit, src_to_display_clamped,
+    styled_line,
 };
 use crate::table_paint::{self, TableGeom};
 
@@ -203,6 +204,9 @@ struct LineSlot {
     code: Option<CodeLine>,
     /// For a rendered table row: the table's first line.
     table: Option<usize>,
+    /// An input method's composition laid into the text at the caret: its
+    /// display range and its cursor (bytes into it).
+    preedit: Option<(Range<usize>, usize)>,
     overlay: Overlay,
 }
 
@@ -222,6 +226,7 @@ impl LineSlot {
             code_label: None,
             code: None,
             table: None,
+            preedit: None,
             overlay: Overlay::default(),
         }
     }
@@ -235,6 +240,7 @@ impl LineSlot {
         self.code_label = None;
         self.code = None;
         self.table = None;
+        self.preedit = None;
         self.overlay = Overlay::default();
         // The resampled copy is box-sized: keep memory bounded by the screen.
         // The image line itself stays, so its height and a later decode survive.
@@ -757,7 +763,9 @@ impl DocView {
                 let (Some(cl), Some(cached)) = (&slot.code, &slot.text) else {
                     continue;
                 };
-                if cl.id != id {
+                // The composition is not in the base spans: the line takes
+                // its colour at its next layout.
+                if cl.id != id || slot.preedit.is_some() {
                     continue;
                 }
                 let classes = self.code.line_classes(id, cl.k);
@@ -992,6 +1000,7 @@ impl DocView {
         let slot = &mut self.lines[i];
         slot.code = None;
         slot.table = None;
+        slot.preedit = None;
         slot.bars = 0;
         slot.prefix_dx = 0.0;
 
@@ -1071,7 +1080,7 @@ impl DocView {
         let inset = if is_code { 2.0 * code_pad } else { offset };
         let width = (g.col_w - inset).max(1.0);
 
-        let (text, mut spans) = styled_line(line, &d, t, s);
+        let (mut text, mut spans) = styled_line(line, &d, t, s);
         let content = !d.spans.is_empty()
             && d.spans
                 .iter()
@@ -1083,6 +1092,12 @@ impl DocView {
             let base = spans.clone();
             spans = apply_classes(&text, spans, &classes, t);
             slot.code = Some(CodeLine { id, k, base });
+        }
+        let cursor = src.cursor();
+        if let Some((pre, k)) = src.preedit().filter(|_| cursor.line == i && !src.reader()) {
+            let at = src_to_display_clamped(&d, cursor.col);
+            let c = t.color(TokenId::ColorPreeditUnderline);
+            slot.preedit = Some((splice_preedit(&mut text, &mut spans, at, pre, c), k));
         }
         let laid = lay(layout, &mut slot.text, text, spans, width);
         slot.height = laid.height.ceil();
@@ -1363,8 +1378,14 @@ impl DocView {
 
         let x0 = cx + slot.offset;
         let laid = &text.laid;
+        // Display bytes past the composition sit after it in the layout.
+        let shift = |b: usize, from_end: bool| match &slot.preedit {
+            Some((p, _)) if b > p.start || (b == p.start && !from_end) => b + p.len(),
+            _ => b,
+        };
         let mut highlight = |r: &Range<usize>, token: TokenId| {
-            for rect in laid.range_rects(r.clone()) {
+            let r = shift(r.start, false)..shift(r.end, true);
+            for rect in laid.range_rects(r) {
                 let c = t.color(token);
                 fill(pix, x0 + rect.x, top + rect.y, rect.w, rect.h, c, &clip);
             }
@@ -1388,6 +1409,11 @@ impl DocView {
             .as_ref()
             .map(|(c, _)| (cx - gap - c.laid.width().ceil()).max(0.0));
         let caret_rect = slot.overlay.caret.map(|c| {
+            // Inside a composition, at its cursor.
+            let caret_at = match &slot.preedit {
+                Some((p, k)) => p.start + k,
+                None => src_to_display_clamped(d, c.col),
+            };
             // In the hung prefix, or the main text.
             let (laid_c, x, from, to) = match (&slot.hung, hung_x) {
                 (Some((h, hp)), Some(hx)) if c.col < hp.end => (
@@ -1399,12 +1425,12 @@ impl DocView {
                 _ => (
                     laid,
                     x0,
-                    src_to_display_clamped(d, c.col),
-                    src_to_display_clamped(d, c.end),
+                    caret_at,
+                    shift(src_to_display_clamped(d, c.end), true),
                 ),
             };
             // On the main text's row, wherever it sits across.
-            let main = laid.caret(src_to_display_clamped(d, c.col));
+            let main = laid.caret(caret_at);
             let at = laid_c.caret(from);
             let w = match c.shape {
                 CaretShape::Block => laid_c

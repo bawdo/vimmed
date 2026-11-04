@@ -3,8 +3,9 @@ mod common;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use common::{Counting, Fake, Geom, H_PT, W_PT, cosmic, view};
+use common::{Counting, Fake, Geom, H_PT, W_PT, cosmic, editor, press, view};
 use editor_core::buffer::Pos;
+use editor_core::input::{Input, Key};
 use editor_core::tokens::{Theme, TokenId, Tokens};
 use editor_render::damage::Damage;
 use editor_render::frame::{Frame, copy_rows_bgra};
@@ -188,6 +189,110 @@ fn caret_rect_follows_the_cursor() {
     src.reader = true;
     v.paint_all(&src);
     assert_eq!(v.caret_rect(), None, "no caret in reader mode");
+}
+
+#[test]
+fn preedit_paints_underlined_at_the_caret() {
+    let t = with(&[("color.preedit.underline", "#00FF00")]);
+    let g = Geom::new(&t, 2.0);
+    let mut src = Fake::new(&["ab cd"], t.clone());
+    src.cursor = Pos { line: 0, col: 2 };
+    let mut v = view(&t, 2.0);
+    let green = |v: &DocView| {
+        let f = v.frame();
+        let rows = g.line_rows(0);
+        (rows.start..rows.end)
+            .flat_map(|y| (0..f.width_px).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = f.pixmap.pixel(x, y).unwrap();
+                p.green() > 200 && p.red() < 60 && p.blue() < 60
+            })
+            .count()
+    };
+    v.paint_all(&src);
+    assert_eq!(green(&v), 0, "no composition: nothing in its colour");
+    let plain = v.caret_rect().unwrap();
+
+    src.preedit = Some(("xyz".into(), 2));
+    v.paint_lines(&src, 0..1);
+    assert!(green(&v) > 50, "the composition paints in its colour");
+    let spans = v.styled_spans(0).unwrap();
+    let pre = spans
+        .iter()
+        .find(|s| s.range == (2..5))
+        .expect("a span over the composition");
+    assert!(pre.underline);
+    assert_eq!(pre.color, t.color(TokenId::ColorPreeditUnderline));
+    // The caret sits inside the composition, at its cursor.
+    let inside = v.caret_rect().unwrap();
+    assert!(inside.x > plain.x, "{} > {}", inside.x, plain.x);
+
+    // Gone again: the line paints as before.
+    src.preedit = None;
+    v.paint_lines(&src, 0..1);
+    assert_eq!(green(&v), 0);
+    assert_eq!(v.caret_rect().unwrap().x, plain.x);
+}
+
+#[test]
+fn preedit_paints_underlined_at_the_caret_in_a_table_row() {
+    // The real editor typing into a data cell of a rendered table. The
+    // cursor's row shows raw (its source, not the grid), so the composition
+    // goes into that line like any other.
+    let dir = std::env::temp_dir().join(format!("preedit-table-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = "Intro\n| a | x |\n|---|---|\n| ccc | xx |\n| e | x |\n\nafter";
+    let mut ed = editor(&dir, text);
+    let t = Tokens::defaults(Theme::Light);
+    let mut v = view(&t, 2.0);
+    v.paint_all(&ed);
+    for k in [
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Char('l'),
+        Key::Char('l'),
+    ] {
+        press(&mut ed, &mut v, k);
+    }
+    press(&mut ed, &mut v, Key::Char('i'));
+    let plain = v.caret_rect().expect("a caret in the table row");
+    // The composition's colour, counted across the caret's row. The caret
+    // (`color.caret`) may share it, so count against the row before.
+    let want = t.color(TokenId::ColorPreeditUnderline);
+    let tinted = |v: &DocView| {
+        let f = v.frame();
+        let (y0, y1) = (
+            (plain.y * 2.0) as u32,
+            ((plain.y + plain.h) * 2.0).ceil() as u32,
+        );
+        (y0..y1)
+            .flat_map(|y| (0..f.width_px).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = f.pixmap.pixel(x, y).unwrap();
+                p.red().abs_diff(want.r) < 8
+                    && p.green().abs_diff(want.g) < 8
+                    && p.blue().abs_diff(want.b) < 8
+            })
+            .count()
+    };
+    let before = tinted(&v);
+    let fx = ed.handle(Input::Preedit {
+        text: "xyz".into(),
+        cursor: 3,
+    });
+    match fx.redraw {
+        editor_core::effects::Redraw::Lines(r) => v.paint_lines(&ed, r),
+        other => panic!("the composition repaints its line, not {other:?}"),
+    }
+    assert!(
+        tinted(&v) > before + 50,
+        "the composition paints in its colour"
+    );
+    let spans = v.styled_spans(3).unwrap();
+    assert!(spans.iter().any(|sp| sp.underline && sp.color == want));
+    assert!(v.caret_rect().unwrap().x > plain.x, "the caret follows it");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -1,18 +1,46 @@
 //! The two Objective-C classes: the layer-hosting document view and the
 //! application and window delegate. Both only forward to `app`.
+//!
+//! The view is an `NSTextInputClient`. While the editor takes text, a key
+//! that could type goes through `interpretKeyEvents:`, so dead keys and
+//! input methods compose (`setMarkedText:`) and commit (`insertText:`);
+//! every other key, and every key in Normal and Visual, is mapped directly
+//! (`input::routes_to_ime`). The composition lives in the editor; the view
+//! only reports it.
 
+use editor_core::input::Input;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent, NSView, NSWindow,
-    NSWindowDelegate,
+    NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent, NSTextInputClient,
+    NSView, NSWindow, NSWindowDelegate,
 };
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSArray, NSNotification, NSRect, NSURL};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSPoint,
+    NSRange, NSRect, NSString, NSUInteger, NSURL,
+};
 use objc2_quartz_core::{CADisplayLink, CALayer, kCAGravityTopLeft};
 
-use crate::{app, router};
+use crate::{app, input, router};
+
+/// The text in an `insertText:` or `setMarkedText:` argument, which is an
+/// `NSString` or an `NSAttributedString`.
+fn text_of(obj: &AnyObject) -> String {
+    if let Some(a) = obj.downcast_ref::<NSAttributedString>() {
+        a.string().to_string()
+    } else if let Some(s) = obj.downcast_ref::<NSString>() {
+        s.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// `NSNotFound` as an unsigned location.
+fn not_found() -> NSUInteger {
+    NSNotFound as NSUInteger
+}
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -38,7 +66,13 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            app::on_key(event);
+            if app::takes_ime(event) {
+                app::begin_ime_key(event);
+                self.interpretKeyEvents(&NSArray::from_slice(&[event]));
+                app::end_ime_key();
+            } else {
+                app::on_key(event);
+            }
         }
 
         #[unsafe(method(tick:))]
@@ -54,6 +88,78 @@ define_class!(
         #[unsafe(method(wake:))]
         fn wake(&self, _sender: Option<&AnyObject>) {
             app::on_wake();
+        }
+    }
+
+    unsafe impl NSObjectProtocol for DocumentView {}
+
+    unsafe impl NSTextInputClient for DocumentView {
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text(&self, string: &AnyObject, _replacement: NSRange) {
+            app::on_ime(Input::Text(text_of(string)));
+        }
+
+        /// A key the input method passed on (it composed nothing).
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command(&self, _selector: Sel) {
+            app::on_ime_command();
+        }
+
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, _replacement: NSRange) {
+            let text = text_of(string);
+            let cursor = input::utf16_to_byte(&text, selected.location);
+            app::on_ime(Input::Preedit { text, cursor });
+        }
+
+        /// Accept the composition as typed (an input source switch, focus
+        /// loss). After `insertText:` there is none left, so nothing.
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            app::on_unmark();
+        }
+
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            NSRange::new(not_found(), 0)
+        }
+
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            match app::marked_utf16_len() {
+                Some(n) => NSRange::new(0, n),
+                None => NSRange::new(not_found(), 0),
+            }
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            app::marked_utf16_len().is_some()
+        }
+
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        fn attributed_substring(
+            &self,
+            _range: NSRange,
+            _actual: *mut NSRange,
+        ) -> Option<Retained<NSAttributedString>> {
+            None
+        }
+
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn valid_attributes(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::new()
+        }
+
+        /// The caret, on screen: where the candidate window goes.
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, _range: NSRange, _actual: *mut NSRange) -> NSRect {
+            app::caret_screen_rect(self)
+        }
+
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index(&self, _point: NSPoint) -> NSUInteger {
+            not_found()
         }
     }
 );

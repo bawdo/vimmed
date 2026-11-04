@@ -70,6 +70,8 @@ pub struct Fake {
     pub warnings: Vec<&'static str>,
     pub showcmd: String,
     pub caret: CaretShape,
+    /// An input method's composition at the cursor and its cursor.
+    pub preedit: Option<(String, usize)>,
 }
 
 impl Fake {
@@ -94,6 +96,7 @@ impl Fake {
             warnings: Vec::new(),
             showcmd: String::new(),
             caret: CaretShape::Bar,
+            preedit: None,
         }
     }
 
@@ -215,6 +218,9 @@ impl ViewSource for Fake {
         } else {
             self.caret
         }
+    }
+    fn preedit(&self) -> Option<(&str, usize)> {
+        self.preedit.as_ref().map(|(t, c)| (t.as_str(), *c))
     }
 }
 

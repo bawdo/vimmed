@@ -216,6 +216,67 @@ pub fn styled_line(
     (text, spans)
 }
 
+/// Puts `pre`, an input method's composition, into a line's display `text`
+/// at display byte `at`, in the style of the span it lands in (or the one
+/// that ends there), underlined and in `color`. The spans after it move
+/// along. Returns the composition's display range.
+pub fn splice_preedit(
+    text: &mut String,
+    spans: &mut Vec<StyledSpan>,
+    at: usize,
+    pre: &str,
+    color: Rgba,
+) -> Range<usize> {
+    let mut at = at.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    text.insert_str(at, pre);
+    let n = pre.len();
+    // The span it lands in, else the last one ending at it, else the first.
+    let donor = spans
+        .iter()
+        .position(|s| s.range.start <= at && at < s.range.end)
+        .or_else(|| spans.iter().rposition(|s| s.range.end == at))
+        .unwrap_or(0);
+    let piece = spans.get(donor).map(|d| StyledSpan {
+        range: at..at + n,
+        color,
+        underline: true,
+        ..d.clone()
+    });
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    for (k, s) in std::mem::take(spans).into_iter().enumerate() {
+        let r = s.range.clone();
+        if r.end <= at {
+            out.push(s);
+            if k == donor {
+                out.extend(piece.clone());
+            }
+        } else if r.start >= at {
+            if k == donor {
+                out.extend(piece.clone());
+            }
+            out.push(StyledSpan {
+                range: r.start + n..r.end + n,
+                ..s
+            });
+        } else {
+            out.push(StyledSpan {
+                range: r.start..at,
+                ..s.clone()
+            });
+            out.extend(piece.clone());
+            out.push(StyledSpan {
+                range: at + n..r.end + n,
+                ..s
+            });
+        }
+    }
+    *spans = out;
+    at..at + n
+}
+
 /// The display byte ranges of a line's inline code spans, merged where they
 /// touch.
 pub fn code_ranges(d: &LineDisplay) -> Vec<Range<usize>> {
@@ -575,6 +636,60 @@ mod tests {
         assert_eq!(src_to_display_clamped(&d, 0), 0);
         assert_eq!(src_to_display_clamped(&d, 7), 4);
         assert_eq!(src_to_display_clamped(&d, 13), 9);
+    }
+
+    fn span(range: Range<usize>, t: &Tokens) -> StyledSpan {
+        span_for(&SpanStyle::plain(SpanBase::Body), range, t, 1.0)
+    }
+
+    #[test]
+    fn preedit_splits_the_span_it_lands_in() {
+        let t = Tokens::defaults(Theme::Light);
+        let green = t.color(TokenId::ColorPreeditUnderline);
+        let mut text = "abcd".to_owned();
+        let mut bold = span(2..4, &t);
+        bold.weight = t.weight(TokenId::FontWeightStrong);
+        let mut spans = vec![span(0..2, &t), bold.clone()];
+        let r = splice_preedit(&mut text, &mut spans, 3, "日本", green);
+        assert_eq!(text, "abc日本d");
+        assert_eq!(r, 3..9);
+        let ranges: Vec<_> = spans.iter().map(|s| s.range.clone()).collect();
+        assert_eq!(ranges, vec![0..2, 2..3, 3..9, 9..10]);
+        // In the style of the span it landed in, underlined in its colour.
+        assert_eq!(spans[2].weight, bold.weight);
+        assert!(spans[2].underline);
+        assert_eq!(spans[2].color, green);
+        assert!(!spans[1].underline && !spans[3].underline);
+        assert_eq!(spans[3].weight, bold.weight);
+    }
+
+    #[test]
+    fn preedit_at_a_boundary_or_on_an_empty_line() {
+        let t = Tokens::defaults(Theme::Light);
+        let c = t.color(TokenId::ColorPreeditUnderline);
+        // Between two spans: after the first, the second moves along.
+        let mut text = "abcd".to_owned();
+        let mut spans = vec![span(0..2, &t), span(2..4, &t)];
+        assert_eq!(splice_preedit(&mut text, &mut spans, 2, "x", c), 2..3);
+        let ranges: Vec<_> = spans.iter().map(|s| s.range.clone()).collect();
+        assert_eq!(ranges, vec![0..2, 2..3, 3..5]);
+        // At the end.
+        let mut text = "ab".to_owned();
+        let mut spans = vec![span(0..2, &t)];
+        assert_eq!(splice_preedit(&mut text, &mut spans, 9, "x", c), 2..3);
+        assert_eq!(text, "abx");
+        // An empty line keeps one span per piece, in order.
+        let mut text = String::new();
+        let mut spans = vec![span(0..0, &t)];
+        assert_eq!(splice_preedit(&mut text, &mut spans, 0, "x", c), 0..1);
+        assert_eq!(text, "x");
+        assert_eq!(spans.last().unwrap().range, 0..1);
+        assert!(spans.last().unwrap().underline);
+        // Inside a char: before it.
+        let mut text = "é".to_owned();
+        let mut spans = vec![span(0..2, &t)];
+        assert_eq!(splice_preedit(&mut text, &mut spans, 1, "x", c), 0..1);
+        assert_eq!(text, "xé");
     }
 
     #[test]
