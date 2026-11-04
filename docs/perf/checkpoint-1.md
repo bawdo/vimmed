@@ -14,7 +14,7 @@ display. Record which one each measurement ran on.
 | Measurement | Display | Resolution and scale | Refresh |
 |---|---|---|---|
 | macOS cold start (8a937bf) | Built-in Liquid Retina XDR (main display, Mac16,6) | 3024 x 1964, Retina | 120 Hz |
-| macOS manual typing | pending (owner), same machine expected | pending | pending |
+| macOS manual typing (8a937bf) | Built-in Liquid Retina XDR (main display) | 3024 x 1964, Retina | 120 Hz |
 | Linux (all) | deferred to the end of the project (owner decision D8) | | |
 
 Laptop and external-display results differ (different window size, different
@@ -103,16 +103,60 @@ this table is not filled; the macOS marks above are the data.
 
 ## 2. macOS manual typing (owner)
 
-Command: `cargo xtask bench type --manual --keys 500`.
+Command: `cargo xtask bench type --manual --keys 500`. Step 3 is done: the
+owner's manual run on the bundle built at sha 8a937bf (not the earlier
+0337930), on the built-in 120 Hz Retina display.
+
+- Results dir: `bench-results/macos-20261104-132919-type-manual-default`
+  (`summary.txt`, `samples.csv`, `env.txt`).
+- 517 key samples. Cold start in the same run: 219.7 ms (one sample, PASS
+  against 250 ms).
 
 | Measure | Target | Result |
 |---|---|---|
-| Key to compositor p95 | 16 ms or under | pending (owner) |
-| On-glass p95 | 2.5 refresh periods or under (about 42 ms at 60 Hz) | pending (owner) |
+| Key to compositor p95 (`key_ms`) | 16 ms or under | 11.8 ms, PASS |
+| On-glass p95 (`key_glass_est_ms`) | 2.5 refresh periods or under (about 42 ms at 60 Hz) | 27.5 ms, PASS under the absolute reading (owner decision D15) |
 
-Pending item: the owner's manual typing run against the current build, sha
-8a937bf (not the earlier 0337930), on the macOS machine. Until it is recorded,
-neither row above is a pass.
+Per-stage figures (milliseconds):
+
+| Measure | median | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| key_draw_ms | 0.6 | 1.4 | 24.2 | 25.1 |
+| key_glass_est_ms | 22.6 | 27.5 | 47.3 | 52.3 |
+| key_wait_ms | 1.6 | 3.6 | | |
+| key_render_ms | | 0.2 | | |
+
+Owner decision D15: the on-glass target reads as about 42 ms absolute, so
+27.5 ms p95 is a PASS. Known gap: the same 27.5 ms is 3.30 refresh periods at
+120 Hz, which would fail the "2.5 refresh periods" reading. The target is
+recorded under the absolute reading; the gap against the period reading stays
+open.
+
+Stage split (computed by the orchestrator from `samples.csv`):
+
+- Event to handler (`key_ms` minus wait, draw and render): median 4.7 ms, p95
+  7.7 ms. This time is outside our timed stages.
+- `key_glass_est_ms` minus `key_ms` is a constant 15.7 ms, about 1.9 refresh
+  periods at 120 Hz. The estimator is the next display-link targetTimestamp
+  after the commit, plus one refresh.
+
+Draw tail (Bug D): diagnosed, fix pending the owner's confirmation. The p99 and
+max of `key_draw_ms` (24.2 and 25.1 ms, against a 1.4 ms p95) come from Enter,
+or a line join, above an image line. `DocView` line slots belong to a line
+index and do not move when lines are inserted or removed, so the image is
+paired with the wrong slot, loses its cached resampled copy, and is resampled
+on the UI thread inside the key handler (26 to 31 ms of a 30 to 35 ms key in
+the headless reproduction). Typing below the image does not spike. Not fixed.
+See `diag-draw-spikes-report.md` in the v0.9 SDD folder.
+
+## Owner GUI checks
+
+All GREEN on 2026-11-04 (owner):
+
+- Task 15 Step 6: type, resize, move between displays, close. Exit 0.
+- Task 16 Step 4: Finder, two `.md` files opened together. Two processes (see
+  `macos-finder-routing.md`).
+- Task 42 Step 3: the glyphs ☐ ☑ 😀 中文 render.
 
 ## 3. Linux (deferred to the end, owner decision D8)
 
@@ -217,6 +261,11 @@ linked and first_frame rose by about 19 ms median against the Task 15 baseline,
 which still leaves headroom (44 ms at the median, 185 ms at p95). The headless
 draw cost is well inside the 2 ms p95 budget.
 
-Still open: the owner's manual typing run at 8a937bf (section 2), and the whole
-Linux run (sections 3 and 4), deferred by owner decision D8. Do not read either
-as a pass.
+macOS manual typing passes at sha 8a937bf (section 2): key to compositor p95
+11.8 ms against 16 ms, and on-glass p95 27.5 ms against about 42 ms under the
+absolute reading (owner decision D15). The same 27.5 ms is 3.30 refresh periods
+at 120 Hz, a known gap against the period reading. The draw tail (p99 24.2 ms,
+max 25.1 ms) is Bug D, diagnosed with the fix pending, not fixed.
+
+Still open: the whole Linux run (sections 3 and 4), deferred by owner decision
+D8. Do not read it as a pass.

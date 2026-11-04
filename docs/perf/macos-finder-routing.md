@@ -94,7 +94,7 @@ Run on commit acf9c4b, release bundle, sandbox off.
 | 2 | 2026-11-04 | Mac16,6, macOS 27.2 | pass: one window held `a.md` (`routed_spawn` pid 5952); the router had exited after 3 s | a new router (pid 5881, `router_open_urls`) |
 | 3 (`b.md`) | 2026-11-04 | Mac16,6, macOS 27.2 | pass: new process (`routed_spawn` pid 7782), `a.md` untouched | the launcher-started `a.md` window (pid 7520, `window_open_urls`) |
 | 3 (`c.md`) | 2026-11-04 | Mac16,6, macOS 27.2 | pass: new process (`routed_spawn` pid 7853); three processes, one file each | the launcher-started `a.md` window (pid 7520, `window_open_urls`) |
-| 4 | pending | | pending (owner: Finder double-click on two files) | |
+| 4 | 2026-11-04 | owner's Mac | pass: Finder, two `.md` files opened together, two processes (owner GUI check) | not logged |
 
 Answer to the open question: with a window running, Launch Services handed both requests to the
 launcher-started window. It did not pick the sibling spawned earlier, and it did not start a new
