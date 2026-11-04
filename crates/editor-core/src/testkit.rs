@@ -106,6 +106,27 @@ pub(crate) fn ed(text: &str) -> Editor {
     build(text, Config::default(), false)
 }
 
+/// A vim editor on `text` for the file at `path` (which need not exist;
+/// nothing is read), with a handle on its host. `view` opens it in reader
+/// mode.
+pub(crate) fn ed_at(path: &std::path::Path, text: &str, view: bool) -> (Editor, FakeHost) {
+    let host = FakeHost::default();
+    let e = Editor::build(
+        OpenRequest {
+            path: path.to_owned(),
+            view,
+            display_name: None,
+        },
+        text,
+        None,
+        Config::default(),
+        Platform::Mac,
+        Box::new(host.clone()),
+        false,
+    );
+    (e, host)
+}
+
 /// A vim editor on `text` in reader mode.
 pub(crate) fn build_reader(text: &str) -> Editor {
     Editor::build(

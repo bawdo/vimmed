@@ -120,11 +120,20 @@ impl Host for MacHost {
     fn clipboard_set(&mut self, text: &str) {
         clipboard::set(text);
     }
+    /// `/usr/bin/open`, detached as a sibling window is, with the toolkit
+    /// and `<ENV_PREFIX>*` variables stripped.
     fn open_external(&mut self, target: &str) {
-        let _ = std::process::Command::new("/usr/bin/open")
-            .arg(target)
-            .spawn();
+        let strip = detach::sibling_strip_env(app_meta::ENV_PREFIX);
+        let strip: Vec<&str> = strip.iter().map(String::as_str).collect();
+        let args = [std::ffi::OsString::from(target)];
+        let opener = std::path::Path::new("/usr/bin/open");
+        if let Err(e) = detach::spawn_detached(opener, &args, &strip) {
+            eprintln!("{}: could not open {target}: {e}", app_meta::SLUG);
+        }
     }
+    /// A sibling window process through `detach` (`router::spawn_sibling`:
+    /// the current exe, its own session, stripped variables), tied to no
+    /// launcher.
     fn spawn_window(&mut self, req: WindowRequest) {
         let args = router::sibling_args(&req.path, req.view, req.display_name.as_deref());
         router::spawn_and_yield(&req.path, &args);

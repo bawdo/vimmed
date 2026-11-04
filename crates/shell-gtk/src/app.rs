@@ -125,8 +125,20 @@ impl Host for GtkHost {
             c.set(text);
         }
     }
+    /// `xdg-open` (found on `PATH`), detached as a sibling window is, with
+    /// the toolkit and `<ENV_PREFIX>*` variables stripped.
     fn open_external(&mut self, target: &str) {
-        let _ = env::child_command("xdg-open").arg(target).spawn();
+        let path = std::env::var_os("PATH");
+        let Some(opener) = detach::find_on_path("xdg-open", path.as_deref()) else {
+            eprintln!("{}: could not open {target}: no xdg-open", app_meta::SLUG);
+            return;
+        };
+        let strip = detach::sibling_strip_env(app_meta::ENV_PREFIX);
+        let strip: Vec<&str> = strip.iter().map(String::as_str).collect();
+        let args = [OsString::from(target)];
+        if let Err(e) = detach::spawn_detached(&opener, &args, &strip) {
+            eprintln!("{}: could not open {target}: {e}", app_meta::SLUG);
+        }
     }
     /// A sibling window process, detached as the launcher starts one, with
     /// the toolkit and `<ENV_PREFIX>*` variables stripped.

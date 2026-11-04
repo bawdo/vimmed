@@ -68,6 +68,20 @@ pub fn sibling_strip_env(prefix: &str) -> Vec<String> {
     out
 }
 
+/// The first executable file named `name` in the directories of `path` (a
+/// `PATH` value), as a shell would find it. `posix_spawn` does not search
+/// `PATH`, so a window starting a system program by name (Linux's
+/// `xdg-open`) looks it up here first.
+pub fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
 fn check(rc: c_int) -> io::Result<()> {
     if rc == 0 {
         Ok(())
@@ -264,6 +278,28 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn find_on_path_takes_the_first_executable() {
+        let dir = scratch_file("path");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        // In `a` but not executable, so `b`'s is the one.
+        std::fs::write(a.join("tool"), "").unwrap();
+        std::fs::write(b.join("tool"), "").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let exec = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(b.join("tool"), exec).unwrap();
+        let path = std::env::join_paths([&a, &b]).unwrap();
+        let found = find_on_path("tool", Some(&path));
+        let missing = find_on_path("nothing-here", Some(&path));
+        let unset = find_on_path("tool", None);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, Some(b.join("tool")));
+        assert_eq!(missing, None);
+        assert_eq!(unset, None);
+    }
 
     #[test]
     fn environment_replaces_and_keeps() {

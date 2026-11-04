@@ -67,7 +67,7 @@ impl DocView {
                 text,
                 cursor,
             } => {
-                caret = Some(prefix.len_utf8() + (*cursor).min(text.len()));
+                caret = Some(prefix.len() + (*cursor).min(text.len()));
                 (format!("{prefix}{text}"), text_color)
             }
             StatusLeft::Prompt(p) => (p.clone(), text_color),

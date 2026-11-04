@@ -198,7 +198,7 @@ fn the_command_line_is_typed_in_place_with_its_caret() {
     let mut src = Fake::new(&["alpha"], t.clone());
     src.caret = CaretShape::Hidden;
     src.left = StatusLeft::Input {
-        prefix: ':',
+        prefix: ":",
         text: "s/a".into(),
         cursor: 3,
     };
@@ -247,14 +247,14 @@ fn status_change_damages_only_status_rows() {
     // Typing on the command line, with the caret up there.
     src.caret = CaretShape::Hidden;
     src.left = StatusLeft::Input {
-        prefix: ':',
+        prefix: ":",
         text: String::new(),
         cursor: 0,
     };
     v.paint_lines(&src, 0..0);
     v.take_damage();
     src.left = StatusLeft::Input {
-        prefix: ':',
+        prefix: ":",
         text: "w".into(),
         cursor: 1,
     };
@@ -277,7 +277,7 @@ fn the_caret_hiding_repaints_its_line() {
     v.take_damage();
     src.caret = CaretShape::Hidden;
     src.left = StatusLeft::Input {
-        prefix: ':',
+        prefix: ":",
         text: String::new(),
         cursor: 0,
     };

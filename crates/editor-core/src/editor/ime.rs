@@ -90,7 +90,7 @@ impl Editor {
     /// status bar for the command line or a search.
     fn preedit_redraw(&self) -> Effects {
         let redraw = match self.mode {
-            Mode::Command | Mode::Search if self.cfg.vim => Redraw::Status,
+            Mode::Command | Mode::Search if self.cfg.vim || self.linking() => Redraw::Status,
             _ => {
                 let line = self
                     .cursor
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(
             e.status().left,
             StatusLeft::Input {
-                prefix: ':',
+                prefix: ":",
                 text: "sü".into(),
                 cursor: 3,
             }
