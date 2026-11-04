@@ -26,6 +26,8 @@ pub struct StyledSpan {
     pub italic: bool,
     pub color: Rgba,
     pub strike: bool,
+    /// A single underline in the span's colour (links).
+    pub underline: bool,
 }
 
 /// A caret position within a laid line, in pixels from the line's top left.

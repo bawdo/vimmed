@@ -86,4 +86,18 @@ token_table! {
     SpaceStatusPad, "space.status.pad", Px, "14", "14";
     SizeImageMaxHeight, "size.image.max_height", Px, "420", "420";
     SizeUnclosedBar, "size.unclosed.bar", Px, "3", "3";
+
+    // Block rendering (Task 27).
+    // The code block's language label, top right.
+    FontSizeCodeLabel, "font.size.code.label", Px, "12", "12";
+    // Table cells: horizontal and vertical padding, and the grid line width.
+    SpaceTablePad, "space.table.pad", Px, "10", "10";
+    SpaceTablePadY, "space.table.pad.y", Px, "4", "4";
+    SizeTableBorder, "size.table.border", Px, "1", "1";
+    // The least gap between a prefix glyph (a list marker, or a hanging
+    // prefix) and the text after it.
+    SpacePrefixGap, "space.prefix.gap", Px, "6", "6";
+    // The left-margin gutter that block prefixes (`#`, `>`, list markers) hang
+    // in, as iA Writer does. 0 turns hanging off.
+    SizeHangingPrefix, "size.hanging_prefix", Px, "0", "0";
 }

@@ -8,7 +8,7 @@ use editor_core::markdown::{LineDisplay, Prefix, SpanBase, SpanStyle};
 use editor_core::tokens::{Rgba, TokenId, Tokens};
 use tiny_skia::{FilterQuality, Paint, Pattern, Pixmap, Rect, SpreadMode, Transform};
 
-use crate::layout::{FontRole, GlyphMask, MaskData, StyledSpan};
+use crate::layout::{FontRole, GlyphMask, MaskData, RectF, StyledSpan};
 
 /// The heading size token for level `n` (levels past 6 use h6).
 fn heading_size(n: u8) -> TokenId {
@@ -106,7 +106,8 @@ pub fn draw_scaled(
 ///
 /// Code, code blocks and revealed syntax are mono; headings take their level's
 /// size and the heading weight; `strong` takes the strong weight; `em` is
-/// italic; revealed syntax takes `color.syntax.reveal` and links `color.link`.
+/// italic; revealed syntax takes `color.syntax.reveal` and links `color.link`,
+/// underlined.
 pub fn span_for(style: &SpanStyle, range: Range<usize>, t: &Tokens, scale: f32) -> StyledSpan {
     let role = match style.base {
         SpanBase::Code | SpanBase::CodeBlock { .. } | SpanBase::Syntax => FontRole::Mono,
@@ -138,11 +139,28 @@ pub fn span_for(style: &SpanStyle, range: Range<usize>, t: &Tokens, scale: f32) 
         italic: style.em,
         color: t.color(color),
         strike: style.strike,
+        underline: style.link && style.base != SpanBase::Syntax,
     }
+}
+
+/// The ATX heading level of source line `src` (`#` to `######` after at most
+/// three spaces, then a space or the end), or `None`.
+pub fn atx_level(src: &str) -> Option<u8> {
+    let t = src.trim_start_matches(' ');
+    if src.len() - t.len() > 3 {
+        return None;
+    }
+    let n = t.bytes().take_while(|&b| b == b'#').count();
+    let rest = &t[n..];
+    ((1..=6).contains(&n) && (rest.is_empty() || rest.starts_with([' ', '\t']))).then_some(n as u8)
 }
 
 /// A line's display text and its styled spans. An empty display still gets
 /// one empty span in the line's base style, so it keeps its line height.
+///
+/// Inline code on a heading line keeps the heading's size (it stays mono):
+/// `Code` replaces the line's base role, so the level comes from the line's
+/// heading spans, or from its source when the `#` prefix is all that says so.
 pub fn styled_line(
     src: &str,
     d: &LineDisplay,
@@ -151,11 +169,27 @@ pub fn styled_line(
 ) -> (String, Vec<StyledSpan>) {
     let mut text = String::new();
     let mut spans = Vec::with_capacity(d.spans.len().max(1));
+    let has_code = d.spans.iter().any(|s| s.style.base == SpanBase::Code);
+    let heading = has_code
+        .then(|| {
+            d.spans
+                .iter()
+                .find_map(|s| match s.style.base {
+                    SpanBase::Heading(n) => Some(n),
+                    _ => None,
+                })
+                .or_else(|| atx_level(src))
+        })
+        .flatten();
     for s in &d.spans {
         let piece = src.get(s.src.clone()).unwrap_or_default();
         let start = text.len();
         text.push_str(piece);
-        spans.push(span_for(&s.style, start..text.len(), t, scale));
+        let mut span = span_for(&s.style, start..text.len(), t, scale);
+        if let (SpanBase::Code, Some(n)) = (&s.style.base, heading) {
+            span.size_px = t.px(heading_size(n)) * scale;
+        }
+        spans.push(span);
     }
     if spans.is_empty() {
         let base = match &d.deco {
@@ -167,6 +201,154 @@ pub fn styled_line(
         spans.push(span_for(&base, 0..0, t, scale));
     }
     (text, spans)
+}
+
+/// The display byte ranges of a line's inline code spans, merged where they
+/// touch.
+pub fn code_ranges(d: &LineDisplay) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = Vec::new();
+    let mut at = 0;
+    for s in &d.spans {
+        let r = at..at + s.src.len();
+        at = r.end;
+        if s.style.base != SpanBase::Code || r.is_empty() {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.end == r.start => last.end = r.end,
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+/// Splits a code line's spans by highlight classes (byte ranges into the
+/// display text, which on a code line is the source line), colouring each
+/// piece with its class's token. Ranges off a char boundary or past the text
+/// are skipped.
+pub fn apply_classes(
+    text: &str,
+    spans: Vec<StyledSpan>,
+    classes: &[(Range<usize>, crate::highlight::SyntaxClass)],
+    t: &Tokens,
+) -> Vec<StyledSpan> {
+    if classes.is_empty() {
+        return spans;
+    }
+    let ok = |r: &Range<usize>| {
+        r.start < r.end
+            && r.end <= text.len()
+            && text.is_char_boundary(r.start)
+            && text.is_char_boundary(r.end)
+    };
+    let mut out = Vec::with_capacity(spans.len() + 2 * classes.len());
+    for base in spans {
+        let mut at = base.range.start;
+        for (r, class) in classes.iter().filter(|(r, _)| ok(r)) {
+            let (a, b) = (r.start.max(at), r.end.min(base.range.end));
+            if a >= b {
+                continue;
+            }
+            if a > at {
+                out.push(StyledSpan {
+                    range: at..a,
+                    ..base.clone()
+                });
+            }
+            out.push(StyledSpan {
+                range: a..b,
+                color: t.color(class.token()),
+                ..base.clone()
+            });
+            at = b;
+        }
+        if at < base.range.end || base.range.is_empty() {
+            out.push(StyledSpan {
+                range: at..base.range.end,
+                ..base
+            });
+        }
+    }
+    out
+}
+
+/// The language tag of a fence line: the first word after the backticks or
+/// tildes, or an empty string.
+pub fn fence_lang(line: &str) -> &str {
+    let t = line.trim_start();
+    let t = t.trim_start_matches(['`', '~']).trim_start();
+    t.split(|c: char| c.is_whitespace() || c == '{')
+        .next()
+        .unwrap_or("")
+}
+
+/// A revealed block prefix that can hang in the left margin: where its glyphs
+/// start (after leading whitespace), where it ends (after the space that
+/// follows it), and its quote depth (0 unless it is a quote prefix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HangPrefix {
+    pub start: usize,
+    pub end: usize,
+    pub quote_depth: u8,
+}
+
+/// The block prefix of source line `src` that hangs: a heading's `#`s, a
+/// quote's `>`s, or a list marker (with its task box). `None` for other lines.
+pub fn hang_prefix(src: &str) -> Option<HangPrefix> {
+    let b = src.as_bytes();
+    let start = b.iter().take_while(|&&c| c == b' ' || c == b'\t').count();
+    let skip_spaces = |mut i: usize| {
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        i
+    };
+    let rest = &b[start..];
+    if let Some(n) = atx_level(src) {
+        let end = skip_spaces(start + usize::from(n));
+        return Some(HangPrefix {
+            start,
+            end,
+            quote_depth: 0,
+        });
+    }
+    if rest.first() == Some(&b'>') {
+        let (mut i, mut depth) = (start, 0u8);
+        while i < b.len() && b[i] == b'>' {
+            depth = depth.saturating_add(1);
+            i = skip_spaces(i + 1);
+        }
+        return Some(HangPrefix {
+            start,
+            end: i,
+            quote_depth: depth,
+        });
+    }
+    let marker = match rest {
+        [b'-' | b'*' | b'+', b' ', ..] => 1,
+        _ => {
+            let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+            match rest.get(digits) {
+                Some(b'.' | b')')
+                    if (1..=9).contains(&digits) && rest.get(digits + 1) == Some(&b' ') =>
+                {
+                    digits + 1
+                }
+                _ => return None,
+            }
+        }
+    };
+    let mut end = skip_spaces(start + marker);
+    for task in [b"[ ] ", b"[x] ", b"[X] "] {
+        if b[end..].starts_with(task) {
+            end = skip_spaces(end + task.len());
+        }
+    }
+    Some(HangPrefix {
+        start,
+        end,
+        quote_depth: 0,
+    })
 }
 
 /// The text drawn for a hidden list prefix, if any.
@@ -223,6 +405,57 @@ pub fn fill(p: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, c: Rgba, clip: &Rang
     paint.set_color_rgba8(c.r, c.g, c.b, c.a);
     paint.anti_alias = false;
     p.fill_rect(rect, &paint, Transform::identity(), None);
+}
+
+/// Which corners of a box `fill_rounded` rounds, and by how much (pixels).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Corners {
+    pub radius: f32,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+/// Fills the box `b` like `fill`, with its top and/or bottom corners rounded.
+/// A corner's curved edge is anti-aliased by coverage; nothing is drawn
+/// outside the box or the rows `clip`.
+pub fn fill_rounded(p: &mut Pixmap, b: RectF, corners: Corners, c: Rgba, clip: &Range<f32>) {
+    let r = corners.radius.min(b.w / 2.0).min(b.h / 2.0).max(0.0);
+    let band_top = if corners.top { r.ceil() } else { 0.0 };
+    let band_bottom = if corners.bottom { r.ceil() } else { 0.0 };
+    let mid_h = b.h - band_top - band_bottom;
+    fill(p, b.x, b.y + band_top, b.w, mid_h, c, clip);
+    let mut row = |yy: f32, d: f32| {
+        // `d`: how far this row's centre is inside the corner's circle centre line.
+        let inset = r - (r * r - d * d).max(0.0).sqrt();
+        let (xl, xr) = (b.x + inset, b.x + b.w - inset);
+        let (full_l, full_r) = (xl.ceil(), xr.floor());
+        fill(p, full_l, yy, full_r - full_l, 1.0, c, clip);
+        let ry = yy as u32..yy as u32 + 1;
+        for (px, cover) in [(full_l - 1.0, full_l - xl), (full_r, xr - full_r)] {
+            if cover <= 0.0 || !(clip.start..clip.end).contains(&yy) {
+                continue;
+            }
+            let mut color = c;
+            color.a = (f32::from(c.a) * cover).round() as u8;
+            let m = GlyphMask {
+                x: px as i32,
+                y: yy as i32,
+                w: 1,
+                h: 1,
+                color,
+                data: MaskData::Solid,
+            };
+            blend(p, 0, 0, &m, &ry);
+        }
+    };
+    for k in 0..band_top as u32 {
+        let yy = b.y + k as f32;
+        row(yy, r - (k as f32 + 0.5));
+    }
+    for k in 0..band_bottom as u32 {
+        let yy = b.y + b.h - 1.0 - k as f32;
+        row(yy, r - (k as f32 + 0.5));
+    }
 }
 
 /// Blends `m` (placed at `ox, oy` plus its own offset) over the frame,

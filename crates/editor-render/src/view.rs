@@ -11,25 +11,41 @@
 //! `font.size * line.height.body` tall. An unchanged line keeps its layout
 //! across frames, so a full repaint after a few keystrokes reshapes nothing
 //! (see `layout_cosmic::RUN_CACHE_KEEP_AGES`).
+//!
+//! Blocks: code blocks sit on a `color.code.bg` box with `radius.code`
+//! corners, their text `space.code.pad` in, the language label top right on
+//! the opening fence and, when the block is unclosed, a `size.unclosed.bar`
+//! accent on its last line; with highlighting on (`set_highlighting`) their
+//! content is coloured as results land. Tables are a grid laid out a whole
+//! table at a time (`table_paint`). Quotes draw one bar per depth. List
+//! markers sit in the indent, which grows to fit a wide number. With
+//! `size.hanging_prefix` above zero, list markers and revealed block
+//! prefixes (`#`, `>`, list markers) hang in the left margin instead, so
+//! revealing them does not move the text.
 
 use std::ops::Range;
 use std::path::Path;
 
 use editor_core::buffer::Pos;
 use editor_core::host::Waker;
-use editor_core::markdown::{BlockDeco, LineDisplay, SpanBase, SpanStyle, display_to_src};
+use editor_core::markdown::{
+    BlockDeco, BlockId, LineDisplay, Prefix, SpanBase, SpanStyle, display_to_src,
+};
 use editor_core::strings::IMAGE_NOT_FOUND;
 use editor_core::tokens::{TokenId, Tokens};
 use editor_core::view_model::{StatusModel, ViewSource};
 
+use crate::code_track::CodeTracks;
 use crate::damage::Damage;
 use crate::frame::Frame;
 use crate::images::{ImageSlot, ImageState, Images};
 use crate::layout::{LaidLine, RectF, StyledSpan, TextLayout};
 use crate::paint::{
-    blend, blit, content_offset, draw_scaled, fill, prefix_text, span_for, src_to_display_clamped,
+    Corners, HangPrefix, apply_classes, blend, blit, code_ranges, content_offset, draw_scaled,
+    fence_lang, fill, fill_rounded, hang_prefix, prefix_text, span_for, src_to_display_clamped,
     styled_line,
 };
+use crate::table_paint::{self, TableGeom};
 
 /// What an image line draws: its reserved box in pixels and the state to
 /// draw it in. The box never changes once the header is read.
@@ -140,21 +156,53 @@ pub(crate) fn lay<'a>(
     &slot.as_ref().expect("just filled").laid
 }
 
+/// A highlighted code line: its block, its line within the block's content,
+/// and its spans before colouring (so landed colour can be applied without
+/// the source).
+struct CodeLine {
+    id: BlockId,
+    k: usize,
+    base: Vec<StyledSpan>,
+}
+
+/// What `draw_line` last painted over a line's text, in display bytes (the
+/// caret as a source column), so a recolour can repaint the line as it was.
+#[derive(Default)]
+struct Overlay {
+    matches: Vec<Range<usize>>,
+    selection: Option<Range<usize>>,
+    caret: Option<usize>,
+}
+
 /// Per source line: its height in pixels (estimated until shaped), and once
 /// shaped, its layouts and the display they came from.
 struct LineSlot {
     height: f32,
     text: Option<Cached>,
     prefix: Option<Cached>,
+    /// Where the prefix glyph draws, right of the column's left edge
+    /// (negative when it hangs in the margin).
+    prefix_dx: f32,
+    /// A revealed block prefix hung in the left margin, and where it sits in
+    /// the source. The display no longer holds it.
+    hung: Option<(Cached, HangPrefix)>,
     display: Option<LineDisplay>,
     /// The text's offset right of the column's left edge, in pixels.
     offset: f32,
+    /// Quote bars drawn left of the text.
+    bars: u8,
     /// Set while the line is an image line and images are on. Kept when the
     /// layouts are forgotten, so a decode can still paint a line scrolled
     /// back into view.
     image: Option<ImageLine>,
     /// The placeholder or link text of an image line that has no pixels yet.
     label: Option<Cached>,
+    /// The language label of an opening fence.
+    code_label: Option<Cached>,
+    code: Option<CodeLine>,
+    /// For a rendered table row: the table's first line.
+    table: Option<usize>,
+    overlay: Overlay,
 }
 
 impl LineSlot {
@@ -163,18 +211,30 @@ impl LineSlot {
             height,
             text: None,
             prefix: None,
+            prefix_dx: 0.0,
+            hung: None,
             display: None,
             offset: 0.0,
+            bars: 0,
             image: None,
             label: None,
+            code_label: None,
+            code: None,
+            table: None,
+            overlay: Overlay::default(),
         }
     }
 
     fn forget(&mut self) {
         self.text = None;
         self.prefix = None;
+        self.hung = None;
         self.display = None;
         self.label = None;
+        self.code_label = None;
+        self.code = None;
+        self.table = None;
+        self.overlay = Overlay::default();
         // The resampled copy is box-sized: keep memory bounded by the screen.
         // The image line itself stays, so its height and a later decode survive.
         if let Some(img) = self.image.as_mut() {
@@ -212,6 +272,12 @@ pub struct DocView {
     images: Option<Images>,
     /// True once the first decoded image has been painted (and marked).
     image_marked: bool,
+    /// Code block highlighting (off until `set_highlighting`).
+    code: CodeTracks,
+    /// Table geometry for the tables painted recently.
+    tables: Vec<TableGeom>,
+    /// Counts paints, so per-frame caches know when they are stale.
+    frame_no: u64,
 }
 
 impl DocView {
@@ -234,6 +300,9 @@ impl DocView {
             caret: None,
             images: None,
             image_marked: false,
+            code: CodeTracks::new(),
+            tables: Vec::new(),
+            frame_no: 0,
         };
         v.clear_frame();
         v
@@ -266,6 +335,7 @@ impl DocView {
                 *s = LineSlot::estimated(est);
             }
             self.status_cache.clear();
+            self.tables.clear();
             if old_scale > 0.0 {
                 self.scroll = (self.scroll * scale / old_scale).round();
             }
@@ -278,6 +348,7 @@ impl DocView {
     /// Repaints everything: background, every on-screen line and the status
     /// bar. Unchanged lines reuse their layouts.
     pub fn paint_all(&mut self, src: &dyn ViewSource) {
+        self.begin_frame();
         self.sync(src);
         let g = self.geo();
         self.caret = None;
@@ -292,6 +363,9 @@ impl DocView {
             &(0.0..g.text_bottom),
         );
         self.paint_down_from(src, 0, g.page_top - self.scroll);
+        // Only the tables on screen keep their geometry.
+        let f = self.frame_no;
+        self.tables.retain(|t| t.frame == f);
         self.last_status = None;
         self.paint_status(src);
         self.damage.add(0..self.frame.height_px);
@@ -303,11 +377,24 @@ impl DocView {
     /// rows; a height change (or a change in the line count) repaints and
     /// damages from that line to the bottom of the text. The caret's old and
     /// new lines are repainted when the cursor changed line.
+    ///
+    /// An edit in or next to a rendered table repaints the whole table: its
+    /// column widths come from every row, so any row can move them all.
     pub fn paint_lines(&mut self, src: &dyn ViewSource, lines: Range<usize>) {
+        self.begin_frame();
+        let near_table: Vec<usize> = lines.clone().filter(|&i| self.was_near_table(i)).collect();
         let count_changed = self.sync(src);
         let count = self.lines.len();
         let first_edit = lines.start;
         let mut todo: Vec<usize> = lines.collect();
+        for i in near_table {
+            for j in i.saturating_sub(1)..(i + 2).min(count) {
+                let d = src.display(j);
+                if let Some((r, _)) = table_paint::extent(src, j, &d) {
+                    todo.extend(r);
+                }
+            }
+        }
         let cursor = src.cursor().line;
         let old = self.caret.map(|(l, _)| l);
         if old != Some(cursor) {
@@ -345,7 +432,8 @@ impl DocView {
     }
 
     /// The source position under the point `x_pt, y_pt`, or `None` outside
-    /// the text area or over a line not painted yet.
+    /// the text area or over a line not painted yet. Over a rendered table
+    /// row, the position is in the cell under the point.
     pub fn hit_test(&self, x_pt: f32, y_pt: f32) -> Option<Pos> {
         let s = self.frame.scale;
         let (x, y) = (x_pt * s, y_pt * s);
@@ -359,6 +447,9 @@ impl DocView {
             if y < top + slot.height || i == last {
                 let laid = &slot.text.as_ref()?.laid;
                 let d = slot.display.as_ref()?;
+                if let Some(col) = self.hit_table(i, x - g.col_x, (y - top).max(0.0)) {
+                    return Some(Pos { line: i, col });
+                }
                 let b = laid.hit(x - g.col_x - slot.offset, (y - top).max(0.0));
                 return Some(Pos {
                     line: i,
@@ -418,6 +509,24 @@ impl DocView {
             .is_some_and(|m| m.scaled.is_some())
     }
 
+    /// The styled spans line `i` was last laid out with, while it is shaped
+    /// (for tests and diagnostics).
+    pub fn styled_spans(&self, i: usize) -> Option<&[StyledSpan]> {
+        self.lines
+            .get(i)?
+            .text
+            .as_ref()
+            .map(|c| c.key.spans.as_slice())
+    }
+
+    /// Where line `i`'s text starts, in frame pixels from the left, while it
+    /// is shaped.
+    pub fn text_left_px(&self, i: usize) -> Option<f32> {
+        let slot = self.lines.get(i)?;
+        slot.text.as_ref()?;
+        Some(self.geo().col_x + slot.offset)
+    }
+
     /// Line `i`'s height in pixels: measured once shaped, estimated before.
     pub fn line_height_px(&self, i: usize) -> Option<f32> {
         self.lines.get(i).map(|s| s.height)
@@ -430,10 +539,25 @@ impl DocView {
         self.images = Some(Images::new(base_dir, waker));
     }
 
-    /// Takes finished image decodes and paints them into the space their
-    /// lines already reserved: no relayout. Returns true when rows were
-    /// damaged; the shell then copies `take_damage()` to the screen.
+    /// Turns code block highlighting on: `waker` is called (from the worker
+    /// thread) when a block's colour is ready, and the shell then calls
+    /// `poll_async`. Call before the first `paint_all`.
+    pub fn set_highlighting(&mut self, waker: Waker) {
+        self.code.enable(waker);
+    }
+
+    /// Takes finished work from the workers and paints it without the
+    /// source: image decodes into the space their lines already reserved, and
+    /// code colour onto lines that keep their metrics. No relayout of other
+    /// lines. Returns true when rows were damaged; the shell then copies
+    /// `take_damage()` to the screen.
     pub fn poll_async(&mut self) -> bool {
+        let images = self.poll_images();
+        let code = self.poll_highlight();
+        images || code
+    }
+
+    fn poll_images(&mut self) -> bool {
         let changed = match self.images.as_mut() {
             Some(images) => images.poll(),
             None => return false,
@@ -481,6 +605,38 @@ impl DocView {
         any
     }
 
+    /// Colours the on-screen lines of blocks whose highlight landed.
+    fn poll_highlight(&mut self) -> bool {
+        let g = self.geo();
+        let mut any = false;
+        for (id, range) in self.code.poll() {
+            for i in range {
+                let Some(slot) = self.lines.get_mut(i) else {
+                    break;
+                };
+                let (Some(cl), Some(cached)) = (&slot.code, &slot.text) else {
+                    continue;
+                };
+                if cl.id != id {
+                    continue;
+                }
+                let classes = self.code.line_classes(id, cl.k);
+                let (text, width) = (cached.key.text.clone(), cached.key.width);
+                let spans = apply_classes(&text, cl.base.clone(), &classes, &self.tokens);
+                lay(self.layout.as_mut(), &mut slot.text, text, spans, width);
+                let h = slot.height;
+                let top = self.line_top(i);
+                if top >= g.text_bottom || top + h <= 0.0 {
+                    continue;
+                }
+                self.paint_line(i, top);
+                self.damage.add(rows(top, h, g.text_bottom));
+                any = true;
+            }
+        }
+        any
+    }
+
     pub(crate) fn geo(&self) -> Geo {
         let t = &self.tokens;
         let s = self.frame.scale;
@@ -505,6 +661,22 @@ impl DocView {
     fn estimate(&self) -> f32 {
         let t = &self.tokens;
         (t.px(TokenId::FontSize) * t.ratio(TokenId::LineHeightBody) * self.frame.scale).ceil()
+    }
+
+    fn begin_frame(&mut self) {
+        self.frame_no += 1;
+        self.code.begin_frame();
+    }
+
+    /// True when line `i`, or a line next to it, was a rendered table row at
+    /// the last paint (from the displays kept for on-screen lines).
+    fn was_near_table(&self, i: usize) -> bool {
+        (i.saturating_sub(1)..i + 2).any(|j| {
+            self.lines
+                .get(j)
+                .and_then(|s| s.display.as_ref())
+                .is_some_and(|d| matches!(d.deco, BlockDeco::TableRow { .. }))
+        })
     }
 
     /// Takes the source's tokens and line count. Returns true when the line
@@ -556,29 +728,192 @@ impl DocView {
         self.geo().page_top - self.scroll + above
     }
 
+    /// The table geometry holding line `i` (displayed as `d`), checked
+    /// against the source once per frame and laid out again when any row,
+    /// or the column, changed.
+    fn ensure_table(&mut self, src: &dyn ViewSource, i: usize, d: &LineDisplay) -> Option<usize> {
+        let f = self.frame_no;
+        if let Some(k) = self
+            .tables
+            .iter()
+            .position(|g| g.frame == f && g.lines.contains(&i))
+        {
+            return Some(k);
+        }
+        let (lines, displays) = table_paint::extent(src, i, d)?;
+        let (t, s, avail) = (&self.tokens, self.frame.scale, self.geo().col_w);
+        let key = table_paint::key_of(src, &lines, avail, t, s);
+        if let Some(k) = self
+            .tables
+            .iter()
+            .position(|g| g.lines == lines && g.matches(&key))
+        {
+            self.tables[k].frame = f;
+            return Some(k);
+        }
+        let overlaps = |g: &TableGeom| g.lines.start < lines.end && lines.start < g.lines.end;
+        let old = self.tables.iter().position(overlaps);
+        let old = old.map(|k| self.tables.swap_remove(k));
+        self.tables.retain(|g| !overlaps(g));
+        let layout = self.layout.as_mut();
+        let mut geom = table_paint::build(layout, src, lines, &displays, avail, t, s, old);
+        geom.frame = f;
+        self.tables.push(geom);
+        Some(self.tables.len() - 1)
+    }
+
+    /// The source column under `x, y` (pixels from the column's left edge and
+    /// the line's top) when line `i` is a rendered table row.
+    fn hit_table(&self, i: usize, x: f32, y: f32) -> Option<usize> {
+        let first = self.lines.get(i)?.table?;
+        let geom = self
+            .tables
+            .iter()
+            .find(|g| g.lines.start == first && g.lines.contains(&i))?;
+        let row = geom.row(i)?;
+        let (t, s) = (&self.tokens, self.frame.scale);
+        let k = geom
+            .verticals
+            .windows(2)
+            .position(|w| x < w[1])
+            .unwrap_or(geom.verticals.len().saturating_sub(2))
+            .min(row.cells.len().checked_sub(1)?);
+        let cell = &row.cells[k];
+        let (cx, cy) = geom.cell_origin(i, k, t, s);
+        let b = cell.laid()?.hit(x - cx, (y - cy).max(0.0));
+        Some(display_to_src(&cell.display, b))
+    }
+
     /// Lays line `i` out from the source and returns its height.
     fn relayout(&mut self, src: &dyn ViewSource, i: usize) -> f32 {
+        let mut d = src.display(i);
+        let table = match d.deco {
+            BlockDeco::TableRow { .. } => self.ensure_table(src, i, &d),
+            _ => None,
+        };
         let g = self.geo();
         let t = &self.tokens;
         let s = self.frame.scale;
-        let d = src.display(i);
-        let (text, spans) = styled_line(src.line(i), &d, t, s);
-        let offset = content_offset(&d.prefix, t, s).round();
-        let width = (g.col_w - offset).max(1.0);
-        let slot = &mut self.lines[i];
+        let line = src.line(i);
         let layout = self.layout.as_mut();
-        let laid = lay(layout, &mut slot.text, text, spans, width);
-        slot.height = laid.height.ceil();
-        slot.offset = offset;
+        let slot = &mut self.lines[i];
+        slot.code = None;
+        slot.table = None;
+        slot.bars = 0;
+        slot.prefix_dx = 0.0;
+
+        if let Some(geom) = table.map(|k| &self.tables[k]) {
+            let style = SpanStyle::plain(SpanBase::Body);
+            let empty = vec![span_for(&style, 0..0, t, s)];
+            lay(layout, &mut slot.text, String::new(), empty, g.col_w);
+            slot.height = geom.row(i).map_or(0.0, |r| r.height);
+            slot.offset = 0.0;
+            slot.prefix = None;
+            slot.hung = None;
+            slot.label = None;
+            slot.code_label = None;
+            slot.image = None;
+            slot.table = Some(geom.lines.start);
+            slot.display = Some(d);
+            return slot.height;
+        }
+
+        // A revealed block prefix hangs in the margin: take it out of the display.
+        let hanging = t.px(TokenId::SizeHangingPrefix) > 0.0;
+        let gap = (t.px(TokenId::SpacePrefixGap) * s).round();
+        let mut hung = None;
+        if hanging && d.deco == BlockDeco::None && d.prefix == Prefix::None {
+            let first = d.spans.first().cloned();
+            if let (Some(hp), Some(first)) = (hang_prefix(line), first)
+                && first.style.base == SpanBase::Syntax
+                && first.src.start == 0
+                && first.src.end >= hp.end
+                && hp.end > hp.start
+            {
+                d.spans[0].src.start = hp.end;
+                if d.spans[0].src.is_empty() {
+                    d.spans.remove(0);
+                }
+                hung = Some(hp);
+            }
+        }
+        let old_hung = slot.hung.take().map(|(c, _)| c);
+        slot.hung = hung.map(|hp| {
+            let text = line[hp.start..hp.end].trim_end().to_owned();
+            let span = span_for(&SpanStyle::plain(SpanBase::Syntax), 0..text.len(), t, s);
+            let mut c = old_hung;
+            lay(layout, &mut c, text, vec![span], g.col_w);
+            (c.expect("just laid"), hp)
+        });
+
+        let is_code = matches!(d.deco, BlockDeco::CodeBg { .. });
+        let code_pad = (t.px(TokenId::SpaceCodePad) * s).round();
+        slot.bars = match (&d.deco, hung) {
+            (BlockDeco::QuoteBars(n), _) => *n,
+            (_, Some(hp)) => hp.quote_depth,
+            _ => 0,
+        };
+        let mut offset = if is_code {
+            code_pad
+        } else {
+            content_offset(&Prefix::QuoteBars(slot.bars), t, s).round()
+        };
         match prefix_text(&d.prefix) {
             Some(p) => {
-                let style =
-                    editor_core::markdown::SpanStyle::plain(editor_core::markdown::SpanBase::Body);
+                let style = SpanStyle::plain(SpanBase::Body);
                 let span = span_for(&style, 0..p.len(), t, s);
-                lay(layout, &mut slot.prefix, p, vec![span], offset.max(1.0));
+                // Laid out the column's width, so a wide number never wraps.
+                let pw = lay(layout, &mut slot.prefix, p, vec![span], g.col_w)
+                    .width()
+                    .ceil();
+                if hanging {
+                    slot.prefix_dx = -(gap + pw);
+                } else {
+                    let indent = content_offset(&d.prefix, t, s).round();
+                    offset = indent.max(pw + gap);
+                }
             }
             None => slot.prefix = None,
         }
+        let inset = if is_code { 2.0 * code_pad } else { offset };
+        let width = (g.col_w - inset).max(1.0);
+
+        let (text, mut spans) = styled_line(line, &d, t, s);
+        let content = !d.spans.is_empty()
+            && d.spans
+                .iter()
+                .all(|sp| matches!(sp.style.base, SpanBase::CodeBlock { .. }));
+        if is_code
+            && content
+            && let Some((id, k, classes)) = self.code.classes(src, i, &d)
+        {
+            let base = spans.clone();
+            spans = apply_classes(&text, spans, &classes, t);
+            slot.code = Some(CodeLine { id, k, base });
+        }
+        let laid = lay(layout, &mut slot.text, text, spans, width);
+        slot.height = laid.height.ceil();
+        slot.offset = offset;
+
+        let lang = match d.deco {
+            BlockDeco::CodeBg { first: true, .. } if d.spans.is_empty() => fence_lang(line),
+            _ => "",
+        };
+        if lang.is_empty() {
+            slot.code_label = None;
+        } else {
+            let mut span = span_for(&SpanStyle::plain(SpanBase::Syntax), 0..lang.len(), t, s);
+            span.size_px = t.px(TokenId::FontSizeCodeLabel) * s;
+            span.color = t.color(TokenId::ColorCodeLabel);
+            lay(
+                layout,
+                &mut slot.code_label,
+                lang.to_owned(),
+                vec![span],
+                g.col_w,
+            );
+        }
+
         let old_image = slot.image.take();
         match (&d.deco, self.images.as_mut()) {
             (BlockDeco::Image { src, alt }, Some(images)) => {
@@ -691,9 +1026,31 @@ impl DocView {
         self.damage.add(y0 as u32..g.text_bottom as u32);
     }
 
-    /// Paints line `i` (already laid out) with its top at `top`: background,
-    /// block decoration, search matches, selection, prefix, text and caret.
+    /// Paints line `i` (already laid out) with its top at `top`, taking the
+    /// search matches, selection and caret from the source.
     fn draw_line(&mut self, src: &dyn ViewSource, i: usize, top: f32) {
+        let Some(d) = self.lines[i].display.as_ref() else {
+            return;
+        };
+        let map =
+            |r: &Range<usize>| src_to_display_clamped(d, r.start)..src_to_display_clamped(d, r.end);
+        let cursor = src.cursor();
+        let overlay = Overlay {
+            matches: src.matches(i).iter().map(map).collect(),
+            selection: src
+                .selection()
+                .and_then(|sel| sel.on_line(i, d.src_len))
+                .map(|r| map(&r)),
+            caret: (!src.reader() && cursor.line == i).then_some(cursor.col),
+        };
+        self.lines[i].overlay = overlay;
+        self.paint_line(i, top);
+    }
+
+    /// Paints line `i` with its top at `top`: background, block decoration,
+    /// inline code backgrounds, search matches, selection, prefixes, text and
+    /// caret (the overlays as `draw_line` last took them).
+    fn paint_line(&mut self, i: usize, top: f32) {
         let g = self.geo();
         let t = &self.tokens;
         let s = self.frame.scale;
@@ -709,23 +1066,60 @@ impl DocView {
         let rows = clip.start as u32..clip.end.ceil() as u32;
         let pix = &mut self.frame.pixmap;
         fill(pix, 0.0, top, g.width, h, t.color(TokenId::ColorBg), &clip);
+        if self.caret.is_some_and(|(l, _)| l == i) {
+            self.caret = None;
+        }
 
         let (cx, cw) = (g.col_x, g.col_w);
+        if let Some(first) = slot.table {
+            if let Some(geom) = self
+                .tables
+                .iter()
+                .find(|g| g.lines.start == first && g.lines.contains(&i))
+            {
+                let layout = self.layout.as_mut();
+                table_paint::paint_row(pix, layout, geom, i, cx, top, t, s, &clip);
+            }
+            return;
+        }
+        for k in 0..slot.bars {
+            let bar = (t.px(TokenId::SizeQuoteBar) * s).round();
+            let step = bar + (t.px(TokenId::SpaceQuoteGap) * s).round();
+            let x = cx + f32::from(k) * step;
+            fill(pix, x, top, bar, h, t.color(TokenId::ColorQuoteBar), &clip);
+        }
         match &d.deco {
-            BlockDeco::CodeBg { unclosed, .. } => {
-                fill(pix, cx, top, cw, h, t.color(TokenId::ColorCodeBg), &clip);
-                if *unclosed {
+            BlockDeco::CodeBg {
+                first,
+                last,
+                unclosed,
+            } => {
+                let r = (t.px(TokenId::RadiusCode) * s).round();
+                let corners = Corners {
+                    radius: r,
+                    top: *first,
+                    bottom: *last,
+                };
+                let b = RectF {
+                    x: cx,
+                    y: top,
+                    w: cw,
+                    h,
+                };
+                fill_rounded(pix, b, corners, t.color(TokenId::ColorCodeBg), &clip);
+                if *unclosed && *last {
+                    // Clear of the rounded corner below it.
                     let w = (t.px(TokenId::SizeUnclosedBar) * s).round();
                     let c = t.color(TokenId::ColorCodeUnclosed);
-                    fill(pix, cx, top, w, h, c, &clip);
+                    let y = if *first { top + r } else { top };
+                    fill(pix, cx, y, w, top + h - r - y, c, &clip);
                 }
-            }
-            BlockDeco::QuoteBars(n) => {
-                let bar = (t.px(TokenId::SizeQuoteBar) * s).round();
-                let step = bar + (t.px(TokenId::SpaceQuoteGap) * s).round();
-                for k in 0..*n {
-                    let x = cx + f32::from(k) * step;
-                    fill(pix, x, top, bar, h, t.color(TokenId::ColorQuoteBar), &clip);
+                if let Some(l) = &slot.code_label {
+                    let pad = (t.px(TokenId::SpaceCodePad) * s).round();
+                    let lx = (cx + cw - pad - l.laid.width()).round() as i32;
+                    let ly = (top + ((h - l.laid.height) / 2.0).floor()) as i32;
+                    self.layout
+                        .draw(&l.laid, &mut |m| blend(pix, lx, ly, &m, &rows));
                 }
             }
             BlockDeco::Rule => {
@@ -746,31 +1140,50 @@ impl DocView {
                     fill(pix, cx, top, cw, h, c, &clip);
                 }
             },
-            BlockDeco::None | BlockDeco::TableRow { .. } => {}
+            BlockDeco::None | BlockDeco::QuoteBars(_) | BlockDeco::TableRow { .. } => {}
         }
 
         let x0 = cx + slot.offset;
         let laid = &text.laid;
-        let mut highlight = |r: Range<usize>, token: TokenId| {
-            let r = src_to_display_clamped(d, r.start)..src_to_display_clamped(d, r.end);
-            for rect in laid.range_rects(r) {
+        let mut highlight = |r: &Range<usize>, token: TokenId| {
+            for rect in laid.range_rects(r.clone()) {
                 let c = t.color(token);
                 fill(pix, x0 + rect.x, top + rect.y, rect.w, rect.h, c, &clip);
             }
         };
-        for m in src.matches(i) {
-            highlight(m.clone(), TokenId::ColorSearchMatch);
+        for r in code_ranges(d) {
+            highlight(&r, TokenId::ColorCodeBg);
         }
-        if let Some(sel) = src.selection().and_then(|sel| sel.on_line(i, d.src_len)) {
+        for m in &slot.overlay.matches {
+            highlight(m, TokenId::ColorSearchMatch);
+        }
+        if let Some(sel) = &slot.overlay.selection {
             highlight(sel, TokenId::ColorSelection);
         }
 
-        let (ox, oy) = (x0 as i32, top as i32);
+        let gap = (t.px(TokenId::SpacePrefixGap) * s).round();
+        let oy = top as i32;
         if let Some(p) = &slot.prefix {
-            let px = cx as i32;
+            let px = (cx + slot.prefix_dx).max(0.0) as i32;
             self.layout
                 .draw(&p.laid, &mut |m| blend(pix, px, oy, &m, &rows));
         }
+        let hung_x = slot
+            .hung
+            .as_ref()
+            .map(|(c, _)| (cx - gap - c.laid.width().ceil()).max(0.0));
+        if let (Some((c, _)), Some(hx)) = (&slot.hung, hung_x) {
+            // On the main text's baseline when the line mixes sizes.
+            let dy = laid
+                .row_geometry()
+                .first()
+                .zip(c.laid.row_geometry().first())
+                .map_or(0.0, |(a, b)| (a.height - b.height).max(0.0) / 2.0);
+            let (hx, hy) = (hx as i32, (top + dy.floor()) as i32);
+            self.layout
+                .draw(&c.laid, &mut |m| blend(pix, hx, hy, &m, &rows));
+        }
+        let ox = x0 as i32;
         self.layout
             .draw(laid, &mut |m| blend(pix, ox, oy, &m, &rows));
         if let Some(l) = &slot.label {
@@ -779,17 +1192,19 @@ impl DocView {
                 .draw(&l.laid, &mut |m| blend(pix, lx, oy, &m, &rows));
         }
 
-        if self.caret.is_some_and(|(l, _)| l == i) {
-            self.caret = None;
-        }
-        let cursor = src.cursor();
-        if !src.reader() && cursor.line == i {
-            let c = laid.caret(src_to_display_clamped(d, cursor.col));
+        if let Some(col) = slot.overlay.caret {
+            let main = laid.caret(src_to_display_clamped(d, col));
+            let x = match (&slot.hung, hung_x) {
+                (Some((c, hp)), Some(hx)) if col < hp.end => {
+                    hx + c.laid.caret(col.saturating_sub(hp.start)).x
+                }
+                _ => x0 + main.x,
+            };
             let rect = RectF {
-                x: (x0 + c.x).round(),
-                y: top + c.top,
+                x: x.round(),
+                y: top + main.top,
                 w: (t.px(TokenId::SizeCaret) * s).round().max(1.0),
-                h: c.height,
+                h: main.height,
             };
             let color = t.color(TokenId::ColorCaret);
             fill(pix, rect.x, rect.y, rect.w, rect.h, color, &clip);
