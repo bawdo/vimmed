@@ -4,6 +4,9 @@ Tip a716942 (Merged task 29: key mapping and input methods), macOS arm64. This
 page collects every Checkpoint 2 number, in the same order as
 `checkpoint-1.md` so the two read side by side. Linux is deferred (section 3).
 
+Checkpoint 1's headless draw harness, binary size and owner GUI check sections
+were not re-measured at this checkpoint.
+
 ## Display used
 
 | Measurement | Display | Resolution and scale | Refresh |
@@ -58,7 +61,7 @@ against the 250 ms threshold: PASS. One sample, noted only.
 Reading the marks: in this run `images_painted` (median 194.4 ms) lands after
 `first_frame` (189.1 ms). At Checkpoint 1 it landed at the same time as
 `highlight_ready`, before `first_frame`. The bench reports the marks as they
-are; I have not derived why the order moved. Both are inside the thresholds
+are; why the order moved has not been derived. Both are inside the thresholds
 (`first_frame` is the gated mark).
 
 Linux stage budget: not filled, deferred (section 3). The macOS marks above
@@ -156,13 +159,13 @@ Run 1 is the only run with arrow keys, `other.none` and `status` redraws (it
 had 66 `other` keys against 1 and 2 in runs 2 and 3). Runs 2 and 3 are almost
 entirely text, backspace and enter.
 
-### Bug D (draw tail): resolved
+### Bug D (draw tail): no draw spike observed in these runs, after the D-b fix
 
 At Checkpoint 1 the `key_draw_ms` p99 was 24.2 ms and the max 25.1 ms, with
 Enter or a line join above an image costing 30 to 35 ms (the image was paired
 with the wrong `DocView` line slot, lost its cached resampled copy and was
 resampled on the UI thread). Now `key_draw_ms` p99 is 3.0 to 3.5 ms and the max
-is 5.2 to 6.8 ms across the three runs, which is the fix landing (D-b). The
+is 5.2 to 6.8 ms across the three runs, consistent with the D-b fix. The
 slowest draws in these runs are on text keys (max 4.2, 5.2 and 6.8 ms), not on
 Enter. Fix reference: D-b.
 
@@ -218,12 +221,12 @@ Startup stages (median, 20 runs):
 Every stage up to `highlight_ready` is faster. `images_painted` is the one
 stage that moved the other way (+15.0 ms median, and it now lands after
 `first_frame`). The runs are separate sessions on the same machine, so
-differences of a few milliseconds sit inside normal run-to-run spread; I have
-not attributed the gain to a cause.
+differences of a few milliseconds sit inside normal run-to-run spread. The
+gain is not attributed to a cause.
 
 Keystroke components (milliseconds):
 
-| Component | Statistic | Checkpoint 1 | Cp 2 run 1 | Cp 2 run 3 | Delta (run 3) |
+| Component | Statistic | Checkpoint 1 | Checkpoint 2 run 1 | Checkpoint 2 run 3 | Delta (run 3) |
 |---|---|---:|---:|---:|---:|
 | key_wait_ms | median | 1.6 | 1.9 | 2.4 | +0.8 |
 | key_wait_ms | p95 | 3.6 | 8.9 | 8.2 | +4.6 |
@@ -242,8 +245,9 @@ Keystroke components (milliseconds):
 
 Run 2 for the same rows is in section 2 (key_ms p95 11.3, key_wait p95 4.0,
 key_glass p95 27.3), where it sits level with Checkpoint 1. Run 3's higher
-`key_wait_ms` p95 (8.2 ms against 3.6) accounts for most of its +1.4 ms in
-`key_ms` p95; it did not recur in run 2. The draw tail fell by about 21 ms at
+`key_wait_ms` p95 (8.2 ms against 3.6) is the likeliest source of its +1.4 ms
+in `key_ms` p95 (inferred from the two moving together, not measured per key);
+it did not recur in run 2. The draw tail fell by about 21 ms at
 p99 and the p95 draw is level. The typing p95s are roughly where Checkpoint 1
 was, with the tail much shorter once the Bug D spike is gone.
 
@@ -276,10 +280,12 @@ non-text keys, but it is also the run with the stall, and the data cannot say
 which key caused it (see the tooling gap below). Re-exercise mode switches at
 Checkpoint 3.
 
-Draw tail: Bug D is fixed (D-b). `key_draw_ms` p99 is 3.0 to 3.5 ms and max 5.2
-to 6.8 ms, against 30 to 35 ms on Enter or a join at Checkpoint 1. Run 1's draw
-p95 (2.3 ms) is over the 2 ms draw target; it contains the stall window, and
-runs 2 and 3 are under 2 ms.
+Draw tail: no Bug D draw spike was observed in these runs, after the D-b fix.
+`key_draw_ms` p99 is 3.0 to 3.5 ms and max 5.2 to 6.8 ms, against 30 to 35 ms
+on Enter or a join at Checkpoint 1. Run 1's draw p95 (2.3 ms) is over the 2 ms
+draw target; the stall is in `key_wait_ms`, not draw, and run 1's draw p95 is
+driven by backspace (p95 2.7 ms) and enter (p95 5.7 ms). Runs 2 and 3 are under
+2 ms.
 
 On-glass: passes under the absolute reading (D15) in all three runs. The gap
 against the "2.5 refresh periods" reading at 120 Hz (3.28 to 3.73 periods)
