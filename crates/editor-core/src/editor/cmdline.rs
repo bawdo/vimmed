@@ -116,11 +116,23 @@ impl Editor {
         if self.refuse_write() {
             return false;
         }
+        if self.write_quietly(force) {
+            self.say(strings::WRITTEN.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// `write`'s work after the read-only check (autosave's write too):
+    /// true when written, which leaves the buffer clean, records the save
+    /// point and rebases the file watch, saying nothing. A failed or
+    /// refused write says why, as an Error.
+    pub(super) fn write_quietly(&mut self, force: bool) -> bool {
         match self.saver.write(&self.buf.to_text(), force) {
             Ok(()) => {
                 self.dirty = false;
                 self.history.mark_saved();
-                self.say(strings::WRITTEN.to_owned());
                 self.wrote();
                 true
             }

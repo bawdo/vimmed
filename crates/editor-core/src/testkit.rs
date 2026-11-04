@@ -242,7 +242,14 @@ pub(crate) fn ed_linux_with_host(text: &str) -> (Editor, FakeHost) {
 
 /// A vim-off editor on `text` (Insert only), with a handle on its host.
 pub(crate) fn plain_with_host(text: &str) -> (Editor, FakeHost) {
-    build_with_host(text, Config { vim: false }, false)
+    build_with_host(
+        text,
+        Config {
+            vim: false,
+            ..Config::default()
+        },
+        false,
+    )
 }
 
 pub(crate) fn pos(line: usize, col: usize) -> Pos {

@@ -24,6 +24,7 @@ use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
 use editor_core::input::Input;
 use editor_core::platform::Platform;
+use editor_core::strings;
 use editor_core::tokens::TokenId;
 use editor_core::view_model::ViewSource;
 use editor_render::fonts::FontSet;
@@ -415,12 +416,14 @@ pub fn on_snapshot(w: &gtk::Widget, snapshot: &gtk::Snapshot) {
 /// Applies the editor's effects and paints what they changed into the
 /// frame. Returns the exit code when the editor asked to close.
 fn apply(st: &mut State, fx: Effects) -> Option<i32> {
-    if let Some(t) = &fx.title {
-        st.window.set_title(Some(t.as_str()));
+    // GTK has no edited flag, so the dirty state shows as a mark in front
+    // of the title (and in the status bar).
+    if fx.title.is_some() || fx.dirty.is_some() {
+        let title = strings::window_title(st.editor.title(), st.editor.dirty());
+        st.window.set_title(Some(title.as_str()));
     }
     // A reader mode change reaches the view before the scroll below, and
-    // a full repaint comes with it. The dirty state shows in the title
-    // and status bar; GTK has no edited flag.
+    // a full repaint comes with it.
     if let Some(on) = fx.reader {
         st.doc.set_reader(on);
     }

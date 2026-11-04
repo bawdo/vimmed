@@ -169,3 +169,17 @@ pub fn table_size(cols: u32, rows: u32) -> String {
 pub fn table_too_big(max_cols: u32, max_rows: u32) -> String {
     format!("E474: A table has at most {max_cols} columns and {max_rows} rows")
 }
+
+/// Put before the window title while there are unsaved changes, where the
+/// toolkit has no edited flag of its own (GTK; macOS shows its dot).
+pub const DIRTY_TITLE_MARK: &str = "\u{2022} ";
+
+/// The window title for a toolkit with no edited flag: `name`, marked
+/// while `dirty`.
+pub fn window_title(name: &str, dirty: bool) -> String {
+    if dirty {
+        format!("{DIRTY_TITLE_MARK}{name}")
+    } else {
+        name.to_owned()
+    }
+}

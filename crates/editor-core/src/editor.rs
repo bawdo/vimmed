@@ -67,10 +67,16 @@
 //! warns about one with unsaved changes, a file gone, or one that cannot
 //! be read or written.
 //!
+//! Autosave (`autosave`, `Config::autosave`): a second after the last
+//! change the tick writes down `:w`'s path, quietly, unless something
+//! holds it. `handle` reports each change of the dirty state once
+//! (`Effects::dirty`); the shells show it beside the title.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
 
+mod autosave;
 mod cmdline;
 mod disk;
 mod ime;
@@ -130,11 +136,17 @@ pub struct OpenRequest {
 pub struct Config {
     /// Vim keybindings.
     pub vim: bool,
+    /// Write the file after a short idle pause following each change
+    /// (`autosave`). Off by default.
+    pub autosave: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { vim: true }
+        Config {
+            vim: true,
+            autosave: false,
+        }
     }
 }
 
@@ -261,6 +273,9 @@ pub struct Editor {
     /// The shell asked for the watch (`start_watching`); a file missing
     /// until now is watched from its first write.
     watch_wanted: bool,
+    /// When autosave writes the change waiting (`autosave`; the
+    /// `marks::now_ns` clock): `None` while nothing is waiting.
+    autosave_due: Option<u64>,
 }
 
 impl Editor {
@@ -403,6 +418,7 @@ impl Editor {
             disk: None,
             watcher: None,
             watch_wanted: false,
+            autosave_due: None,
         }
     }
 
@@ -431,6 +447,8 @@ impl Editor {
     }
 
     pub fn handle(&mut self, input: Input) -> Effects {
+        let dirty = self.dirty;
+        let autosave = self.autosave_before();
         let status = self.status();
         let current = self.current_match().map(|(line, _)| line);
         let until = self.message_until;
@@ -445,6 +463,15 @@ impl Editor {
             fx = fx.merge(self.take_waiting_reload());
         }
         fx = fx.merge(self.drop_stale_preedit(line));
+        if fx.close.is_none() {
+            fx = fx.merge(self.autosave_after(&autosave));
+        }
+        // The dirty state is reported here, once per change of it, so an
+        // input that passes through several states (an undo to the save
+        // point that lets a waiting reload in) reports only where it
+        // ended, and one that ends where it began (a reload of a clean
+        // document) reports nothing.
+        fx.dirty = (self.dirty != dirty).then_some(self.dirty);
         let warnings = [
             (self.registers.take_reset(), strings::NAMED_REGISTERS_RESET),
             (
@@ -580,10 +607,12 @@ impl Editor {
     }
 
     /// The main loop woke: what the file watch found is taken (`disk`),
-    /// then a timed message whose time is up goes. One not due yet (a
+    /// a write autosave has due goes (`autosave`), then a timed message
+    /// whose time is up goes. One not due yet (a
     /// timer that fired early) asks to be woken again then.
     fn tick(&mut self, now_ns: u64) -> Effects {
         let fx = self.poll_disk();
+        let fx = fx.merge(self.autosave_tick(now_ns));
         fx.merge(self.fade_message(now_ns))
     }
 
@@ -1918,7 +1947,14 @@ mod tests {
 
     /// The insert path on its own: vim off.
     fn ed(text: &str) -> Editor {
-        build(text, Config { vim: false }, false)
+        build(
+            text,
+            Config {
+                vim: false,
+                ..Config::default()
+            },
+            false,
+        )
     }
 
     fn at(e: &mut Editor, line: usize, col: usize) {
