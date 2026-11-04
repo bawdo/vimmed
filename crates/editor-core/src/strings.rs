@@ -92,3 +92,6 @@ fn counted(count: usize, one: &str, many: &str, lines: usize) -> String {
 pub fn confirm_replace(replacement: &str) -> String {
     format!("replace with {replacement}? [y/n/a/q/l]")
 }
+
+/// Status message prefix when a link target does not exist; the path follows.
+pub const NO_SUCH_FILE: &str = "no such file: ";
