@@ -8,6 +8,7 @@
 //! graphemes and a cursor put on its start rests on a grapheme boundary
 //! (R12).
 
+use std::cell::OnceCell;
 use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -21,6 +22,13 @@ pub const WRAPPED_FOR_NS: u64 = 1_000_000_000;
 
 /// A search: what is searched for, which way, and where it started, with
 /// the matches on each line for the highlights.
+///
+/// The highlights are worked out a line at a time, when a line is asked
+/// for (`matches_on`), so a key on the search line costs what the renderer
+/// shows rather than the whole document. Each line's matches sit in a
+/// `OnceCell`: `ViewSource` reads through `&self`, a cell is filled once
+/// and never changed while it is shared, so the slice it lends stays
+/// valid, and only `&mut self` (a new query, an edit) empties cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Search {
     pub query: String,
@@ -28,8 +36,8 @@ pub struct Search {
     pub forward: bool,
     /// The cursor when the search started, where Esc puts it back.
     pub origin: Cursor,
-    /// The matches on each line, as `matches` gives them.
-    lines: Vec<Vec<Range<usize>>>,
+    /// The matches on each line, as `matches` gives them, once asked for.
+    lines: Vec<OnceCell<Vec<Range<usize>>>>,
     /// The match the search last jumped to.
     current: Option<(usize, Range<usize>)>,
 }
@@ -53,6 +61,10 @@ impl Hit {
             col: self.range.start,
         }
     }
+
+    fn same_match(&self, other: &Hit) -> bool {
+        self.line == other.line && self.range == other.range
+    }
 }
 
 impl Search {
@@ -69,19 +81,23 @@ impl Search {
 
     /// The matches in `buf`, line by line, worked out afresh.
     pub fn matches(&self, buf: &Buffer) -> Vec<(usize, Range<usize>)> {
+        let m = Matcher::new(&self.query);
         (0..buf.line_count())
-            .flat_map(|i| {
-                line_matches(buf.line(i), &self.query)
-                    .into_iter()
-                    .map(move |r| (i, r))
-            })
+            .flat_map(|i| m.line(buf.line(i)).into_iter().map(move |r| (i, r)))
             .collect()
     }
 
-    /// The matches on `line` when the search was last brought up to date
-    /// (`refresh`, `edited`), for `ViewSource::matches`.
-    pub fn matches_on(&self, line: usize) -> &[Range<usize>] {
-        self.lines.get(line).map_or(&[], Vec::as_slice)
+    /// The matches on `line` of `buf`, for `ViewSource::matches`, worked
+    /// out the first time the line is asked for since the search was last
+    /// brought up to date (`refresh`, `edited`). `buf` must be the buffer
+    /// it was brought up to date with.
+    pub fn matches_on(&self, buf: &Buffer, line: usize) -> &[Range<usize>] {
+        match self.lines.get(line) {
+            Some(cell) if line < buf.line_count() => {
+                cell.get_or_init(|| line_matches(buf.line(line), &self.query))
+            }
+            _ => &[],
+        }
     }
 
     /// The match the search last jumped to.
@@ -94,20 +110,17 @@ impl Search {
         self.current = hit.map(|h| (h.line, h.range.clone()));
     }
 
-    /// Works out the matches on every line afresh.
+    /// Forgets every line's matches, to be worked out again when asked for.
     pub fn refresh(&mut self, buf: &Buffer) {
         self.current = None;
-        self.lines = if self.query.is_empty() {
-            Vec::new()
-        } else {
-            (0..buf.line_count())
-                .map(|i| line_matches(buf.line(i), &self.query))
-                .collect()
-        };
+        self.lines.clear();
+        if !self.query.is_empty() {
+            self.lines.resize(buf.line_count(), OnceCell::new());
+        }
     }
 
     /// Brings the matches up to date after the one edit `t`: only the
-    /// lines it replaced are searched again.
+    /// lines it replaced are forgotten, the others move with the edit.
     pub fn edited(&mut self, buf: &Buffer, t: &Touched) {
         self.current = None;
         if self.query.is_empty() {
@@ -116,9 +129,7 @@ impl Search {
         let old_end = (t.old_end_line + 1).min(self.lines.len());
         let start = t.start_line.min(old_end);
         let new_end = (t.new_end_line + 1).min(buf.line_count());
-        let fresh: Vec<_> = (start..new_end)
-            .map(|i| line_matches(buf.line(i), &self.query))
-            .collect();
+        let fresh = (start..new_end.max(start)).map(|_| OnceCell::new());
         self.lines.splice(start..old_end, fresh);
         if self.lines.len() != buf.line_count() {
             self.refresh(buf);
@@ -137,44 +148,114 @@ pub fn case_sensitive(query: &str) -> bool {
 /// Without an uppercase letter in `query`, case is ignored char by char,
 /// so the ranges stay in the line's own bytes.
 pub fn line_matches(line: &str, query: &str) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
-    if query.is_empty() {
-        return out;
-    }
-    let sensitive = case_sensitive(query);
-    // On an ASCII line every byte starts a grapheme.
-    let bounds: Option<Vec<usize>> = (!line.is_ascii()).then(|| {
-        line.grapheme_indices(true)
-            .map(|(i, _)| i)
-            .chain([line.len()])
-            .collect()
-    });
-    let on_boundary = |i: usize| bounds.as_ref().is_none_or(|b| b.binary_search(&i).is_ok());
-    let mut at = 0;
-    while at < line.len() {
-        let Some(r) = next_match(line, at, query, sensitive) else {
-            break;
-        };
-        if on_boundary(r.start) && on_boundary(r.end) {
-            at = r.end;
-            out.push(r);
-        } else {
-            // It splits a grapheme: look again from the next char.
-            at = r.start + line[r.start..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    out
+    Matcher::new(query).line(line)
 }
 
-/// The first match of `query` in `line` starting at or after `at` (a char
-/// boundary).
-fn next_match(line: &str, at: usize, query: &str, sensitive: bool) -> Option<Range<usize>> {
-    let rest = &line[at..];
-    if sensitive {
-        return rest.find(query).map(|o| at + o..at + o + query.len());
+/// The first byte of U+212A KELVIN SIGN, which folds to `k`.
+const KELVIN_LEAD: u8 = 0xE2;
+
+/// A query made ready for matching line after line.
+struct Matcher<'q> {
+    query: &'q str,
+    sensitive: bool,
+    /// Ignoring case, the bytes a match can start with when the query
+    /// starts with an ASCII char: its two cases. The only char beyond
+    /// ASCII that folds to an ASCII one is the Kelvin sign (to `k`, lead
+    /// byte `KELVIN_LEAD`). With a first char beyond ASCII, any char
+    /// beyond ASCII is a candidate, as no ASCII char folds to it.
+    first: Option<(u8, u8)>,
+}
+
+impl<'q> Matcher<'q> {
+    fn new(query: &'q str) -> Matcher<'q> {
+        let first = query
+            .chars()
+            .next()
+            .filter(char::is_ascii)
+            .map(|c| (c.to_ascii_lowercase() as u8, c.to_ascii_uppercase() as u8));
+        Matcher {
+            query,
+            sensitive: case_sensitive(query),
+            first,
+        }
     }
-    rest.char_indices()
-        .find_map(|(o, _)| folded_len(&rest[o..], query).map(|n| at + o..at + o + n))
+
+    /// The matches on `line`. Grapheme boundaries are worked out only for
+    /// a line with a candidate match that is not all ASCII.
+    fn line(&self, line: &str) -> Vec<Range<usize>> {
+        let mut out = Vec::new();
+        if self.query.is_empty() || !self.may_match(line.as_bytes()) {
+            return out;
+        }
+        let mut bounds: Option<Option<Vec<usize>>> = None;
+        let mut at = 0;
+        while at < line.len() {
+            let Some(r) = self.next_match(line, at) else {
+                break;
+            };
+            // On an ASCII line every byte starts a grapheme.
+            let b = bounds.get_or_insert_with(|| {
+                (!line.is_ascii()).then(|| {
+                    line.grapheme_indices(true)
+                        .map(|(i, _)| i)
+                        .chain([line.len()])
+                        .collect()
+                })
+            });
+            let on = |i: usize| b.as_ref().is_none_or(|b| b.binary_search(&i).is_ok());
+            if on(r.start) && on(r.end) {
+                at = r.end;
+                out.push(r);
+            } else {
+                // It splits a grapheme: look again from the next char.
+                at = r.start + line[r.start..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        out
+    }
+
+    /// False when no match can start on `line`: a quick reject on the
+    /// bytes a match can start with (`[u8]::contains` is a memchr).
+    fn may_match(&self, line: &[u8]) -> bool {
+        if self.sensitive {
+            return line.contains(&self.query.as_bytes()[0]);
+        }
+        match self.first {
+            Some((lo, up)) => {
+                line.contains(&lo)
+                    || line.contains(&up)
+                    || (lo == b'k' && line.contains(&KELVIN_LEAD))
+            }
+            None => !line.is_ascii(),
+        }
+    }
+
+    /// True when a match ignoring case can start at byte `b` (a char
+    /// boundary).
+    fn starts_here(&self, b: u8) -> bool {
+        match self.first {
+            Some((lo, up)) => b == lo || b == up || (lo == b'k' && b == KELVIN_LEAD),
+            // 0xC0 and up starts a char of two or more bytes.
+            None => b >= 0xC0,
+        }
+    }
+
+    /// The first match in `line` starting at or after `at` (a char
+    /// boundary).
+    fn next_match(&self, line: &str, at: usize) -> Option<Range<usize>> {
+        let rest = &line[at..];
+        if self.sensitive {
+            return rest
+                .find(self.query)
+                .map(|o| at + o..at + o + self.query.len());
+        }
+        rest.bytes().enumerate().find_map(|(o, b)| {
+            if !self.starts_here(b) {
+                return None;
+            }
+            folded_len(&rest[o..], self.query).map(|n| at + o..at + o + n)
+        })
+    }
 }
 
 /// The length in bytes of the start of `text` that matches `query`, case
@@ -195,46 +276,38 @@ fn folded_len(text: &str, query: &str) -> Option<usize> {
 /// The `count`th match of `query` from `from` (0 counts as 1), going
 /// forward or backward and wrapping round the buffer. A match at `from`
 /// itself is not counted. `None` when there is no match at all.
+///
+/// Each step searches only as far as the next match. A count larger than
+/// the number of matches comes back round to the first one found; from
+/// there only the remainder is stepped, so any count costs at most two
+/// passes over the buffer.
 pub fn find(buf: &Buffer, query: &str, from: Pos, forward: bool, count: usize) -> Option<Hit> {
     if query.is_empty() {
         return None;
     }
-    let from = buf.clamp(from);
-    let first = first_hit(buf, query, from, forward)?;
-    if count <= 1 {
-        return Some(first);
+    let m = Matcher::new(query);
+    let first = first_hit(buf, &m, buf.clamp(from), forward)?;
+    let mut hit = first.clone();
+    let mut wrapped = first.wrapped;
+    let mut steps = 1;
+    while steps < count.max(1) {
+        let next = first_hit(buf, &m, hit.pos(), forward)?;
+        wrapped |= next.wrapped;
+        steps += 1;
+        hit = next;
+        if hit.same_match(&first) {
+            // Round once: `steps - 1` matches in all. Skip whole rounds.
+            let round = steps - 1;
+            steps = count - (count - steps) % round;
+        }
     }
-    // Step over the rest through the list of every match, so a huge count
-    // costs one pass over the buffer.
-    let all: Vec<(usize, Range<usize>)> = (0..buf.line_count())
-        .flat_map(|i| {
-            line_matches(buf.line(i), query)
-                .into_iter()
-                .map(move |r| (i, r))
-        })
-        .collect();
-    let n = all.len();
-    let i = all
-        .iter()
-        .position(|(l, r)| *l == first.line && *r == first.range)?;
-    let steps = count - 1;
-    let (j, wrapped) = if forward {
-        ((i + steps % n) % n, steps >= n - i)
-    } else {
-        ((i + n - steps % n) % n, steps > i)
-    };
-    let (line, range) = all[j].clone();
-    Some(Hit {
-        line,
-        range,
-        wrapped: first.wrapped || wrapped,
-    })
+    Some(Hit { wrapped, ..hit })
 }
 
 /// The nearest match after `from` (forward) or before it, wrapping.
-fn first_hit(buf: &Buffer, query: &str, from: Pos, forward: bool) -> Option<Hit> {
+fn first_hit(buf: &Buffer, m: &Matcher, from: Pos, forward: bool) -> Option<Hit> {
     let n = buf.line_count();
-    let here = line_matches(buf.line(from.line), query);
+    let here = m.line(buf.line(from.line));
     let near = if forward {
         here.into_iter().find(|r| r.start > from.col)
     } else {
@@ -255,7 +328,7 @@ fn first_hit(buf: &Buffer, query: &str, from: Pos, forward: bool) -> Option<Hit>
         } else {
             ((from.line + n - k) % n, k > from.line)
         };
-        let ms = line_matches(buf.line(line), query);
+        let ms = m.line(buf.line(line));
         let range = if forward {
             ms.into_iter().next()
         } else {
@@ -377,6 +450,21 @@ mod tests {
     }
 
     #[test]
+    fn only_the_kelvin_sign_folds_to_ascii() {
+        // The candidate filter for a query starting with an ASCII char
+        // rests on this.
+        for c in ('\u{80}'..=char::MAX).filter(|c| !c.is_ascii()) {
+            let mut lower = c.to_lowercase();
+            if let (Some(l), None) = (lower.next(), lower.next())
+                && l.is_ascii()
+            {
+                assert_eq!(c, '\u{212A}', "{c:?} folds to {l:?}");
+            }
+        }
+        assert_eq!(line_matches("x\u{212A}m km", "km"), vec![1..5, 6..8]);
+    }
+
+    #[test]
     fn matches_do_not_overlap() {
         // vim: `aa` in `aaaa` matches at 0 and 2.
         assert_eq!(line_matches("aaaa", "aa"), vec![0..2, 2..4]);
@@ -433,6 +521,13 @@ mod tests {
         assert_eq!(at(3, pos(0, 0)), Some((pos(0, 9), false)));
         assert_eq!(at(2, pos(0, 9)), Some((pos(0, 0), true)));
         assert_eq!(at(1_000_000_000, pos(0, 0)), Some((pos(0, 0), true)));
+        // More than one round of the five matches.
+        assert_eq!(at(6, pos(0, 0)), Some((pos(0, 3), true)));
+        assert_eq!(at(11, pos(0, 0)), Some((pos(0, 3), true)));
+        assert_eq!(
+            find(&buf, "a", pos(0, 0), false, 7).map(|h| (h.pos(), h.wrapped)),
+            Some((pos(0, 9), true))
+        );
         assert_eq!(
             find(&buf, "a", pos(0, 0), false, 2).map(|h| h.pos()),
             Some(pos(0, 9))
@@ -906,5 +1001,108 @@ mod tests {
         assert_eq!(e.cursor(), pos(0, 7));
         keys(&mut e, "n");
         assert_eq!(e.cursor(), pos(0, 0));
+    }
+}
+
+/// Timing harness for the per-key cost of Search mode, not run in CI:
+/// `cargo test -p editor-core --release --lib search::timing -- --ignored --nocapture`
+#[cfg(test)]
+mod timing {
+    use std::time::Instant;
+
+    use crate::editor::Editor;
+    use crate::input::{Input, Key, KeyEvent, Mods};
+    use crate::testkit::*;
+
+    /// 10,000 lines in a 4-line cycle: ASCII with `café`, a French task
+    /// line with a ZWJ emoji, a decomposed accent, plain ASCII.
+    fn doc() -> String {
+        let mut text = String::new();
+        for i in 0..10_000 {
+            match i % 4 {
+                0 => text.push_str(&format!(
+                    "Line {i}: the quick brown fox jumps over the lazy dog, café\n"
+                )),
+                1 => text.push_str(&format!(
+                    "- [ ] tâche numéro {i} pour l'école, naïve façade 👩\u{200d}👩\u{200d}👧\n"
+                )),
+                2 => text.push_str(&format!(
+                    "**bold** and `code` with e\u{301}cole décomposée {i}\n"
+                )),
+                _ => text.push_str("plain ascii text line with a few words in it and some more\n"),
+            }
+        }
+        text
+    }
+
+    fn press(e: &mut Editor, key: Key) {
+        e.handle(Input::Key(KeyEvent {
+            key,
+            mods: Mods::default(),
+            time_ns: 0,
+        }));
+    }
+
+    /// One key, plus the highlights a renderer asks for: 60 lines from
+    /// the cursor's. Milliseconds.
+    fn timed(e: &mut Editor, key: Key) -> f64 {
+        let t = Instant::now();
+        press(e, key);
+        let top = e.cursor().line.saturating_sub(30);
+        let mut n = 0;
+        for i in top..(top + 60).min(e.line_count()) {
+            n += e.matches(i).len();
+        }
+        std::hint::black_box(n);
+        t.elapsed().as_secs_f64() * 1000.0
+    }
+
+    fn summary(label: &str, mut times: Vec<f64>) {
+        let all = format!("{times:.3?}");
+        times.sort_by(f64::total_cmp);
+        println!(
+            "{label}: median {:.3} max {:.3} per key {all}",
+            times[times.len() / 2],
+            times[times.len() - 1]
+        );
+    }
+
+    #[test]
+    #[ignore = "timing harness, run by hand in release"]
+    fn search_keys_and_n() {
+        let text = doc();
+        // From the middle of the document, so a hit can be either side.
+        for query in ["e", "lazy d", "école", "Quick", "numéro 9", "zzzzzz"] {
+            let mut e = ed(&text);
+            keys(&mut e, "5000G");
+            press(&mut e, Key::Char('/'));
+            let times = query
+                .chars()
+                .map(|c| timed(&mut e, if c == ' ' { Key::Space } else { Key::Char(c) }))
+                .collect();
+            summary(&format!("type {query:?}"), times);
+        }
+        for (query, label) in [
+            ("fox", "n, common match"),
+            ("numéro 5001", "n, one match (wraps the document)"),
+        ] {
+            let mut e = ed(&text);
+            keys(&mut e, "5000G");
+            keys(&mut e, &format!("/{query}<CR>"));
+            let times = (0..10).map(|_| timed(&mut e, Key::Char('n'))).collect();
+            summary(&format!("{label} {query:?}"), times);
+            let times = (0..10).map(|_| timed(&mut e, Key::Char('N'))).collect();
+            summary(&format!("N {query:?}"), times);
+        }
+        let mut e = ed(&text);
+        keys(&mut e, "5000G/fox<CR>");
+        let times = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                keys(&mut e, "1000n");
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        summary("1000n \"fox\"", times);
     }
 }

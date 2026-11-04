@@ -1371,7 +1371,7 @@ impl ViewSource for Editor {
         self.shown_selection()
     }
     fn matches(&self, i: usize) -> &[Range<usize>] {
-        self.search().map_or(&[], |s| s.matches_on(i))
+        self.search().map_or(&[], |s| s.matches_on(&self.buf, i))
     }
 }
 
