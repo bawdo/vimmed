@@ -34,8 +34,10 @@ whose value is that instance's pid:
 | `routed_spawn,<pid>` | the pid of the sibling window process just spawned |
 
 Children never inherit `<P>MARKS` (it is stripped), so every line comes from an instance that
-Launch Services or the launcher started. Launch Services does not pass the shell's environment
-to an app it starts, so the commands below hand `<P>MARKS` over with `open --env`.
+Launch Services or the launcher started. So a request that adds a new process but no
+`*_open_urls` line was taken by a spawned sibling, which cannot log it because its `<P>MARKS`
+was stripped. Launch Services does not pass the shell's environment to an app it starts, so the
+commands below hand `<P>MARKS` over with `open --env`.
 
 ## Procedure
 
@@ -65,10 +67,16 @@ WindowServer). `<BUNDLE_NAME>`, `<SLUG>` and `<P>` are the bundle name, slug and
    ```
    : > $LOG
    <P>MARKS=$LOG target/dist/<BUNDLE_NAME>.app/Contents/MacOS/<SLUG> -b $D/a.md
-   open --env <P>MARKS=$LOG $D/b.md
-   open --env <P>MARKS=$LOG $D/c.md
+   open -a target/dist/<BUNDLE_NAME>.app --env <P>MARKS=$LOG $D/b.md
+   open -a target/dist/<BUNDLE_NAME>.app --env <P>MARKS=$LOG $D/c.md
    sleep 3; pgrep -lf <BUNDLE_NAME>; cat $LOG
    ```
+
+   `-a` names this bundle: a bare `open b.md` goes to the default `.md` handler, which may be
+   another app or an older bundle registered from another tree. When the request goes to a
+   running instance, `open` warns that the app "was already running and so the additional
+   environment variables could not be set". That is expected: the running instance logs to its
+   own `<P>MARKS`, which here is the launcher's `$LOG`.
 
    Expected: two new processes (`b.md` and `c.md`), `a.md`'s window untouched, and no process
    holding two files. Record which instance received each `openURLs`: a `window_open_urls` line
@@ -79,9 +87,15 @@ WindowServer). `<BUNDLE_NAME>`, `<SLUG>` and `<P>` are the bundle name, slug and
 
 ## Results
 
+Run on commit acf9c4b, release bundle, sandbox off.
+
 | Step | Date | Machine | Result | Instance that received `openURLs` |
 |---|---|---|---|---|
-| 2 | | | | |
-| 3 (`b.md`) | | | | |
-| 3 (`c.md`) | | | | |
-| 4 | | | | |
+| 2 | 2026-11-04 | Mac16,6, macOS 27.2 | pass: one window held `a.md` (`routed_spawn` pid 5952); the router had exited after 3 s | a new router (pid 5881, `router_open_urls`) |
+| 3 (`b.md`) | 2026-11-04 | Mac16,6, macOS 27.2 | pass: new process (`routed_spawn` pid 7782), `a.md` untouched | the launcher-started `a.md` window (pid 7520, `window_open_urls`) |
+| 3 (`c.md`) | 2026-11-04 | Mac16,6, macOS 27.2 | pass: new process (`routed_spawn` pid 7853); three processes, one file each | the launcher-started `a.md` window (pid 7520, `window_open_urls`) |
+| 4 | pending | | pending (owner: Finder double-click on two files) | |
+
+Answer to the open question: with a window running, Launch Services handed both requests to the
+launcher-started window. It did not pick the sibling spawned earlier, and it did not start a new
+router. Routing was correct either way, as designed.
