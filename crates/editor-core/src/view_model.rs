@@ -153,7 +153,7 @@ pub trait ViewSource {
     fn status(&self) -> StatusModel;
     fn tokens(&self) -> &Tokens;
     fn theme(&self) -> Theme;
-    /// True in reader mode: no caret and no status bar.
+    /// True in reader mode: no caret, nothing revealed.
     fn reader(&self) -> bool;
     /// While the help overlay shows, the first of `help::rows` it shows.
     fn help(&self) -> Option<usize> {

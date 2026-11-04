@@ -1,13 +1,16 @@
 //! Reader view and the help overlay.
 //!
 //! Reader view (`--view`, or Primary+Shift+R from Normal, Insert or
-//! Visual) hides the caret and the status bar and reveals nothing. It is
-//! read-only: edits, undo, `.`, paste and Primary+S do nothing, and `:` is
-//! disabled. `j k`, the arrows, PageUp and PageDown, `gg` and `G` scroll
-//! the view (`Effects::scroll`) and leave the cursor where it is, so
-//! toggling back finds the cursor, mode and selection as they were. Other
-//! keys still reach the vim engine: Visual selects and `y` yanks, `/` and
-//! `n` search, `ZZ` and `ZQ` close.
+//! Visual) hides the caret and reveals nothing. The status line stays
+//! (owner decision D21), naming reader view (`READER`) and leaving out the
+//! hidden cursor's position. It is read-only: edits, undo, `.`, paste and
+//! Primary+S do nothing, `:` and searching (`/ ? n N`) are disabled, and
+//! `ZZ` with unsaved changes refuses. `j k`, the arrows, PageUp and
+//! PageDown, `gg`, `G`, `[N]gg` and `[N]G` scroll the view
+//! (`Effects::scroll`) and leave the cursor where it is, so toggling back
+//! finds the cursor, mode and selection as they were. Other keys still
+//! reach the vim engine: Visual selects and `y` yanks, `ZZ` and `ZQ`
+//! close.
 //!
 //! The help overlay (`:help`) shows `crate::help::rows` from a first row
 //! that `j`/`k` (and Down/Up) move; Esc dismisses it. While it shows it
@@ -216,7 +219,7 @@ mod tests {
     use crate::input::{Key, Mods};
     use crate::status::Mode;
     use crate::testkit::{ViewSource, build_reader, ed, ed_with_files, key, key_with, keys, pos};
-    use crate::view_model::{CaretShape, Selection};
+    use crate::view_model::{CaretShape, MsgKind, Selection, StatusLeft};
 
     use super::super::Editor;
 
@@ -237,6 +240,35 @@ mod tests {
         let e = build_reader("a");
         assert!(e.reader());
         assert_eq!(e.caret_shape(), CaretShape::Hidden);
+    }
+
+    #[test]
+    fn reader_status_names_reader_without_the_hidden_cursor() {
+        // Owner decision D21: the status line stays in reader view. It
+        // names reader view and leaves out the hidden cursor's position.
+        let mut e = ed("one\ntwo");
+        keys(&mut e, "jl");
+        toggle(&mut e);
+        let s = e.status();
+        assert_eq!(s.left, StatusLeft::Mode(crate::strings::MODE_READER));
+        assert_eq!(s.position, "");
+        assert_eq!(s.file, "notes.md");
+        // Counts still show while they wait.
+        keys(&mut e, "3");
+        assert_eq!(e.status().showcmd, "3");
+        keys(&mut e, "<Esc>");
+        // A selection made in reader view is still named.
+        keys(&mut e, "v");
+        assert_eq!(
+            e.status().left,
+            StatusLeft::Mode(crate::strings::MODE_VISUAL)
+        );
+        keys(&mut e, "<Esc>");
+        toggle(&mut e);
+        let s = e.status();
+        assert_eq!(s.left, StatusLeft::Mode(crate::strings::MODE_NORMAL));
+        assert_eq!(s.position, "2:2");
+        assert_eq!(build_reader("a").status().left, StatusLeft::Mode("READER"));
     }
 
     #[test]
@@ -367,6 +399,14 @@ mod tests {
         assert_eq!(fx.close, None);
         assert!(files.calls().is_empty(), "wrote: {:?}", files.calls());
         assert_eq!(e.message(), Some(crate::strings::READ_ONLY_ZQ));
+        // The status line stays up in reader view (D21), so it shows there.
+        assert_eq!(
+            e.status().left,
+            StatusLeft::Message {
+                text: crate::strings::READ_ONLY_ZQ.to_owned(),
+                kind: MsgKind::Error
+            }
+        );
         assert!(e.dirty());
         // ZQ still discards and closes.
         assert_eq!(keys(&mut e, "ZQ").close, Some(0));

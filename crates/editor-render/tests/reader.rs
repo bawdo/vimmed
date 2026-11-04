@@ -1,10 +1,16 @@
-//! Reader view (no caret, no status bar, keys that scroll) and the help
-//! overlay, painted from a real editor or the fake source.
+//! Reader view (no caret, the status line kept, keys that scroll) and the
+//! help overlay, painted from a real editor or the fake source.
 
 mod common;
 
-use common::{Fake, Geom, H_PT, W_PT, open_editor, press, press_with, view};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use common::{
+    Fake, Geom, H_PT, Laid, Recording, W_PT, cosmic, open_editor, press, press_with, view,
+};
 use editor_core::input::{Key, Mods};
+use editor_core::strings;
 use editor_core::tokens::{Rgba, Theme, TokenId, Tokens};
 use editor_core::view_model::ViewSource;
 use editor_render::view::DocView;
@@ -38,31 +44,79 @@ fn line_at(v: &DocView, t: &Tokens, dy: f32) -> usize {
     v.hit_test(W_PT / 2.0, y).expect("a painted line").line
 }
 
+/// A view whose layout records the text of every line it lays out.
+fn recording(t: &Tokens) -> (DocView, Rc<RefCell<Vec<Laid>>>) {
+    let laid = Rc::new(RefCell::new(Vec::new()));
+    let layout = Recording {
+        inner: cosmic(t),
+        laid: laid.clone(),
+    };
+    (DocView::new(Box::new(layout), t, W_PT, H_PT, 1.0), laid)
+}
+
+/// Every text laid out since the last call, and forgets them.
+fn laid_texts(laid: &Rc<RefCell<Vec<Laid>>>) -> Vec<String> {
+    laid.borrow_mut().drain(..).map(|l| l.text).collect()
+}
+
+/// Owner decision D21 (overriding the brief's "status line hidden"): in
+/// reader view the status line stays at its normal height. It names
+/// reader view and leaves out the hidden cursor's position; the caret
+/// stays hidden.
 #[test]
-fn view_flag_starts_reader_and_hides_status() {
+fn view_flag_starts_reader_with_status_line() {
     let t = Tokens::defaults(Theme::Light);
     let g = Geom::new(&t, 1.0);
     let dir = scratch("view");
     let mut ed = open_editor(&dir, "# Title\n\nsome **bold** text", true);
     assert!(ed.reader());
-    let mut v = view(&t, 1.0);
+    let (mut v, laid) = recording(&t);
     v.paint_all(&ed);
     assert_eq!(v.caret_rect(), None);
-    // The page runs to the bottom: no status bar.
     let bottom = g.height_px - 1;
-    assert_eq!(rgba(&v, 1, bottom), opaque(t.color(TokenId::ColorBg)));
+    assert_eq!(rgba(&v, 1, bottom), opaque(t.color(TokenId::ColorStatusBg)));
+    let texts = laid_texts(&laid);
+    assert!(texts.iter().any(|s| s == strings::MODE_READER), "{texts:?}");
+    assert!(texts.iter().any(|s| s == "doc.md"), "{texts:?}");
+    assert!(
+        !texts.iter().any(|s| s == "1:1"),
+        "position shown: {texts:?}"
+    );
 
-    // Leaving reader view brings the status bar and caret back.
+    // Leaving reader view brings the caret and position back; the status
+    // line was there all along.
     press_with(&mut ed, &mut v, Key::Char('R'), primary_shift());
     assert!(!ed.reader());
     assert_eq!(rgba(&v, 1, bottom), opaque(t.color(TokenId::ColorStatusBg)));
     assert!(v.caret_rect().is_some());
-    assert!(g.text_bottom() < g.height_px);
+    let texts = laid_texts(&laid);
+    assert!(texts.iter().any(|s| s == strings::MODE_NORMAL), "{texts:?}");
+    assert!(texts.iter().any(|s| s == "1:1"), "{texts:?}");
 
     press_with(&mut ed, &mut v, Key::Char('R'), primary_shift());
     assert!(ed.reader());
-    assert_eq!(rgba(&v, 1, bottom), opaque(t.color(TokenId::ColorBg)));
+    assert_eq!(rgba(&v, 1, bottom), opaque(t.color(TokenId::ColorStatusBg)));
     assert_eq!(v.caret_rect(), None);
+}
+
+#[test]
+fn reader_shows_messages_in_the_status_line() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = scratch("message");
+    let mut ed = open_editor(&dir, "abc", false);
+    let (mut v, laid) = recording(&t);
+    v.paint_all(&ed);
+    press(&mut ed, &mut v, Key::Char('x'));
+    assert!(ed.dirty());
+    press_with(&mut ed, &mut v, Key::Char('R'), primary_shift());
+    laid_texts(&laid);
+    press(&mut ed, &mut v, Key::Char('Z'));
+    press(&mut ed, &mut v, Key::Char('Z'));
+    let texts = laid_texts(&laid);
+    assert!(
+        texts.iter().any(|s| s == strings::READ_ONLY_ZQ),
+        "message not painted: {texts:?}"
+    );
 }
 
 #[test]
@@ -84,8 +138,8 @@ fn reader_keys_scroll_the_view() {
     press(&mut ed, &mut v, Key::PageUp);
     assert_eq!(line_at(&v, &t, 1.0), 0);
     press(&mut ed, &mut v, Key::Char('G'));
-    // The last line sits at the bottom of the window.
-    let y = H_PT - 2.0;
+    // The last line sits just above the status line.
+    let y = Geom::new(&t, 1.0).text_bottom() as f32 - 2.0;
     assert_eq!(v.hit_test(W_PT / 2.0, y).unwrap().line, 119);
     press(&mut ed, &mut v, Key::Char('g'));
     press(&mut ed, &mut v, Key::Char('g'));
@@ -107,8 +161,9 @@ fn leaving_reader_keeps_the_caret_above_the_status_bar() {
     // The cursor on the last line, at the bottom of the text area.
     press(&mut ed, &mut v, Key::Char('G'));
     press_with(&mut ed, &mut v, Key::Char('R'), primary_shift());
-    // Scrolled up a line in reader view, the cursor's line sits where the
-    // status bar will come back.
+    // Scrolled up a line in reader view, the cursor's line goes off the
+    // bottom of the text area; leaving reader view brings it back into
+    // view, above the status line.
     press(&mut ed, &mut v, Key::Char('k'));
     press_with(&mut ed, &mut v, Key::Char('R'), primary_shift());
     assert!(!ed.reader());
@@ -137,7 +192,8 @@ fn counted_g_brings_that_line_to_the_top() {
     for c in ['1', '1', '8', 'g', 'g'] {
         press(&mut ed, &mut v, Key::Char(c));
     }
-    assert_eq!(v.hit_test(W_PT / 2.0, H_PT - 2.0).unwrap().line, 119);
+    let bottom = Geom::new(&t, 1.0).text_bottom() as f32 - 2.0;
+    assert_eq!(v.hit_test(W_PT / 2.0, bottom).unwrap().line, 119);
     assert!(line_at(&v, &t, 1.0) < 117);
 }
 

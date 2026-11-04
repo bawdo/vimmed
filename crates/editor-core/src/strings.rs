@@ -12,6 +12,8 @@ pub const MODE_SEARCH: &str = "SEARCH";
 pub const MODE_COMMAND: &str = "COMMAND";
 pub const MODE_CONFIRM: &str = "CONFIRM";
 pub const MODE_PROMPT: &str = "PROMPT";
+/// Reader view, in place of Normal (or Insert, with vim off).
+pub const MODE_READER: &str = "READER";
 
 /// Shown in the status bar after the file name while there are changes not
 /// saved.

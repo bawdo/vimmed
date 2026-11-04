@@ -33,8 +33,9 @@
 //! Fonts: a line that shaped a glyph as `.notdef` is laid out again when lazy
 //! fallback lands a face for it (`poll_fonts`).
 //!
-//! Reader view: no caret and no status bar, so the text runs to the bottom
-//! of the frame; `scroll_by` scrolls without the cursor. The help overlay
+//! Reader view: no caret and nothing revealed; the status bar stays at its
+//! height (owner decision D21). `scroll_by` scrolls without the cursor.
+//! The help overlay
 //! (`overlay`) covers the text area while the source shows it.
 
 use std::ops::Range;
@@ -315,11 +316,11 @@ pub struct DocView {
     /// Where the source's line shifts stood at the last sync (`None` before
     /// the first, or when the source reports none).
     shift_mark: Option<ShiftMark>,
-    /// Reader view as last painted: no status bar, so the text runs to the
-    /// bottom of the frame.
+    /// Reader view as last painted (or as `set_reader` was told): every
+    /// line's caret and reveal depend on it.
     reader: bool,
-    /// Set when the geometry changed outside a paint (`set_reader`), so
-    /// the next `paint_lines` paints all.
+    /// Set when reader view changed outside a paint (`set_reader`), so the
+    /// next `paint_lines` paints all.
     needs_all: bool,
     /// The help overlay's first row as last painted (`overlay`).
     pub(crate) help: Option<usize>,
@@ -554,9 +555,10 @@ impl DocView {
         moved
     }
 
-    /// Takes a reader view change (`Effects::reader`) before anything
-    /// measures against the text area, so `scroll_to_cursor` sees the
-    /// status bar coming back (or going). The next paint repaints all.
+    /// Takes a reader view change (`Effects::reader`) as soon as the shell
+    /// sees it, before it scrolls. The text area keeps its size either way
+    /// (the status bar stays, D21), but every line's caret and reveal
+    /// change, so the next paint repaints all, even a `paint_lines`.
     pub fn set_reader(&mut self, on: bool) {
         if on != self.reader {
             self.reader = on;
@@ -898,11 +900,7 @@ impl DocView {
             .min(width - 2.0 * side)
             .max(1.0)
             .round();
-        let status = if self.reader {
-            0.0
-        } else {
-            (t.px(TokenId::SizeStatusHeight) * s).round().min(height)
-        };
+        let status = (t.px(TokenId::SizeStatusHeight) * s).round().min(height);
         Geo {
             width,
             height,

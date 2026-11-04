@@ -46,7 +46,7 @@
 //! held beside the buffer and drawn at the caret until it commits.
 //!
 //! Reader view and the help overlay (`reader`): Primary+Shift+R (or
-//! `--view`) hides the caret and status bar and makes the document
+//! `--view`) hides the caret and makes the document
 //! read-only, with keys that scroll the view; `:help` shows the cheat
 //! sheet over the document until Esc.
 //!
@@ -187,7 +187,7 @@ pub struct Editor {
     register: Option<char>,
     history: History,
     dirty: bool,
-    /// Reader view (`reader`): no caret, no status bar, read-only.
+    /// Reader view (`reader`): no caret, read-only.
     reader: bool,
     /// Where reader view goes back to when it is toggled off.
     reader_return: Option<reader::Return>,
@@ -1686,8 +1686,19 @@ impl ViewSource for Editor {
                         cursor: text.len() + at,
                     }
                 }
+                // Reader view names itself in place of Normal (or Insert,
+                // with vim off); a selection made in it keeps its name.
+                None if self.reader && matches!(self.mode, Mode::Normal | Mode::Insert) => {
+                    StatusLeft::Mode(strings::MODE_READER)
+                }
                 None => StatusLeft::Mode(self.mode.name()),
             }
+        };
+        // Reader view hides the cursor, so its position would mislead.
+        let position = if self.reader {
+            String::new()
+        } else {
+            status::position(&self.buf, self.cursor)
         };
         StatusModel {
             left,
@@ -1695,7 +1706,7 @@ impl ViewSource for Editor {
             dirty: self.dirty,
             warnings: self.warnings.clone(),
             showcmd: self.showcmd(),
-            position: status::position(&self.buf, self.cursor),
+            position,
         }
     }
     fn tokens(&self) -> &Tokens {
