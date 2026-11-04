@@ -246,3 +246,109 @@ fn a_table_cell_resolves_after_poll() {
     assert!(!d.is_empty());
     assert!(d.0.iter().all(|r| r.start >= g.line_rows(2).start), "{d:?}");
 }
+
+/// Regular faces only, with a lookup that answers every codepoint with
+/// Noto Sans Mono, which has no ballot box (as Core Text answers an
+/// uncovered codepoint with LastResort).
+struct Wrong {
+    lookups: Arc<AtomicUsize>,
+}
+
+impl FontResolver for Wrong {
+    fn sans(&self) -> PathBuf {
+        font_paths().sans
+    }
+    fn mono(&self) -> PathBuf {
+        // Both roles use the body face, so Noto Sans Mono is not loaded.
+        self.sans()
+    }
+    fn family(&self, _name: &str) -> Option<PathBuf> {
+        None
+    }
+    fn fallback_set(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn lookup(&self, _c: char) -> Option<PathBuf> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        Some(font_paths().mono)
+    }
+}
+
+#[test]
+fn a_face_that_does_not_cover_the_codepoint_is_not_loaded() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    let cache = header_only(dir.path());
+    let (waker, wakes) = counting_waker();
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let r = Wrong {
+        lookups: lookups.clone(),
+    };
+    let fonts = FontSet::with_lookup(Box::new(r), Some(cache.clone()), waker);
+    let layout = CosmicLayout::new(fonts, &t);
+    let mut doc = DocView::new(Box::new(layout), &t, W_PT, H_PT, 2.0);
+    let src = source(&t);
+    doc.paint_all(&src);
+    doc.start_font_fallback();
+    let start = Instant::now();
+    while lookups.load(Ordering::SeqCst) == 0 {
+        assert!(start.elapsed() < TIMEOUT, "never looked up");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!doc.poll_fonts(&src), "nothing was loaded");
+    assert_eq!(wakes.load(Ordering::SeqCst), 0);
+    assert!(doc.has_missing_glyphs(3));
+    let text = std::fs::read_to_string(&cache).unwrap();
+    assert!(!text.contains("glyph\t"), "not cached: {text}");
+}
+
+#[test]
+fn a_cached_last_resort_line_is_ignored() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    let cache = header_only(dir.path());
+    // A real file that would cover the codepoint, but named as the
+    // catch-all face is: its cache line must not be trusted.
+    let last = dir.path().join("LastResort.otf");
+    std::fs::copy(symbols(), &last).unwrap();
+    let line = format!("glyph\t2610\t{}\n", last.display());
+    std::fs::write(&cache, format!("font-paths v1 test\n{line}")).unwrap();
+    let (waker, _) = counting_waker();
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let r = Symbols {
+        lookups: lookups.clone(),
+        found: Some(symbols()),
+    };
+    let mut doc = view_with(r, Some(cache), waker, &t);
+    let src = source(&t);
+    doc.paint_all(&src);
+    doc.start_font_fallback();
+    wait_for_fonts(&mut doc, &src);
+    assert!(!doc.has_missing_glyphs(3));
+    assert_eq!(lookups.load(Ordering::SeqCst), 1, "looked up afresh");
+}
+
+#[test]
+fn the_status_bar_recovers_after_poll() {
+    let t = Tokens::defaults(Theme::Light);
+    let (waker, _) = counting_waker();
+    let r = Symbols {
+        lookups: Arc::new(AtomicUsize::new(0)),
+        found: Some(symbols()),
+    };
+    let mut doc = view_with(r, None, waker, &t);
+    let mut src = Fake::new(&["plain", "text"], t.clone());
+    src.file = "\u{2610} notes.md".to_string();
+    doc.paint_all(&src);
+    let _ = doc.take_damage();
+    doc.start_font_fallback();
+    wait_for_fonts(&mut doc, &src);
+    let g = Geom::new(&t, 2.0);
+    let d = doc.take_damage();
+    assert_eq!(
+        d.0,
+        vec![g.text_bottom()..g.height_px],
+        "the status bar only"
+    );
+}

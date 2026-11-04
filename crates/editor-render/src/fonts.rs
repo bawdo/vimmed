@@ -191,22 +191,65 @@ impl Fallback for FixedFallback {
 /// The tag of a codepoint line in the font cache file.
 const GLYPH_TAG: &str = "glyph";
 
-/// A font cache file line mapping `c` to the file that covers it.
-pub fn glyph_line(c: char, path: &Path) -> String {
-    format!("{GLYPH_TAG}\t{:x}\t{}\n", u32::from(c), path.display())
+/// The name of Apple's catch-all face, both as a file stem and a PostScript
+/// name. Its cmap maps every codepoint to one placeholder glyph, so once
+/// loaded it would answer every later missing codepoint and stop real
+/// lookups: it is never loaded or cached.
+const LAST_RESORT: &str = "LastResort";
+
+/// True when `path` is the catch-all face's file.
+pub fn is_last_resort(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case(LAST_RESORT))
+}
+
+/// A font cache file line mapping `c` to the file that covers it, or
+/// `None` when the path can't be written as one plain-text line.
+pub fn glyph_line(c: char, path: &Path) -> Option<String> {
+    let p = path
+        .to_str()
+        .filter(|p| !p.is_empty() && !p.contains(['\n', '\r', '\t']))?;
+    Some(format!("{GLYPH_TAG}\t{:x}\t{p}\n", u32::from(c)))
 }
 
 /// The codepoint lines of a font cache file. Other lines belong to the
-/// shell and are skipped, as are malformed ones.
+/// shell and are skipped, as are malformed ones and the catch-all face.
 pub fn parse_glyph_lines(text: &str) -> HashMap<char, PathBuf> {
     text.lines()
         .filter_map(|l| {
             let rest = l.strip_prefix(GLYPH_TAG)?.strip_prefix('\t')?;
             let (hex, path) = rest.split_once('\t')?;
             let c = char::from_u32(u32::from_str_radix(hex, 16).ok()?)?;
-            (!path.is_empty()).then(|| (c, PathBuf::from(path)))
+            let path = PathBuf::from(path);
+            (!path.as_os_str().is_empty() && !is_last_resort(&path)).then_some((c, path))
         })
         .collect()
+}
+
+/// A file worth reading for a codepoint: it exists and is not the
+/// catch-all face.
+fn usable(path: &Path) -> bool {
+    path.is_file() && !is_last_resort(path)
+}
+
+/// The faces in `path`, when one of them really maps `c` to a glyph. The
+/// catch-all face is left out by its PostScript name too.
+fn covering_faces(path: &Path, c: char) -> Option<Vec<FaceInfo>> {
+    let mut db = Database::new();
+    db.load_font_source(Source::File(path.to_path_buf()));
+    let faces: Vec<FaceInfo> = db
+        .faces()
+        .filter(|f| f.post_script_name != LAST_RESORT)
+        .cloned()
+        .collect();
+    let maps = |f: &FaceInfo| {
+        db.with_face_data(f.id, |data, index| {
+            let font = swash::FontRef::from_index(data, index as usize);
+            font.is_some_and(|r| r.charmap().map(c) != 0)
+        })
+    };
+    faces.iter().any(|f| maps(f) == Some(true)).then_some(faces)
 }
 
 /// What the main thread asks the worker.
@@ -313,8 +356,10 @@ impl FontFallback {
     }
 }
 
-/// The worker loop: each codepoint is answered from the cache file or the
-/// resolver, and a file not loaded yet is read once and its faces sent.
+/// The worker loop: each codepoint is answered from the cache file or, when
+/// that has nothing usable, the resolver. The answer is read and kept only
+/// when a face in it really covers the codepoint; a file not loaded yet then
+/// has its faces sent.
 fn run(
     resolver: Box<dyn FontResolver>,
     mut loaded: HashSet<PathBuf>,
@@ -336,26 +381,25 @@ fn run(
             }
             Ask::Char(c) => c,
         };
-        let path = match known.get(&c).filter(|p| p.is_file()) {
-            Some(p) => p.clone(),
+        let cached = known.get(&c).filter(|p| usable(p)).cloned();
+        let hit = cached.and_then(|p| covering_faces(&p, c).map(|f| (p, f)));
+        let (path, faces) = match hit {
+            Some(hit) => hit,
             None => {
-                let Some(p) = resolver.lookup(c) else {
+                let Some(p) = resolver.lookup(c).filter(|p| usable(p)) else {
                     continue;
                 };
-                if let Some(file) = &cache {
-                    append(file, &glyph_line(c, &p));
+                let Some(faces) = covering_faces(&p, c) else {
+                    continue;
+                };
+                if let (Some(file), Some(line)) = (&cache, glyph_line(c, &p)) {
+                    append(file, &line);
                 }
                 known.insert(c, p.clone());
-                p
+                (p, faces)
             }
         };
-        if !loaded.insert(path.clone()) {
-            continue;
-        }
-        let mut db = Database::new();
-        db.load_font_source(Source::File(path));
-        let faces: Vec<FaceInfo> = db.faces().cloned().collect();
-        if faces.is_empty() || found.send(faces).is_err() {
+        if !loaded.insert(path) || found.send(faces).is_err() {
             continue;
         }
         waker();
@@ -431,7 +475,7 @@ mod tests {
     #[test]
     fn glyph_lines_round_trip_and_skip_the_shells_lines() {
         let p = PathBuf::from("/f d/Symbols.ttf");
-        let line = glyph_line('\u{2610}', &p);
+        let line = glyph_line('\u{2610}', &p).unwrap();
         assert_eq!(line, "glyph\t2610\t/f d/Symbols.ttf\n");
         let text = format!("font-paths v1 linux\nsans\t/S.ttf\n{line}glyph\t1f600\t/E.ttc\n");
         let m = parse_glyph_lines(&text);
@@ -440,6 +484,41 @@ mod tests {
         assert_eq!(m[&'\u{1F600}'], PathBuf::from("/E.ttc"));
         let bad = "glyph\tzz\t/a\nglyph\td800\t/b\nglyph\t41\t\nglyph 41 /c\n";
         assert!(parse_glyph_lines(bad).is_empty());
+    }
+
+    #[test]
+    fn the_catch_all_face_is_never_cached() {
+        let lr = Path::new("/System/Library/Fonts/LastResort.otf");
+        assert!(is_last_resort(lr));
+        assert!(!is_last_resort(Path::new("/f/LastResortish.otf")));
+        let text = format!(
+            "glyph\t4e00\t{}\nglyph\te000\t/x/lastresort.ttf\nglyph\t2610\t/f/S.ttf\n",
+            lr.display()
+        );
+        let m = parse_glyph_lines(&text);
+        assert_eq!(m.len(), 1);
+        assert!(m.contains_key(&'\u{2610}'));
+    }
+
+    #[test]
+    fn paths_that_are_not_one_plain_line_are_not_cached() {
+        assert_eq!(glyph_line('a', Path::new("/f/a\nb.ttf")), None);
+        assert_eq!(glyph_line('a', Path::new("/f/a\tb.ttf")), None);
+        assert_eq!(glyph_line('a', Path::new("")), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = std::ffi::OsStr::from_bytes(b"/f/\xff.ttf");
+            assert_eq!(glyph_line('a', Path::new(raw)), None);
+        }
+    }
+
+    #[test]
+    fn coverage_is_checked_in_the_file_read() {
+        let sym = dir().join("NotoSansSymbols2-Regular.ttf");
+        assert!(covering_faces(&sym, '\u{2610}').is_some());
+        assert!(covering_faces(&dir().join("NotoSans-Regular.ttf"), '\u{2610}').is_none());
+        assert!(covering_faces(&dir().join("missing.ttf"), 'a').is_none());
     }
 
     #[test]

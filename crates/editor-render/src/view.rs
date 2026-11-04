@@ -623,6 +623,13 @@ impl DocView {
             self.draw_line(src, i, top);
             self.damage.add(rows(top, before, g.text_bottom));
         }
+        // The status bar keeps its layouts until its model changes: shape
+        // and paint it again (its own rows) when one of them missed a glyph.
+        if self.status_cache.iter().any(|c| c.laid.missing_glyphs) {
+            self.status_cache.clear();
+            self.last_status = None;
+            self.paint_status(src);
+        }
         self.layout.end_frame();
         true
     }

@@ -175,13 +175,18 @@ impl TextLayout for CosmicLayout {
                 .glyphs
                 .iter()
                 .map(|g| {
+                    // Only a drawable codepoint makes a `.notdef` count: a
+                    // joiner, selector or tab would flag the line forever.
                     if g.glyph_id == 0 {
-                        missing = true;
-                        if let Some(f) = self.fonts.fallback.as_mut() {
-                            text[g.start..g.end]
-                                .chars()
-                                .filter(|&c| wants_face(c))
-                                .for_each(|c| f.ask(c));
+                        let cluster = text.get(g.start..g.end).unwrap_or_default();
+                        if cluster.chars().any(wants_face) {
+                            missing = true;
+                            if let Some(f) = self.fonts.fallback.as_mut() {
+                                cluster
+                                    .chars()
+                                    .filter(|&c| wants_face(c))
+                                    .for_each(|c| f.ask(c));
+                            }
                         }
                     }
                     GlyphGeom {

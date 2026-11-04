@@ -242,6 +242,7 @@ dependencies = [
  "editor-core",
  "image",
  "marks",
+ "swash",
  "tiny-skia",
  "tree-sitter",
  "tree-sitter-bash",
