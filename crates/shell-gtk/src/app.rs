@@ -219,7 +219,8 @@ pub fn run(args: WindowArgs) -> i32 {
     let layout = CosmicLayout::new(fonts, &tokens);
     let (w, h) = (WINDOW_PT.0 as f32, WINDOW_PT.1 as f32);
     let mut doc = DocView::new(Box::new(layout), &tokens, w, h, 1.0);
-    doc.set_images(&base_dir, waker);
+    doc.set_images(&base_dir, waker.clone());
+    doc.set_highlighting(waker);
     let strip_px = std::env::var(format!("{}STRIP_PX", app_meta::ENV_PREFIX)).ok();
 
     let state = State {
