@@ -19,8 +19,14 @@
 //! puts the cursor back. The confirmed search stays for `n`, `N` and the
 //! highlights, which follow every edit (`crate::search`).
 //!
+//! The command line (`:`) is typed here too and run on Enter: `crate::ex`
+//! parses it, and `:s` finds its replacements in `crate::substitute`.
+//! `:s///c` asks at each match in Confirm mode. `:w` and `:e!` reach the
+//! file through `FileCalls`, a stand-in until Task 26's `Saver`.
+//!
 //! Undo groups: each Normal- or Visual-mode command is one undo step, a
-//! paste is one, and an Insert
+//! paste is one, each `:s` is one (a whole Confirm session included), and
+//! an Insert
 //! session is one step from its entry key (with the line `o` opens or the
 //! text `c` deletes) to Esc. An arrow key inside the session ends the step
 //! and starts another, as in vim.
@@ -35,6 +41,7 @@ use std::path::PathBuf;
 
 use crate::buffer::{Buffer, Pos};
 use crate::effects::{Effects, Redraw};
+use crate::ex::{self, ExCmd, Sub};
 use crate::grapheme;
 use crate::host::Host;
 use crate::input::{Input, Key, KeyEvent, Mods};
@@ -46,6 +53,7 @@ use crate::platform::Platform;
 use crate::search::{self, Hit, Search};
 use crate::status::{self, Mode};
 use crate::strings;
+use crate::substitute::{self, Answer, ConfirmSession};
 use crate::tokens::{Theme, Tokens};
 use crate::undo::History;
 use crate::view_model::{Selection, StatusModel, ViewSource};
@@ -75,6 +83,27 @@ impl Default for Config {
     fn default() -> Config {
         Config { vim: true }
     }
+}
+
+/// Where `:w` and `:e!` reach the file: `Editor::write` and
+/// `Editor::reload` call through here. A stand-in seam until Task 26 puts
+/// those calls on the `Saver` trait (Task 31 writes for real). Until then
+/// the editor holds `Unwired`, and tests a double that records the calls.
+pub trait FileCalls {
+    /// Writes the document; `force` is `:w!`. True when it was written.
+    fn write(&mut self, force: bool) -> bool;
+    /// Reloads the document from disk, dropping the changes.
+    fn reload(&mut self);
+}
+
+/// No file behind the editor yet: nothing is written or reloaded.
+struct Unwired;
+
+impl FileCalls for Unwired {
+    fn write(&mut self, _force: bool) -> bool {
+        false
+    }
+    fn reload(&mut self) {}
 }
 
 /// A search being typed, and what to go back to when it ends.
@@ -134,6 +163,8 @@ pub struct Editor {
     cmdline: String,
     /// The selection `:` left Visual with.
     last_visual: Option<Selection>,
+    /// The `:s///c` being answered (Confirm mode).
+    confirm: Option<ConfirmSession>,
     /// The search being typed (Search mode).
     searching: Option<Searching>,
     /// The last search confirmed: what `n` and `N` look for and the
@@ -151,6 +182,7 @@ pub struct Editor {
     cfg: Config,
     platform: Platform,
     host: Box<dyn Host>,
+    files: Box<dyn FileCalls>,
 }
 
 impl Editor {
@@ -208,6 +240,7 @@ impl Editor {
             anchor: None,
             cmdline: String::new(),
             last_visual: None,
+            confirm: None,
             searching: None,
             search: None,
             vim: Vim::new(),
@@ -221,7 +254,14 @@ impl Editor {
             cfg,
             platform,
             host,
+            files: Box::new(Unwired),
         }
+    }
+
+    /// Puts a test double behind `:w` and `:e!`.
+    #[cfg(test)]
+    pub(crate) fn set_files(&mut self, files: Box<dyn FileCalls>) {
+        self.files = files;
     }
 
     pub fn handle(&mut self, input: Input) -> Effects {
@@ -233,7 +273,17 @@ impl Editor {
             Input::Text(text) if !self.cfg.vim || self.mode == Mode::Insert => self.insert(&text),
             Input::Text(text) if self.takes_keys() => self.normal_text(&text),
             Input::Text(text) if self.mode == Mode::Search => self.search_input(&text),
-            // TODO(Task 25): text on the command line.
+            Input::Text(text) if self.mode == Mode::Command => self.cmdline_input(&text),
+            // In Confirm, each char is an answer.
+            Input::Text(text) if self.mode == Mode::Confirm => {
+                text.chars().fold(Effects::default(), |fx, c| {
+                    fx.merge(self.confirm_key(KeyEvent {
+                        key: Key::Char(c),
+                        mods: Mods::default(),
+                        time_ns: 0,
+                    }))
+                })
+            }
             Input::Text(_) => Effects::default(),
             // TODO(later tasks): ask before closing with unsaved changes.
             Input::CloseRequested => Effects {
@@ -306,10 +356,15 @@ impl Editor {
         self.registers.get(name)
     }
 
-    /// The command line's text: `'<,'>` once `:` is pressed in Visual.
-    /// TODO(Task 25): editing and running it.
+    /// The command line's text, as typed after `:` (it starts as `'<,'>`
+    /// when `:` is pressed in Visual).
     pub fn cmdline(&self) -> &str {
         &self.cmdline
+    }
+
+    /// The question Confirm mode asks, while it asks it.
+    pub fn prompt(&self) -> Option<String> {
+        self.confirm.as_ref().map(ConfirmSession::prompt)
     }
 
     /// The selection Visual had when `:` left it, for the `'<,'>` range.
@@ -398,8 +453,9 @@ impl Editor {
                 Mode::Insert => {}
                 Mode::Command => return self.command_key(k),
                 Mode::Search => return self.search_key(k),
-                // Later tasks build the other modes; nothing enters them yet.
-                Mode::Confirm | Mode::Prompt => return Effects::default(),
+                Mode::Confirm => return self.confirm_key(k),
+                // A later task builds Prompt; nothing enters it yet.
+                Mode::Prompt => return Effects::default(),
             }
         }
         let arrow = matches!(
@@ -517,10 +573,17 @@ impl Editor {
                 status
             }
             Step::Cmdline => {
-                self.last_visual = self.shown_selection();
+                // From Visual, the selection is remembered for `'<,'>`
+                // (it stays remembered, as vim's marks do).
+                self.cmdline = match self.shown_selection() {
+                    Some(sel) => {
+                        self.last_visual = Some(sel);
+                        "'<,'>".to_owned()
+                    }
+                    None => String::new(),
+                };
                 self.leave_visual();
                 self.mode = Mode::Command;
-                self.cmdline = "'<,'>".to_owned();
                 status
             }
             Step::Search { forward, op, count } => self.start_search(forward, op, count),
@@ -614,18 +677,321 @@ impl Editor {
         }
     }
 
-    /// A key on the command line: Esc and Enter close it, back to Normal.
-    /// TODO(Task 25): editing and running the command.
+    /// A key on the command line. Typing adds to it and Backspace takes
+    /// its last grapheme off; on an empty line Backspace leaves, as Esc
+    /// does (vim 9.1). Enter runs the command. Other keys do nothing.
     fn command_key(&mut self, k: KeyEvent) -> Effects {
-        if !matches!(k.key, Key::Esc | Key::Enter) {
-            return Effects::default();
+        let status = Effects {
+            redraw: Redraw::Status,
+            ..Effects::default()
+        };
+        match k.key {
+            Key::Esc => self.leave_cmdline(),
+            Key::Backspace if self.cmdline.is_empty() => self.leave_cmdline(),
+            Key::Backspace => {
+                let line = &mut self.cmdline;
+                line.truncate(grapheme::prev(line, line.len()));
+                status
+            }
+            Key::Enter => {
+                let input = std::mem::take(&mut self.cmdline);
+                self.mode = Mode::Normal;
+                if input.trim().is_empty() {
+                    return status;
+                }
+                let fx = match ex::parse(&input) {
+                    Ok(cmd) => self.ex(cmd),
+                    Err(text) => {
+                        self.say(text, None);
+                        Effects::default()
+                    }
+                };
+                status.merge(fx)
+            }
+            Key::Char(c) => self.cmdline_input(c.encode_utf8(&mut [0; 4])),
+            Key::Space => self.cmdline_input(" "),
+            _ => Effects::default(),
         }
+    }
+
+    /// Text typed on the command line. Enter runs it, so a line break in
+    /// committed text is dropped.
+    fn cmdline_input(&mut self, text: &str) -> Effects {
+        self.cmdline
+            .extend(text.chars().filter(|c| !matches!(c, '\n' | '\r')));
+        Effects {
+            redraw: Redraw::Status,
+            ..Effects::default()
+        }
+    }
+
+    /// Esc on the command line: back to Normal, the line dropped.
+    fn leave_cmdline(&mut self) -> Effects {
         self.mode = Mode::Normal;
         self.cmdline.clear();
         Effects {
             redraw: Redraw::Status,
             ..Effects::default()
         }
+    }
+
+    /// Carries out a command from the command line.
+    fn ex(&mut self, cmd: ExCmd) -> Effects {
+        match cmd {
+            ExCmd::Write { force } => self.write_step(force).1,
+            ExCmd::Quit { force } if !force && self.dirty => {
+                self.say(strings::NO_WRITE_SINCE_CHANGE.to_owned(), None);
+                Effects::default()
+            }
+            ExCmd::Quit { .. } => self.close(0),
+            ExCmd::Exit if !self.dirty => self.close(0),
+            ExCmd::WriteQuit | ExCmd::Exit => match self.write_step(false) {
+                (true, fx) => fx.merge(self.close(0)),
+                (false, fx) => fx,
+            },
+            ExCmd::CQuit => self.close(1),
+            ExCmd::ReloadForce => {
+                self.reload();
+                Effects::default()
+            }
+            // TODO(Task 40): `:help` shows the help overlay.
+            // TODO(Task 37): `:table` inserts a table or opens the picker.
+            ExCmd::Help | ExCmd::Table(_) => Effects::default(),
+            ExCmd::Substitute(sub) => self.substitute(sub),
+        }
+    }
+
+    /// Writes the document through the file seam: true when it was
+    /// written, which leaves the buffer clean.
+    pub fn write(&mut self, force: bool) -> bool {
+        let written = self.files.write(force);
+        if written {
+            self.dirty = false;
+        }
+        written
+    }
+
+    /// Reloads the document from disk, through the file seam.
+    pub fn reload(&mut self) {
+        self.files.reload();
+    }
+
+    /// Closes the window, exiting with `code`.
+    pub fn close(&mut self, code: i32) -> Effects {
+        Effects {
+            close: Some(code),
+            ..Effects::default()
+        }
+    }
+
+    /// `write`, with the effects of the dirty state it changed.
+    fn write_step(&mut self, force: bool) -> (bool, Effects) {
+        let was_dirty = self.dirty;
+        let written = self.write(force);
+        let fx = Effects {
+            dirty: (was_dirty && !self.dirty).then_some(false),
+            ..Effects::default()
+        };
+        (written, fx)
+    }
+
+    /// `:s`. An empty pattern is the last search's. The pattern becomes
+    /// the last search, as in vim, so `n` finds it and it is highlighted.
+    /// `n` only counts and takes priority over `c`; reader mode only
+    /// counts.
+    fn substitute(&mut self, mut sub: Sub) -> Effects {
+        if sub.pattern.is_empty() {
+            match self.search.as_ref().filter(|s| !s.query.is_empty()) {
+                Some(s) => sub.pattern.clone_from(&s.query),
+                None => {
+                    self.say(strings::NO_PREVIOUS_PATTERN.to_owned(), None);
+                    return Effects::default();
+                }
+            }
+        }
+        let visual = self.last_visual.map(|s| {
+            let (a, b) = s.ordered();
+            (a.line, b.line)
+        });
+        let n = self.buf.line_count();
+        let lines = match substitute::lines(sub.range, self.cursor.line, visual, n) {
+            Ok(lines) => lines,
+            Err(text) => {
+                self.say(text, None);
+                return Effects::default();
+            }
+        };
+        let fx = self.set_last_search(&sub.pattern);
+        fx.merge(if sub.flags.n {
+            self.count_matches(&sub, lines)
+        } else if self.reader {
+            Effects::default()
+        } else if sub.flags.c {
+            self.start_confirm(&sub, lines)
+        } else {
+            self.substitute_all(&sub, lines)
+        })
+    }
+
+    /// Makes `pattern` the last search, going the way the last one went.
+    fn set_last_search(&mut self, pattern: &str) -> Effects {
+        let forward = self.search.as_ref().is_none_or(|s| s.forward);
+        let mut s = Search::new(forward, self.vim_cursor());
+        s.query = pattern.to_owned();
+        s.refresh(&self.buf);
+        self.search = Some(s);
+        Effects {
+            redraw: Redraw::All,
+            ..Effects::default()
+        }
+    }
+
+    /// `:s///n`: says how many matches there are. Vim 9.1 then puts the
+    /// cursor on its line's first non-blank.
+    fn count_matches(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
+        let r = substitute::run(&self.buf, sub, lines);
+        if r.count == 0 {
+            self.say(strings::pattern_not_found(&sub.pattern), None);
+            return Effects::default();
+        }
+        self.say(strings::matches(r.count, r.lines), None);
+        let line = self.cursor.line;
+        self.move_across(Pos {
+            line,
+            col: vim::motion::caret_col(self.buf.line(line)),
+        })
+    }
+
+    /// `:s` without asking, as one undo step. The cursor ends on the first
+    /// non-blank of the last line changed and, undone or redone, at the
+    /// start of the first (vim 9.1).
+    fn substitute_all(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
+        let r = substitute::run(&self.buf, sub, lines);
+        let (Some(first), Some(last)) = (r.edits.first(), r.edits.last()) else {
+            self.say(strings::pattern_not_found(&sub.pattern), None);
+            return Effects::default();
+        };
+        let (first, last) = (first.range.start.line, last.range.start.line);
+        let fx = self.run(|ctx| {
+            ctx.place(Pos {
+                line: first,
+                col: 0,
+            });
+            for e in &r.edits {
+                ctx.replace(e.range.clone(), &e.text);
+            }
+            OpOutcome {
+                cursor: Pos {
+                    line: last,
+                    col: vim::motion::caret_col(ctx.buf.line(last)),
+                },
+                insert: false,
+            }
+        });
+        self.say(strings::substitutions(r.count, r.lines), None);
+        fx
+    }
+
+    /// `:s///c`: Confirm mode on the first match, or `E486` when there is
+    /// none. The whole session is one undo step, opened here and closed by
+    /// `end_confirm`.
+    fn start_confirm(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
+        let session = substitute::confirm_session(&self.buf, sub, lines);
+        if session.done() {
+            self.say(strings::pattern_not_found(&sub.pattern), None);
+            return Effects::default();
+        }
+        self.message = None;
+        self.message_until = None;
+        self.history.begin();
+        self.confirm = Some(session);
+        self.mode = Mode::Confirm;
+        self.show_confirm()
+    }
+
+    /// A key in Confirm mode: `y n a q l` in either case, or Esc to quit.
+    /// Other keys wait for an answer.
+    fn confirm_key(&mut self, k: KeyEvent) -> Effects {
+        let answer = match k.key {
+            Key::Esc => Answer::Quit,
+            Key::Char(c) => match Answer::from_key(c) {
+                Some(a) => a,
+                None => return Effects::default(),
+            },
+            _ => return Effects::default(),
+        };
+        let Some(session) = self.confirm.as_mut() else {
+            return Effects::default();
+        };
+        let edits = session.answer(answer);
+        let done = session.done();
+        let fx = if edits.is_empty() {
+            Effects::default()
+        } else {
+            self.run(|ctx| {
+                for e in &edits {
+                    ctx.replace(e.range.clone(), &e.text);
+                }
+                OpOutcome {
+                    cursor: ctx.cursor,
+                    insert: false,
+                }
+            })
+        };
+        fx.merge(if done {
+            self.end_confirm()
+        } else {
+            self.show_confirm()
+        })
+    }
+
+    /// Puts the cursor on the match being asked about, highlighted as the
+    /// current one.
+    fn show_confirm(&mut self) -> Effects {
+        let Some((line, range)) = self.confirm.as_ref().and_then(ConfirmSession::current) else {
+            return Effects::default();
+        };
+        let at = Pos {
+            line,
+            col: range.start,
+        };
+        if let Some(s) = self.search.as_mut() {
+            s.set_current(Some(&Hit {
+                line,
+                range,
+                wrapped: false,
+            }));
+        }
+        self.move_across(at).merge(Effects {
+            redraw: Redraw::All,
+            ..Effects::default()
+        })
+    }
+
+    /// The session is over: its undo step closes (with the cursor vim's
+    /// undo goes back to), the cursor goes where vim leaves it, and what
+    /// was replaced is said (nothing, when nothing was).
+    fn end_confirm(&mut self) -> Effects {
+        let Some(session) = self.confirm.take() else {
+            return Effects::default();
+        };
+        if let Some(at) = session.undo_cursor() {
+            self.history.set_cursor(at);
+        }
+        self.history.end();
+        self.mode = Mode::Normal;
+        if let Some(s) = self.search.as_mut() {
+            s.set_current(None);
+        }
+        if session.count() > 0 {
+            let text = strings::substitutions(session.count(), session.lines());
+            self.say(text, None);
+        }
+        let to = vim::rest(&self.buf, session.end_cursor(&self.buf));
+        self.move_across(to).merge(Effects {
+            redraw: Redraw::All,
+            ..Effects::default()
+        })
     }
 
     /// `/` or `?`: Search mode, from the cursor as it is now. The last
@@ -1029,9 +1395,8 @@ impl Editor {
     }
 
     /// Committed text in Normal or Visual mode is a run of keys. Once one
-    /// of them enters Insert, the rest is typed, and once one enters
-    /// Search, the rest is the query; once one leaves for another mode (the
-    /// command line), the rest is dropped.
+    /// of them enters Insert, the rest is typed; once one enters Search or
+    /// Command, the rest is the query or the command line.
     fn normal_text(&mut self, text: &str) -> Effects {
         let mut fx = Effects::default();
         for (i, c) in text.char_indices() {
@@ -1040,6 +1405,9 @@ impl Editor {
             }
             if self.mode == Mode::Search {
                 return fx.merge(self.search_input(&text[i..]));
+            }
+            if self.mode == Mode::Command {
+                return fx.merge(self.cmdline_input(&text[i..]));
             }
             if !self.takes_keys() {
                 return fx;
@@ -1187,7 +1555,7 @@ impl Editor {
                 let old = shift(old.start).min(n)..(shift(old.end - 1) + 1).min(n);
                 Redraw::Lines(changed).merge(Redraw::Lines(old))
             }
-            // No command makes more than one edit yet; rebuild to be safe.
+            // Several edits (`:s` over many lines): rebuild it all.
             _ => {
                 self.blocks = Blocks::new(&self.buf);
                 Redraw::All

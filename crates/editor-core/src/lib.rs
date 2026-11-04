@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod editor;
 pub mod effects;
+pub mod ex;
 pub mod grapheme;
 pub mod host;
 pub mod input;
@@ -9,6 +10,7 @@ pub mod platform;
 pub mod search;
 pub mod status;
 pub mod strings;
+pub mod substitute;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod tokens;
