@@ -582,6 +582,8 @@ pub fn on_tick() {
             st.progress.first_frame_ns = Some(now_ns);
             // Lookups and the Core Text warm-up wait for the first frame.
             st.doc.start_font_fallback();
+            // So does the file watch: never on the start-up path.
+            st.editor.start_watching();
             changed = true;
         }
         if !st.keys.is_empty() {
@@ -627,9 +629,11 @@ fn image_shown(st: &mut State, now_ns: u64) -> bool {
 }
 
 /// The window became key. While `first_frame` is still owed, stage the
-/// whole frame so the next tick commits and can mark it.
+/// whole frame so the next tick commits and can mark it. The editor hears
+/// of the focus (its file watch looks at once); only what that changed is
+/// applied, so the start-up path stages nothing more.
 pub fn on_became_key() {
-    with_state(|st| {
+    let close = with_state(|st| {
         if st.first.became_key() {
             let frame = st.doc.frame();
             let mut all = Damage::new();
@@ -637,7 +641,16 @@ pub fn on_became_key() {
             st.presenter.stage(frame, &all);
             st.link.resume();
         }
+        let fx = st.editor.handle(Input::Focus(true));
+        if fx == Effects::default() {
+            return None;
+        }
+        apply(st, fx)
     });
+    flush_ime();
+    if let Some(Some(code)) = close {
+        finish(code);
+    }
 }
 
 /// A background worker finished, or a timer the editor asked for
@@ -707,13 +720,14 @@ pub fn request_close() {
     }
 }
 
-/// Stops the event loop; `run` then returns `code`. The lock record goes
-/// first, so no way out (a bench deadline, the router, the exit below)
-/// leaves it behind.
+/// Stops the event loop; `run` then returns `code`. The lock record and
+/// the file watch go first, so no way out (a bench deadline, the router,
+/// the exit below) leaves them behind.
 pub(crate) fn finish(code: i32) {
     EXIT.with(|e| e.set(Some(code)));
     with_state(|st| {
         st.editor.release_lock();
+        st.editor.stop_watching();
         st.link.pause();
         st.window.orderOut(None);
     });

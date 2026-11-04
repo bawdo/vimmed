@@ -121,6 +121,7 @@ impl Editor {
                 self.dirty = false;
                 self.history.mark_saved();
                 self.say(strings::WRITTEN.to_owned());
+                self.wrote();
                 true
             }
             Err(e) => {
@@ -136,6 +137,21 @@ impl Editor {
     /// Error, and changes nothing; so does a file that is no longer valid
     /// UTF-8, which also makes the document read-only.
     pub fn reload(&mut self) -> Effects {
+        self.reload_step().1
+    }
+
+    /// `reload`, and whether it read the file. The file watch takes the
+    /// version it read, or, when it read none, the version there now
+    /// (`disk`).
+    pub(super) fn reload_step(&mut self) -> (bool, Effects) {
+        let fx = self.reload_text();
+        let read = fx.is_some();
+        self.reloaded(read);
+        (read, fx.unwrap_or_default())
+    }
+
+    /// `reload`'s work: `None` when it failed (saying why).
+    fn reload_text(&mut self) -> Option<Effects> {
         let fresh = match self.saver.reload() {
             Loaded::Text { buffer, .. } => buffer,
             Loaded::NotUtf8 { .. } => {
@@ -145,12 +161,16 @@ impl Editor {
                     MsgKind::Error,
                     status::MESSAGE_FOR_NS,
                 );
-                return Effects::default();
+                return None;
             }
             Loaded::Missing => {
-                return self.reload_failed(&io::Error::from_raw_os_error(libc::ENOENT));
+                self.reload_failed(&io::Error::from_raw_os_error(libc::ENOENT));
+                return None;
             }
-            Loaded::Error(e) => return self.reload_failed(&e),
+            Loaded::Error(e) => {
+                self.reload_failed(&e);
+                return None;
+            }
         };
         self.read_only(false);
         let lines = (0..fresh.line_count()).map(|i| fresh.line(i));
@@ -188,17 +208,18 @@ impl Editor {
         self.buf = fresh;
         self.history.mark_saved();
         self.dirty = false;
-        fx.merge(Effects {
+        Some(fx.merge(Effects {
             redraw: Redraw::All,
             dirty: report_clean.then_some(false),
             ..Effects::default()
-        })
+        }))
     }
 
-    /// Closes the window, exiting with `code`, tells the `Saver` and lets
-    /// the lock record go (`locking`).
+    /// Closes the window, exiting with `code`, tells the `Saver`, stops
+    /// the file watch and lets the lock record go (`locking`).
     pub fn close(&mut self, code: i32) -> Effects {
         self.saver.close(code);
+        self.stop_watching();
         self.release_lock();
         Effects {
             close: Some(code),
@@ -206,10 +227,9 @@ impl Editor {
         }
     }
 
-    fn reload_failed(&mut self, e: &io::Error) -> Effects {
+    fn reload_failed(&mut self, e: &io::Error) {
         let text = strings::reload_failed(&e.to_string());
         self.say_as(text, MsgKind::Error, status::MESSAGE_FOR_NS);
-        Effects::default()
     }
 
     /// `write`, with the effects of the dirty state it changed.

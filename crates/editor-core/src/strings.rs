@@ -88,8 +88,17 @@ pub fn already_open(pid: u32) -> String {
 }
 
 /// The warning beside the file name once `o` opened the document
-/// read-only.
+/// read-only, or once the file on disk cannot be read or written.
 pub const READ_ONLY: &str = "read-only";
+
+/// The file changed on disk while the document was clean: it was reloaded.
+pub const RELOADED_FROM_DISK: &str = "reloaded from disk";
+
+/// The warning beside `changes not saved` when the file changed on disk.
+pub const CHANGED_ON_DISK: &str = "file changed on disk";
+
+/// The warning beside the file name once the file was deleted or moved.
+pub const NO_LONGER_ON_DISK: &str = "file no longer on disk";
 
 /// `:w`, `:w!` or Primary+S on a document opened read-only.
 pub const READ_ONLY_REFUSED: &str = "E: opened read-only; refusing to write";

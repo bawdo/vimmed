@@ -323,14 +323,25 @@ fn connect(
 
     let focus = gtk::EventControllerFocus::new();
     focus.connect_enter(|_| {
-        with_state(|st| {
+        let close = with_state(|st| {
             if let Some(c) = st.clipboard.get() {
                 c.refresh();
             }
             if st.ime_on {
                 st.im.focus_in();
             }
+            // The editor's file watch looks at once.
+            let fx = st.editor.handle(Input::Focus(true));
+            if fx == Effects::default() {
+                return None;
+            }
+            let close = apply(st, fx);
+            st.canvas.queue_draw();
+            close
         });
+        if let Some(Some(code)) = close {
+            finish(code);
+        }
     });
     focus.connect_leave(|_| {
         with_state(|st| st.im.focus_out());
@@ -524,6 +535,8 @@ fn on_after_paint(clock: &gdk::FrameClock) {
             st.progress.first_frame_ns = Some(now);
             // Fallback lookups wait for the first frame.
             st.doc.start_font_fallback();
+            // So does the file watch: never on the start-up path.
+            st.editor.start_watching();
             st.glass.push((frame, Glass::First, 0));
             log_refresh(st);
             changed = true;
@@ -648,12 +661,14 @@ fn request_close() {
     }
 }
 
-/// Stops the main loop; `run` then returns `code`. The lock record goes
-/// first, so no way out (a bench deadline) leaves it behind.
+/// Stops the main loop; `run` then returns `code`. The lock record and
+/// the file watch go first, so no way out (a bench deadline) leaves them
+/// behind.
 fn finish(code: i32) {
     EXIT.with(|e| e.set(Some(code)));
     with_state(|st| {
         st.editor.release_lock();
+        st.editor.stop_watching();
         st.window.set_visible(false);
     });
     MAIN_LOOP.with(|l| l.quit());

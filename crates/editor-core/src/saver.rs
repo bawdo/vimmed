@@ -18,6 +18,11 @@ pub trait Saver {
     fn reload(&mut self) -> Loaded;
     /// The window is closing with exit code `code`.
     fn close(&mut self, code: i32);
+    /// The version of the file the document was last read or written at
+    /// (`None` while there is none): what the file watch compares with.
+    fn stat(&self) -> Option<DiskStat> {
+        None
+    }
 }
 
 /// The file at `path`, and the version of it the document was read from.
@@ -90,6 +95,9 @@ impl Saver for FileSaver {
         loaded
     }
     fn close(&mut self, _code: i32) {}
+    fn stat(&self) -> Option<DiskStat> {
+        self.stat
+    }
 }
 
 /// No file behind the editor: writes and reloads fail, saying so.
