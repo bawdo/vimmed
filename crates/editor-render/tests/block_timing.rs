@@ -7,9 +7,10 @@
 //! that line, as the shell does per keystroke. The budget is a 2 ms p95 draw.
 //!
 //! - `paragraph`: plain prose, the baseline.
-//! - `code line`: inside a 40-line rust block with highlighting on, so every
-//!   keystroke finds the block's lines and sends its text (the colour lands
-//!   later, off this path).
+//! - `code line, <lang> x<n>`: inside an n-line block (40 to 5,000 lines) with
+//!   highlighting on. For `rust` every keystroke finds the block's lines and
+//!   sends its text (the colour lands later, off this path); `text` has no
+//!   highlighter, so only the block's extent is found.
 //! - `table row, cursor outside`: an edit to a row of a 30-row table while the
 //!   cursor is elsewhere (a substitution), so the whole table is laid out and
 //!   repainted.
@@ -84,10 +85,18 @@ fn block_keystroke_timing() {
         .collect();
     run("paragraph", prose, 5, 5, false);
 
-    let mut code = vec!["Intro".to_string(), "```rust".to_string()];
-    code.extend((0..40).map(|i| format!("    let v{i} = compute({i}) + 1; // note")));
-    code.push("```".to_string());
-    run("code line", code, 10, 10, true);
+    for (lang, n) in [
+        ("rust", 40),
+        ("rust", 1000),
+        ("rust", 5000),
+        ("text", 1000),
+        ("text", 5000),
+    ] {
+        let mut code = vec!["Intro".to_string(), format!("```{lang}")];
+        code.extend((0..n).map(|i| format!("    let v{i} = compute({i}) + 1; // note")));
+        code.push("```".to_string());
+        run(&format!("code line, {lang} x{n}"), code, 10, 10, true);
+    }
 
     let mut table = vec![
         "Intro".to_string(),

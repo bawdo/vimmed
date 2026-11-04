@@ -152,8 +152,9 @@ impl Value {
     }
 }
 
-/// A resolved set of token values for one theme.
-#[derive(Clone, Debug)]
+/// A resolved set of token values for one theme. Two sets are equal when
+/// every value is.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tokens {
     values: Vec<Value>,
 }

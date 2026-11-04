@@ -170,7 +170,13 @@ impl CodeTracks {
     }
 
     /// Finds the block holding line `i` and makes sure its current text is
-    /// requested.
+    /// requested (only when its language has a highlighter).
+    ///
+    /// Only fence-shaped lines (` ``` ` or `~~~` at column 0, as the block
+    /// parser requires) can start or end a block, so the scan reads
+    /// `src.line` and asks `display` only about those: a source's `display`
+    /// for a code line can itself walk the block, so one call per line would
+    /// make a keystroke in a long block quadratic.
     fn find(&mut self, src: &dyn ViewSource, i: usize, d: &LineDisplay) -> Option<Extent> {
         let BlockDeco::CodeBg {
             first,
@@ -180,46 +186,55 @@ impl CodeTracks {
         else {
             return None;
         };
-        let deco = |j: usize| src.display(j).deco;
+        let fence = |j: usize| {
+            let l = src.line(j);
+            l.starts_with("```") || l.starts_with("~~~")
+        };
         let (mut open, mut top) = (None, i);
         if first {
             open = Some(i);
         } else {
             while top > 0 {
-                match deco(top - 1) {
-                    BlockDeco::CodeBg { first: true, .. } => {
-                        open = Some(top - 1);
-                        break;
+                let j = top - 1;
+                if fence(j) {
+                    match src.display(j).deco {
+                        BlockDeco::CodeBg { first: true, .. } => {
+                            open = Some(j);
+                            break;
+                        }
+                        BlockDeco::CodeBg { .. } => {}
+                        _ => break,
                     }
-                    BlockDeco::CodeBg { .. } => top -= 1,
-                    _ => break,
                 }
+                top = j;
             }
         }
+        let count = src.line_count();
         let (mut end, mut closed) = (i, last && !unclosed);
         if !last {
             closed = false;
-            let mut j = i + 1;
-            while j < src.line_count() {
-                match deco(j) {
+            end = count - 1;
+            for j in i + 1..count {
+                if !fence(j) {
+                    continue;
+                }
+                match src.display(j).deco {
                     BlockDeco::CodeBg {
+                        first: false,
                         last: true,
                         unclosed,
-                        ..
                     } => {
                         end = j;
                         closed = !unclosed;
                         break;
                     }
-                    BlockDeco::CodeBg { .. } => j += 1,
-                    _ => {
+                    // The next block's opening fence ends this one, unclosed.
+                    BlockDeco::CodeBg { first: true, .. } | BlockDeco::None => {
                         end = j - 1;
                         break;
                     }
+                    _ => {}
                 }
-            }
-            if j >= src.line_count() {
-                end = src.line_count() - 1;
             }
         }
         let start = open.map_or(top, |o| o + 1);

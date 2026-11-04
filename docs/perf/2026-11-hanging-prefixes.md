@@ -33,24 +33,33 @@ still shifts to make room, as the stack design specifies.
 
 ## Screenshots
 
-There is no in-app dump facility yet (`<ENV_PREFIX>DUMP` does not exist in `crates/` or `xtask/`),
-and the macOS shell cannot run under the sandbox, so these are headless frames from the renderer
-itself: `DocView` over the test fonts (Noto Sans and Noto Sans Mono, regular only), 800 by 600 pt
-at scale 2. Regenerate them with
+The before and after screenshots are committed in
+[`2026-11-hanging-prefixes/`](2026-11-hanging-prefixes/). They are headless frames from the
+renderer itself, not from the app: there is no in-app dump facility yet (`<ENV_PREFIX>DUMP` does
+not exist in `crates/` or `xtask/`), and the macOS shell cannot run under the sandbox. They come
+from the ignored `frame_dumps` test: `DocView` over the committed test fonts (Noto Sans and Noto
+Sans Mono, **regular weight only, no symbol fallback**), an 800 by 600 pt frame at scale 2, cropped
+to the document and the margin left of it. Expect real fonts in the app; the layout is the same.
+Regenerate them with
 
 ```text
 cargo test -p editor-render --test frame_dumps -- --ignored --nocapture
 ```
 
-which writes them to `$TMPDIR/frame-dumps/` (on the build machine, `/tmp/claude-501/frame-dumps/`).
-The files are not committed.
+which writes them to `$TMPDIR/frame-dumps/`; copy the `hang-*.png` files over the committed ones.
 
 | Cursor on | Off (before) | On, 32 pt gutter (after) |
 |---|---|---|
-| a paragraph (nothing revealed) | `hang-off-none.png` | `hang-on-none.png` |
-| the `##` heading | `hang-off-heading.png` | `hang-on-heading.png` |
-| the first list item | `hang-off-list.png` | `hang-on-list.png` |
-| the quote | `hang-off-quote.png` | `hang-on-quote.png` |
+| a paragraph (nothing revealed) | [hang-off-none.png](2026-11-hanging-prefixes/hang-off-none.png) | [hang-on-none.png](2026-11-hanging-prefixes/hang-on-none.png) |
+| the `##` heading | [hang-off-heading.png](2026-11-hanging-prefixes/hang-off-heading.png) | [hang-on-heading.png](2026-11-hanging-prefixes/hang-on-heading.png) |
+| the first list item | [hang-off-list.png](2026-11-hanging-prefixes/hang-off-list.png) | [hang-on-list.png](2026-11-hanging-prefixes/hang-on-list.png) |
+| the quote | [hang-off-quote.png](2026-11-hanging-prefixes/hang-off-quote.png) | [hang-on-quote.png](2026-11-hanging-prefixes/hang-on-quote.png) |
+
+The heading pair, before and after:
+
+![Hanging off, cursor on the heading](2026-11-hanging-prefixes/hang-off-heading.png)
+
+![Hanging on, cursor on the heading](2026-11-hanging-prefixes/hang-on-heading.png)
 
 What they show:
 
@@ -62,6 +71,8 @@ What they show:
   `hang-on-quote.png`: the bar stays, `>` appears in the margin, and the text does not move.
 - `hang-on-none.png` against `hang-off-none.png`: the at-rest difference, list text flush with the
   body text.
+- In `hang-on-heading.png` the hung `##` is centred on the line rather than sitting on the
+  heading's baseline, so it reads slightly high next to an h2. Worth fixing if the default flips.
 
 ## How it works
 

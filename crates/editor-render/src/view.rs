@@ -682,7 +682,11 @@ impl DocView {
     /// Takes the source's tokens and line count. Returns true when the line
     /// count changed.
     fn sync(&mut self, src: &dyn ViewSource) -> bool {
-        self.tokens = src.tokens().clone();
+        if *src.tokens() != self.tokens {
+            // Table geometry bakes cell colours, fonts and widths in.
+            self.tables.clear();
+            self.tokens = src.tokens().clone();
+        }
         let n = src.line_count();
         if n == self.lines.len() {
             return false;

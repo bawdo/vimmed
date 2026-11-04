@@ -154,6 +154,24 @@ fn table_reveals_raw_when_cursor_inside() {
 }
 
 #[test]
+fn table_cells_follow_a_token_change() {
+    let t = Tokens::defaults(Theme::Light);
+    let mut src = Fake::new(TABLE, t.clone());
+    src.cursor = at(6, 0);
+    let mut v = view(&t, S);
+    v.paint_all(&src);
+    assert_eq!(red_in_line(&v, &t, 3), 0);
+
+    // A theme or config change: new tokens, then a full repaint.
+    src.tokens = with(&[("color.text", "#FF0000")]);
+    v.paint_all(&src);
+    assert!(
+        red_in_line(&v, &src.tokens, 3) > 20,
+        "the cell text takes the new color.text"
+    );
+}
+
+#[test]
 fn table_edit_outside_the_cursor_repaints_the_whole_table() {
     let t = with(&[("color.table.border", "#FF0000")]);
     let mut src = Fake::new(TABLE, t.clone());
@@ -425,6 +443,37 @@ fn colour_at(v: &DocView, i: usize, b: usize) -> Rgba {
         .find(|s| s.range.contains(&b))
         .map(|s| s.color)
         .unwrap()
+}
+
+#[test]
+fn block_extents_survive_fence_shaped_content_and_unclosed_blocks() {
+    let t = Tokens::defaults(Theme::Light);
+    let mut src = Fake::new(
+        &[
+            "```rust",    // 0: block A
+            "fn a() {}",  // 1
+            "~~~",        // 2: fence-shaped content, not a fence of A
+            "let b = 1;", // 3
+            "```",        // 4: closes A
+            "```rust",    // 5: block B, never closed...
+            "fn c() {}",  // 6
+            "```rust",    // 7: ...a fence with a language opens block C
+            "let d = 2;", // 8
+            "```",        // 9
+            "end",        // 10
+        ],
+        t.clone(),
+    );
+    src.cursor = at(10, 0);
+    let mut v = view(&t, S);
+    v.set_highlighting(Arc::new(|| {}));
+    v.paint_all(&src);
+    until("all three blocks to highlight", || {
+        v.poll_async();
+        [1, 3, 6, 8]
+            .iter()
+            .all(|&i| colour_at(&v, i, 0) == keyword())
+    });
 }
 
 #[test]

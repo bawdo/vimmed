@@ -15,6 +15,7 @@
 
 mod common;
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,18 +27,30 @@ use editor_render::view::DocView;
 
 fn save(v: &DocView, name: &str) -> PathBuf {
     let f = v.frame();
+    save_crop(v, name, 0..f.width_px, 0..f.height_px)
+}
+
+/// Saves the pixels in columns `xs` and rows `ys` of the frame.
+fn save_crop(v: &DocView, name: &str, xs: Range<u32>, ys: Range<u32>) -> PathBuf {
+    let f = v.frame();
     let dir = std::env::temp_dir().join("frame-dumps");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.png"));
     // The page is opaque, so premultiplied and straight RGBA are the same.
-    image::save_buffer(
-        &path,
-        f.pixmap.data(),
-        f.width_px,
-        f.height_px,
-        image::ColorType::Rgba8,
-    )
-    .unwrap();
+    let full = image::RgbaImage::from_raw(f.width_px, f.height_px, f.pixmap.data().to_vec())
+        .expect("frame size matches its data");
+    let crop =
+        image::imageops::crop_imm(&full, xs.start, ys.start, xs.len() as u32, ys.len() as u32)
+            .to_image();
+    // Opaque, so RGB; best compression keeps committed dumps small.
+    let rgb = image::DynamicImage::ImageRgba8(crop).to_rgb8();
+    let file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    let png = image::codecs::png::PngEncoder::new_with_quality(
+        file,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    rgb.write_with_encoder(png).unwrap();
     println!("{}", path.display());
     path
 }
@@ -79,7 +92,8 @@ fn dump_hanging_prefix_frames() {
             src.cursor = cursor;
             let mut v = view(&t, 2.0);
             v.paint_all(&src);
-            save(&v, &format!("hang-{tag}-{what}"));
+            // The document and the margin left of it, not the empty page.
+            save_crop(&v, &format!("hang-{tag}-{what}"), 60..1460, 60..500);
         }
     }
 }
