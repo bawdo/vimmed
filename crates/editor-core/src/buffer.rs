@@ -3,8 +3,15 @@
 //!
 //! Lines are held without line terminators. Text crossing the API (`text_range`,
 //! `replace`) always uses `\n`; `to_text` applies the buffer's EOL.
+//!
+//! Every edit is logged as a `LineShift` (which lines it replaced with how
+//! many), so a renderer can move its per-line state with the lines. The log
+//! keeps the last `SHIFT_LOG_LEN` shifts; asking from further back, or with
+//! a mark from another buffer, gives "unknown".
 
+use std::collections::VecDeque;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::grapheme;
 
@@ -41,12 +48,55 @@ pub struct Edit {
     pub text: String,
 }
 
-#[derive(Debug, Clone)]
+/// One edit's effect on the lines: lines `at..at + removed` were replaced
+/// by `inserted` lines. A same-line edit is `removed: 1, inserted: 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineShift {
+    pub at: usize,
+    pub removed: usize,
+    pub inserted: usize,
+}
+
+/// A point in one buffer's edit history: which buffer, and how many edits
+/// it had seen. Marks from different buffers never match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShiftMark {
+    buffer: u64,
+    seq: u64,
+}
+
+/// How many recent shifts a buffer keeps.
+pub const SHIFT_LOG_LEN: usize = 64;
+
+/// Hands each buffer its identity.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
 pub struct Buffer {
     lines: Vec<String>,
     eol: Eol,
     bom: bool,
     trailing_newline: bool,
+    /// This buffer's identity, never shared with another `Buffer` value.
+    id: u64,
+    /// Edits since the buffer was made.
+    seq: u64,
+    /// The last edits' shifts, oldest first, at most `SHIFT_LOG_LEN`.
+    shifts: VecDeque<LineShift>,
+}
+
+/// A clone is a new buffer: it edits on its own from here, so it takes a
+/// new identity and an empty log, and no mark taken on the original applies
+/// to it.
+impl Clone for Buffer {
+    fn clone(&self) -> Buffer {
+        Buffer::new(
+            self.lines.clone(),
+            self.eol,
+            self.bom,
+            self.trailing_newline,
+        )
+    }
 }
 
 const BOM: char = '\u{FEFF}';
@@ -64,12 +114,40 @@ impl Buffer {
         let normalised = text.replace("\r\n", "\n");
         let trailing_newline = normalised.ends_with('\n');
         let body = normalised.strip_suffix('\n').unwrap_or(&normalised);
+        let lines = body.split('\n').map(str::to_owned).collect();
+        Buffer::new(lines, eol, bom, trailing_newline)
+    }
+
+    fn new(lines: Vec<String>, eol: Eol, bom: bool, trailing_newline: bool) -> Buffer {
         Buffer {
-            lines: body.split('\n').map(str::to_owned).collect(),
+            lines,
             eol,
             bom,
             trailing_newline,
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            seq: 0,
+            shifts: VecDeque::new(),
         }
+    }
+
+    /// Where this buffer's edit history is now.
+    pub fn shift_mark(&self) -> ShiftMark {
+        ShiftMark {
+            buffer: self.id,
+            seq: self.seq,
+        }
+    }
+
+    /// The line shifts since `since`, oldest first (empty, and allocating
+    /// nothing, when there was no edit). `None` when they are unknown: the
+    /// mark is from another buffer, or older than the log. Never a part.
+    pub fn shifts_since(&self, since: ShiftMark) -> Option<Vec<LineShift>> {
+        if since.buffer != self.id || since.seq > self.seq {
+            return None;
+        }
+        let n = usize::try_from(self.seq - since.seq).ok()?;
+        let skip = self.shifts.len().checked_sub(n)?;
+        Some(self.shifts.iter().skip(skip).copied().collect())
     }
 
     pub fn to_text(&self) -> String {
@@ -168,12 +246,26 @@ impl Buffer {
         if let Some(last) = pieces.last_mut() {
             last.push_str(&tail);
         }
+        let shift = LineShift {
+            at: start.line,
+            removed: end.line - start.line + 1,
+            inserted: pieces.len(),
+        };
         self.lines.splice(start.line..=end.line, pieces);
+        self.log(shift);
 
         Edit {
             range: start..new_end,
             text: removed,
         }
+    }
+
+    fn log(&mut self, shift: LineShift) {
+        if self.shifts.len() == SHIFT_LOG_LEN {
+            self.shifts.pop_front();
+        }
+        self.shifts.push_back(shift);
+        self.seq += 1;
     }
 
     fn ordered(&self, r: Range<Pos>) -> (Pos, Pos) {
@@ -272,6 +364,94 @@ mod tests {
         // not protect grapheme clusters; callers go through `clamp` first.
         assert_eq!(b.to_text(), "eZ");
         let _ = b.text_range(pos(1, 1)..pos(5, 5));
+    }
+
+    /// The shifts `b` logged since `m`, which must be known.
+    fn since(b: &Buffer, m: ShiftMark) -> Vec<LineShift> {
+        b.shifts_since(m).expect("shifts known")
+    }
+
+    fn shift(at: usize, removed: usize, inserted: usize) -> LineShift {
+        LineShift {
+            at,
+            removed,
+            inserted,
+        }
+    }
+
+    #[test]
+    fn replace_logs_its_line_shift() {
+        let mut b = Buffer::from_text("abc\ndef\nghi\njkl");
+        let first = b.shift_mark();
+        assert_eq!(since(&b, first), Vec::new(), "nothing yet");
+
+        // Enter mid-line: line 0 becomes two lines.
+        let m = b.shift_mark();
+        b.replace(pos(0, 1)..pos(0, 1), "\n");
+        assert_eq!(b.to_text(), "a\nbc\ndef\nghi\njkl");
+        assert_eq!(since(&b, m), vec![shift(0, 1, 2)]);
+
+        // A join: lines 0 and 1 become one.
+        let m = b.shift_mark();
+        b.replace(pos(0, 1)..pos(1, 0), "");
+        assert_eq!(b.to_text(), "abc\ndef\nghi\njkl");
+        assert_eq!(since(&b, m), vec![shift(0, 2, 1)]);
+
+        // A multi-line delete: lines 1 to 3 become one.
+        let m = b.shift_mark();
+        b.replace(pos(1, 1)..pos(3, 1), "");
+        assert_eq!(b.to_text(), "abc\ndkl");
+        assert_eq!(since(&b, m), vec![shift(1, 3, 1)]);
+
+        // A multi-line paste of whole lines above line 1.
+        let m = b.shift_mark();
+        b.replace(pos(1, 0)..pos(1, 0), "x\ny\nz\n");
+        assert_eq!(b.to_text(), "abc\nx\ny\nz\ndkl");
+        assert_eq!(since(&b, m), vec![shift(1, 1, 4)]);
+
+        // A same-line edit.
+        let m = b.shift_mark();
+        b.replace(pos(4, 0)..pos(4, 1), "D");
+        assert_eq!(since(&b, m), vec![shift(4, 1, 1)]);
+
+        // Every shift since the first mark, in order.
+        let all = vec![
+            shift(0, 1, 2),
+            shift(0, 2, 1),
+            shift(1, 3, 1),
+            shift(1, 1, 4),
+            shift(4, 1, 1),
+        ];
+        assert_eq!(since(&b, first), all);
+        assert_eq!(since(&b, b.shift_mark()), Vec::new());
+    }
+
+    #[test]
+    fn shift_log_is_bounded() {
+        let mut b = Buffer::from_text("a");
+        let old = b.shift_mark();
+        b.replace(pos(0, 0)..pos(0, 0), "x");
+        let kept = b.shift_mark();
+        for _ in 0..SHIFT_LOG_LEN {
+            b.replace(pos(0, 0)..pos(0, 0), "x");
+        }
+        assert_eq!(b.shifts_since(old), None, "older than the log: unknown");
+        assert_eq!(since(&b, kept).len(), SHIFT_LOG_LEN, "exactly the log");
+        assert_eq!(b.shifts.len(), SHIFT_LOG_LEN, "the log stays bounded");
+    }
+
+    #[test]
+    fn a_new_buffer_never_matches_an_old_mark() {
+        let a = Buffer::from_text("same");
+        let m = a.shift_mark();
+        assert_eq!(a.shifts_since(m), Some(Vec::new()));
+        let b = Buffer::from_text("same");
+        assert_ne!(b.shift_mark(), m);
+        assert_eq!(b.shifts_since(m), None);
+        // A clone edits on its own, so it is a new buffer too.
+        let c = a.clone();
+        assert_eq!(c.shifts_since(m), None);
+        assert_eq!(c.text_range(pos(0, 0)..pos(0, 4)), "same");
     }
 
     #[test]
