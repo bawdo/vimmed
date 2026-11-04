@@ -56,6 +56,12 @@ pub mod names {
     pub const GLASS_UNAVAILABLE: &str = "glass_unavailable";
     /// A value, not a time: the display's refresh rate in Hz.
     pub const REFRESH_HZ: &str = "refresh_hz";
+    /// Values, not times: the pid of the instance that received
+    /// `application:openURLs:`, logged by a router or by a window.
+    pub const ROUTER_OPEN_URLS: &str = "router_open_urls";
+    pub const WINDOW_OPEN_URLS: &str = "window_open_urls";
+    /// A value: the pid of a sibling window process just spawned.
+    pub const ROUTED_SPAWN: &str = "routed_spawn";
 }
 
 struct Log {

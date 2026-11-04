@@ -3,11 +3,12 @@
 //!
 //! Exit codes: the window's own; 128 + n when the window died from signal n;
 //! 130 on SIGINT in the launcher; 2 for a usage error, no file or a
-//! directory; 220 when the window binary could not be started.
+//! directory; 220 when the window binary could not be started; 222 when
+//! `waitpid` fails other than with EINTR, so the window is lost (D7: not 1,
+//! which is `:cq`). 221 and 223 come from the window and pass through.
 
 mod args;
 mod locate;
-mod spawn;
 
 use std::ffi::OsString;
 use std::io;
@@ -20,6 +21,8 @@ use marks::names::{LAUNCHER_MAIN, LAUNCHER_SPAWNED};
 const EXIT_USAGE: i32 = 2;
 const EXIT_SIGINT: i32 = 130;
 const EXIT_NOT_STARTED: i32 = 220;
+/// `waitpid` failed with something other than EINTR (owner decision D7).
+const EXIT_LOST: i32 = 222;
 
 fn usage() -> String {
     format!("usage: {SLUG} [-b] [--view] [--] FILE")
@@ -84,7 +87,7 @@ fn run(argv: &[OsString]) -> i32 {
         prepare_to_wait();
     }
 
-    let pid = match spawn::spawn(&window, &window_args, &[protocol]) {
+    let pid = match detach::spawn_detached_with(&window, &window_args, &[], &[protocol]) {
         Ok(pid) => pid,
         Err(e) => {
             eprintln!("{SLUG}: could not start {}: {e}", window.display());
@@ -96,11 +99,16 @@ fn run(argv: &[OsString]) -> i32 {
     if background {
         return 0;
     }
-    match wait(pid) {
+    waited(wait(pid))
+}
+
+/// The launcher's exit code once `waitpid` has returned.
+fn waited(result: io::Result<libc::c_int>) -> i32 {
+    match result {
         Ok(status) => exit_code(status),
         Err(e) => {
             eprintln!("{SLUG}: lost track of the window: {e}");
-            1
+            EXIT_LOST
         }
     }
 }
@@ -183,5 +191,18 @@ fn exit_code(status: libc::c_int) -> i32 {
         128 + n
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_window_is_222_not_cq() {
+        let lost = io::Error::from_raw_os_error(libc::ECHILD);
+        assert_eq!(waited(Err(lost)), 222);
+        // `:cq` exits 1 and is passed through unchanged.
+        assert_eq!(waited(Ok(1 << 8)), 1);
     }
 }

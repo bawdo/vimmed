@@ -9,10 +9,10 @@ use objc2_app_kit::{
     NSWindowDelegate,
 };
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSNotification, NSRect};
+use objc2_foundation::{NSArray, NSNotification, NSRect, NSURL};
 use objc2_quartz_core::{CADisplayLink, CALayer, kCAGravityTopLeft};
 
-use crate::app;
+use crate::{app, router};
 
 define_class!(
     #[unsafe(super(NSView))]
@@ -101,6 +101,13 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
             app::launch(self);
+            router::did_launch();
+        }
+
+        /// Finder, `open` and the Dock: each URL goes to a new window process.
+        #[unsafe(method(application:openURLs:))]
+        fn open_urls(&self, _app: &NSApplication, urls: &NSArray<NSURL>) {
+            router::open_urls(urls);
         }
 
         /// Cmd+Q: the editor decides, as for the close button.

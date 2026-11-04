@@ -14,6 +14,7 @@ marks = { path = "../marks" }
 # Toolkit crates, macOS only, so `cargo test --workspace` still builds on Linux.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+detach = { path = "../detach" }
 dispatch2 = "0.3"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"

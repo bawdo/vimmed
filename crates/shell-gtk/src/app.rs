@@ -7,6 +7,7 @@
 //! workers wake the main loop through the `Waker`.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -41,8 +42,10 @@ use crate::{env, input};
 /// TODO(config task): replace with `size.window.width` and
 /// `size.window.height` tokens.
 const WINDOW_PT: (i32, i32) = (900, 1000);
-/// Exit code when the window cannot start (as the launcher's).
+/// Exit code when no window can come up (R34: as the launcher's 220).
 const EXIT_NOT_STARTED: i32 = 220;
+/// Exit code for bad arguments, as the window's `main`.
+const EXIT_USAGE: i32 = 2;
 /// Presentation times arrive after the frame; they are polled this often...
 const GLASS_POLL: Duration = Duration::from_millis(16);
 /// ...this many times before the frame counts as never presented.
@@ -113,19 +116,27 @@ impl Host for GtkHost {
     fn open_external(&mut self, target: &str) {
         let _ = env::child_command("xdg-open").arg(target).spawn();
     }
+    /// A sibling window process, detached as the launcher starts one, with
+    /// the toolkit and `<ENV_PREFIX>*` variables stripped.
     fn spawn_window(&mut self, req: WindowRequest) {
-        // TODO(Task 16): the router owns window spawning and activation.
         let Ok(exe) = std::env::current_exe() else {
             return;
         };
-        let mut cmd = env::child_command(exe);
+        let mut args = Vec::new();
         if req.view {
-            cmd.arg("--view");
+            args.push(OsString::from("--view"));
         }
         if let Some(name) = &req.display_name {
-            cmd.arg("--display-name").arg(name);
+            args.push(OsString::from("--display-name"));
+            args.push(OsString::from(name));
         }
-        let _ = cmd.arg("--").arg(&req.path).spawn();
+        args.push(OsString::from("--"));
+        args.push(req.path.into_os_string());
+        let strip = detach::sibling_strip_env(app_meta::ENV_PREFIX);
+        let strip: Vec<&str> = strip.iter().map(String::as_str).collect();
+        if let Err(e) = detach::spawn_detached(&exe, &args, &strip) {
+            eprintln!("{}: could not start a window: {e}", app_meta::SLUG);
+        }
     }
     fn now_ns(&self) -> u64 {
         marks::now_ns()
@@ -162,9 +173,9 @@ pub fn run(args: WindowArgs) -> i32 {
         unsafe { std::env::set_var(env::GDK_DISABLE, env::DISABLE_VULKAN) };
     }
     let Some(path) = args.path else {
-        // TODO(Task 16): router mode.
-        eprintln!("{}: router mode is not available yet", app_meta::SLUG);
-        return EXIT_NOT_STARTED;
+        // The window's `main` refuses this first: Linux has no router.
+        eprintln!("{}: no file given", app_meta::SLUG);
+        return EXIT_USAGE;
     };
     let waker = main_loop_waker();
     let clipboard: Rc<OnceCell<Clipboard>> = Rc::default();

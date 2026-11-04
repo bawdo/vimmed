@@ -25,14 +25,14 @@ use editor_render::view::DocView;
 use marks::bench::{BenchPlan, Progress};
 use marks::names;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
     NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString, NSUserDefaults};
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::displaylink::Link;
@@ -41,14 +41,14 @@ use crate::glass::{KeyTimes, Tick, key_values};
 use crate::present::{IoSurface, Presenter};
 use crate::startup::{FirstFrame, fit_content};
 use crate::view::{Delegate, DocumentView};
-use crate::{clipboard, input};
+use crate::{clipboard, input, router};
 
 /// The window's content size in points. It is the bench protocol's size
 /// (Task 4), used for every window, clamped to the screen's visible frame.
 /// TODO(config task): replace with `size.window.width` and
 /// `size.window.height` tokens.
 const WINDOW_PT: (f64, f64) = (900.0, 1000.0);
-/// Exit code when the window cannot start (as the launcher's).
+/// Exit code when no window can come up (R34: as the launcher's 220).
 const EXIT_NOT_STARTED: i32 = 220;
 
 struct State {
@@ -111,18 +111,8 @@ impl Host for MacHost {
             .spawn();
     }
     fn spawn_window(&mut self, req: WindowRequest) {
-        // TODO(Task 16): the router owns window spawning and activation.
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
-        let mut cmd = std::process::Command::new(exe);
-        if req.view {
-            cmd.arg("--view");
-        }
-        if let Some(name) = &req.display_name {
-            cmd.arg("--display-name").arg(name);
-        }
-        let _ = cmd.arg("--").arg(&req.path).spawn();
+        let args = router::sibling_args(&req.path, req.view, req.display_name.as_deref());
+        router::spawn_and_yield(&req.path, &args);
     }
     fn now_ns(&self) -> u64 {
         marks::now_ns()
@@ -148,15 +138,22 @@ fn main_queue_waker() -> Waker {
 }
 
 /// Opens the file, loads fonts and runs the application until the window
-/// closes. Returns the exit code.
+/// closes. Returns the exit code. With no path this instance is the router
+/// (see `router`): no window, and exit 0 once its work is done.
 pub fn run(args: WindowArgs) -> i32 {
-    let Some(path) = args.path else {
-        // TODO(Task 16): router mode.
-        eprintln!("{}: router mode is not available yet", app_meta::SLUG);
-        return EXIT_NOT_STARTED;
-    };
     let Some(mtm) = MainThreadMarker::new() else {
         return EXIT_NOT_STARTED;
+    };
+    // Documents arrive through `application:openURLs:` only, never from argv.
+    let key = NSString::from_str("NSTreatUnknownArgumentsAsOpen");
+    let no = NSString::from_str("NO");
+    let defaults = NSDictionary::<NSString, AnyObject>::from_slices(&[&*key], &[no.as_ref()]);
+    // SAFETY: the dictionary maps NSString keys to property-list objects.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+
+    let Some(path) = args.path else {
+        router::set_router_mode(true);
+        return run_app(mtm, None);
     };
     let waker = main_queue_waker();
     let host = MacHost {
@@ -179,12 +176,19 @@ pub fn run(args: WindowArgs) -> i32 {
             waker,
         })
     });
+    run_app(mtm, Some(main_menu(mtm)))
+}
 
+/// Runs AppKit until `finish`. The router has no menu and keeps the
+/// bundle's activation policy.
+fn run_app(mtm: MainThreadMarker, menu: Option<Retained<NSMenu>>) -> i32 {
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    if menu.is_some() {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    }
     let delegate = Delegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    app.setMainMenu(Some(&main_menu(mtm)));
+    app.setMainMenu(menu.as_deref());
     app.run();
     // Drop the window and its surfaces before returning.
     STATE.with(|s| s.borrow_mut().take());
@@ -500,6 +504,11 @@ pub fn on_geometry() {
 }
 
 pub fn request_close() {
+    if router::is_router_mode() {
+        // No window and nothing unsaved: quitting (or logging out) is fine.
+        finish(0);
+        return;
+    }
     let close = with_state(|st| {
         let fx = st.editor.handle(Input::CloseRequested);
         apply(st, fx)
@@ -510,7 +519,7 @@ pub fn request_close() {
 }
 
 /// Stops the event loop; `run` then returns `code`.
-fn finish(code: i32) {
+pub(crate) fn finish(code: i32) {
     EXIT.with(|e| e.set(Some(code)));
     with_state(|st| {
         st.link.pause();

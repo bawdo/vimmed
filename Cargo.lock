@@ -187,6 +187,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "detach"
+version = "0.9.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -897,6 +904,7 @@ name = "launcher"
 version = "0.9.0"
 dependencies = [
  "app-meta",
+ "detach",
  "libc",
  "marks",
 ]
@@ -1539,6 +1547,7 @@ name = "shell-gtk"
 version = "0.9.0"
 dependencies = [
  "app-meta",
+ "detach",
  "editor-core",
  "editor-render",
  "gtk4",
@@ -1552,6 +1561,7 @@ name = "shell-mac"
 version = "0.9.0"
 dependencies = [
  "app-meta",
+ "detach",
  "dispatch2",
  "editor-core",
  "editor-render",
