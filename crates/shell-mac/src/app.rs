@@ -127,8 +127,9 @@ impl Host for MacHost {
         let strip: Vec<&str> = strip.iter().map(String::as_str).collect();
         let args = [std::ffi::OsString::from(target)];
         let opener = std::path::Path::new("/usr/bin/open");
-        if let Err(e) = detach::spawn_detached(opener, &args, &strip) {
-            eprintln!("{}: could not open {target}: {e}", app_meta::SLUG);
+        match detach::spawn_detached(opener, &args, &strip) {
+            Ok(pid) => detach::reap(pid),
+            Err(e) => eprintln!("{}: could not open {target}: {e}", app_meta::SLUG),
         }
     }
     /// A sibling window process through `detach` (`router::spawn_sibling`:

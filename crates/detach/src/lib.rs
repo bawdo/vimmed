@@ -82,6 +82,30 @@ pub fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<std::path::PathB
         })
 }
 
+/// Collects child `pid`'s exit status once it exits, on a short-lived
+/// thread of its own, so a window-side spawn (a sibling window, `open`,
+/// `xdg-open`) never lingers as a zombie. It waits on that one pid only:
+/// no SIGCHLD handler and no `waitpid(-1)`, which would take other
+/// children's statuses (the launcher waits on its own child itself and
+/// must not call this).
+pub fn reap(pid: libc::pid_t) {
+    // A thread that cannot start leaves a zombie, as before: nothing worse.
+    let _ = std::thread::Builder::new()
+        .name("reap".into())
+        .spawn(move || {
+            loop {
+                // SAFETY: waits on our own child `pid`; a null status
+                // pointer is allowed.
+                let r = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
+                let interrupted =
+                    r == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted;
+                if !interrupted {
+                    break;
+                }
+            }
+        });
+}
+
 fn check(rc: c_int) -> io::Result<()> {
     if rc == 0 {
         Ok(())
@@ -278,6 +302,33 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn reap_collects_the_exited_child() {
+        let args = [OsString::from("-c"), OsString::from("exit 0")];
+        let pid = spawn_detached(Path::new("/bin/sh"), &args, &[]).unwrap();
+        reap(pid);
+        // `kill(pid, 0)` answers for a zombie too, and never takes its
+        // status, so polling it cannot race the reaper: ESRCH means the
+        // child has exited and been reaped.
+        let start = Instant::now();
+        loop {
+            // SAFETY: signal 0 only checks that `pid` exists.
+            let r = unsafe { libc::kill(pid, 0) };
+            if r == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "child {pid} was never reaped"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: WNOHANG never blocks; a null status pointer is allowed.
+        let r = unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) };
+        let err = io::Error::last_os_error().raw_os_error();
+        assert_eq!((r, err), (-1, Some(libc::ECHILD)));
+    }
 
     #[test]
     fn find_on_path_takes_the_first_executable() {

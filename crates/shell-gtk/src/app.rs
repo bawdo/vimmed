@@ -136,8 +136,9 @@ impl Host for GtkHost {
         let strip = detach::sibling_strip_env(app_meta::ENV_PREFIX);
         let strip: Vec<&str> = strip.iter().map(String::as_str).collect();
         let args = [OsString::from(target)];
-        if let Err(e) = detach::spawn_detached(&opener, &args, &strip) {
-            eprintln!("{}: could not open {target}: {e}", app_meta::SLUG);
+        match detach::spawn_detached(&opener, &args, &strip) {
+            Ok(pid) => detach::reap(pid),
+            Err(e) => eprintln!("{}: could not open {target}: {e}", app_meta::SLUG),
         }
     }
     /// A sibling window process, detached as the launcher starts one, with
@@ -158,8 +159,9 @@ impl Host for GtkHost {
         args.push(req.path.into_os_string());
         let strip = detach::sibling_strip_env(app_meta::ENV_PREFIX);
         let strip: Vec<&str> = strip.iter().map(String::as_str).collect();
-        if let Err(e) = detach::spawn_detached(&exe, &args, &strip) {
-            eprintln!("{}: could not start a window: {e}", app_meta::SLUG);
+        match detach::spawn_detached(&exe, &args, &strip) {
+            Ok(pid) => detach::reap(pid),
+            Err(e) => eprintln!("{}: could not start a window: {e}", app_meta::SLUG),
         }
     }
     fn now_ns(&self) -> u64 {

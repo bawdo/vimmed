@@ -211,11 +211,15 @@ mod mac {
 
     /// Starts this executable detached with `args`, stripping the toolkit
     /// variables and every `<ENV_PREFIX>*` variable from its environment.
+    /// The child is reaped when it exits (`detach::reap`), so it never
+    /// lingers as a zombie of this window.
     fn spawn_sibling(args: &[OsString]) -> io::Result<i32> {
         let exe: PathBuf = std::env::current_exe()?;
         let strip = detach::sibling_strip_env(app_meta::ENV_PREFIX);
         let strip: Vec<&str> = strip.iter().map(String::as_str).collect();
-        detach::spawn_detached(&exe, args, &strip)
+        let pid = detach::spawn_detached(&exe, args, &strip)?;
+        detach::reap(pid);
+        Ok(pid)
     }
 
     /// Best effort: once the child registers as an application (looked for
