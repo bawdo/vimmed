@@ -19,10 +19,16 @@
 //! puts the cursor back. The confirmed search stays for `n`, `N` and the
 //! highlights, which follow every edit (`crate::search`).
 //!
-//! The command line (`:`) is typed here too and run on Enter: `crate::ex`
-//! parses it, and `:s` finds its replacements in `crate::substitute`.
-//! `:s///c` asks at each match in Confirm mode. `:w` and `:e!` reach the
-//! file through `FileCalls`, a stand-in until Task 26's `Saver`.
+//! The command line (`:`), what it runs and `:s///c`'s Confirm mode live
+//! in `cmdline`. `:w`, `:e!` and closing reach the file through a
+//! `Saver` (`crate::saver`).
+//!
+//! The status bar: `ViewSource::status` picks what its left side shows (a
+//! message, then a prompt, then the line being typed, then the mode).
+//! Messages fade after `status::MESSAGE_FOR_NS` (asked for with
+//! `Effects::wake_at`, so the shell ticks then) and Esc clears one.
+//! `handle` repaints the status bar whenever its model changed, and the
+//! current match's lines whenever it moved, so no path has to ask.
 //!
 //! Undo groups: each Normal- or Visual-mode command is one undo step, a
 //! paste is one, each `:s` is one (a whole Confirm session included), and
@@ -35,13 +41,14 @@
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
 
+mod cmdline;
+
 use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::PathBuf;
 
 use crate::buffer::{Buffer, Pos};
 use crate::effects::{Effects, Redraw};
-use crate::ex::{self, ExCmd, Sub};
 use crate::grapheme;
 use crate::host::Host;
 use crate::input::{Input, Key, KeyEvent, Mods};
@@ -50,13 +57,14 @@ use crate::markdown::{
     line_display, ordered_display, parse_line,
 };
 use crate::platform::Platform;
+use crate::saver::{Saver, Unwired};
 use crate::search::{self, Hit, Search};
 use crate::status::{self, Mode};
 use crate::strings;
-use crate::substitute::{self, Answer, ConfirmSession};
+use crate::substitute::ConfirmSession;
 use crate::tokens::{Theme, Tokens};
 use crate::undo::History;
-use crate::view_model::{Selection, StatusModel, ViewSource};
+use crate::view_model::{CaretShape, MsgKind, Selection, StatusLeft, StatusModel, ViewSource};
 use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator, Touched};
 use crate::vim::register::{Register, Registers};
 use crate::vim::repeat::Change;
@@ -83,27 +91,6 @@ impl Default for Config {
     fn default() -> Config {
         Config { vim: true }
     }
-}
-
-/// Where `:w` and `:e!` reach the file: `Editor::write` and
-/// `Editor::reload` call through here. A stand-in seam until Task 26 puts
-/// those calls on the `Saver` trait (Task 31 writes for real). Until then
-/// the editor holds `Unwired`, and tests a double that records the calls.
-pub trait FileCalls {
-    /// Writes the document; `force` is `:w!`. True when it was written.
-    fn write(&mut self, force: bool) -> bool;
-    /// Reloads the document from disk, dropping the changes.
-    fn reload(&mut self);
-}
-
-/// No file behind the editor yet: nothing is written or reloaded.
-struct Unwired;
-
-impl FileCalls for Unwired {
-    fn write(&mut self, _force: bool) -> bool {
-        false
-    }
-    fn reload(&mut self) {}
 }
 
 /// A search being typed, and what to go back to when it ends.
@@ -176,13 +163,17 @@ pub struct Editor {
     dirty: bool,
     reader: bool,
     title: String,
-    message: Option<String>,
-    /// When a timed message goes (`marks::now_ns` clock).
+    message: Option<(String, MsgKind)>,
+    /// When the message goes (`marks::now_ns` clock); `None` keeps it until
+    /// it is replaced or cleared.
     message_until: Option<u64>,
+    /// Warnings about the file on disk, for the status bar.
+    /// TODO(Tasks 31 and 32): read-only and changed-on-disk warnings.
+    warnings: Vec<&'static str>,
     cfg: Config,
     platform: Platform,
     host: Box<dyn Host>,
-    files: Box<dyn FileCalls>,
+    saver: Box<dyn Saver>,
 }
 
 impl Editor {
@@ -249,22 +240,47 @@ impl Editor {
             dirty: false,
             reader: req.view,
             title,
-            message: message.map(str::to_owned),
+            // Said before any input, it stays until replaced or cleared.
+            message: message.map(|m| (m.to_owned(), MsgKind::Warning)),
             message_until: None,
+            warnings: Vec::new(),
             cfg,
             platform,
             host,
-            files: Box::new(Unwired),
+            saver: Box::new(Unwired),
         }
     }
 
-    /// Puts a test double behind `:w` and `:e!`.
-    #[cfg(test)]
-    pub(crate) fn set_files(&mut self, files: Box<dyn FileCalls>) {
-        self.files = files;
+    /// Puts the file behind `:w`, `:e!` and closing.
+    pub fn set_saver(&mut self, saver: Box<dyn Saver>) {
+        self.saver = saver;
     }
 
     pub fn handle(&mut self, input: Input) -> Effects {
+        let status = self.status();
+        let current = self.current_match().map(|(line, _)| line);
+        let until = self.message_until;
+        let mut fx = self.dispatch(input);
+        if fx.redraw == Redraw::None && self.status() != status {
+            fx.redraw = Redraw::Status;
+        }
+        let now = self.current_match().map(|(line, _)| line);
+        if now != current {
+            let n = self.buf.line_count();
+            for line in [current, now].into_iter().flatten().filter(|&l| l < n) {
+                fx.redraw = std::mem::take(&mut fx.redraw).merge(Redraw::Lines(line..line + 1));
+            }
+        }
+        if self.message_until != until {
+            fx = fx.merge(Effects {
+                wake_at: self.message_until,
+                ..Effects::default()
+            });
+        }
+        fx
+    }
+
+    fn dispatch(&mut self, input: Input) -> Effects {
         match input {
             Input::Key(k) => self.key(k),
             // Committed text types only in Insert. In Normal and Visual it
@@ -286,15 +302,9 @@ impl Editor {
             }
             Input::Text(_) => Effects::default(),
             // TODO(later tasks): ask before closing with unsaved changes.
-            Input::CloseRequested => Effects {
-                close: Some(0),
-                ..Effects::default()
-            },
+            Input::CloseRequested => self.close(0),
             // TODO(Task 34): write the recovery copy before closing.
-            Input::Signal(s) => Effects {
-                close: Some(s.exit_code()),
-                ..Effects::default()
-            },
+            Input::Signal(s) => self.close(s.exit_code()),
             Input::Preedit { .. }
             | Input::Mouse(_)
             | Input::Scroll { .. }
@@ -309,25 +319,44 @@ impl Editor {
         &self.title
     }
 
-    /// A message for the status bar, if there is one. Task 26 shows it.
+    /// The status bar's message, if there is one.
     pub fn message(&self) -> Option<&str> {
-        self.message.as_deref()
+        self.message.as_ref().map(|(text, _)| text.as_str())
     }
 
-    /// Shows `text` in the status bar, for `for_ns` nanoseconds or (with
-    /// `None`) until something replaces it.
-    fn say(&mut self, text: String, for_ns: Option<u64>) {
-        self.message = Some(text);
-        self.message_until = for_ns.map(|ns| self.host.now_ns().saturating_add(ns));
+    /// Shows `text` in the status bar until it fades, as an Error when it
+    /// is in vim's error form (`MsgKind::of`).
+    fn say(&mut self, text: String) {
+        let kind = MsgKind::of(&text);
+        self.say_as(text, kind, status::MESSAGE_FOR_NS);
     }
 
-    /// The main loop woke: a timed message whose time is up goes.
-    fn tick(&mut self, now_ns: u64) -> Effects {
-        if self.message_until.is_none_or(|until| now_ns < until) {
-            return Effects::default();
-        }
+    /// Shows `text` as `kind` for `for_ns` nanoseconds.
+    fn say_as(&mut self, text: String, kind: MsgKind, for_ns: u64) {
+        self.message = Some((text, kind));
+        self.message_until = Some(self.host.now_ns().saturating_add(for_ns));
+    }
+
+    /// Clears the status bar's message.
+    fn unsay(&mut self) {
         self.message = None;
         self.message_until = None;
+    }
+
+    /// The main loop woke: a timed message whose time is up goes. One not
+    /// due yet (a timer that fired early) asks to be woken again then.
+    fn tick(&mut self, now_ns: u64) -> Effects {
+        match self.message_until {
+            None => return Effects::default(),
+            Some(until) if now_ns < until => {
+                return Effects {
+                    wake_at: Some(until),
+                    ..Effects::default()
+                };
+            }
+            Some(_) => {}
+        }
+        self.unsay();
         Effects {
             redraw: Redraw::Status,
             ..Effects::default()
@@ -433,6 +462,10 @@ impl Editor {
         } else {
             k
         };
+        // Esc clears a message, and goes on to do what it does.
+        if k.key == Key::Esc {
+            self.unsay();
+        }
         let redo = self.cfg.vim
             && self.mode == Mode::Normal
             && k.key == Key::Char('r')
@@ -583,6 +616,7 @@ impl Editor {
                     None => String::new(),
                 };
                 self.leave_visual();
+                self.unsay();
                 self.mode = Mode::Command;
                 status
             }
@@ -677,323 +711,6 @@ impl Editor {
         }
     }
 
-    /// A key on the command line. Typing adds to it and Backspace takes
-    /// its last grapheme off; on an empty line Backspace leaves, as Esc
-    /// does (vim 9.1). Enter runs the command. Other keys do nothing.
-    fn command_key(&mut self, k: KeyEvent) -> Effects {
-        let status = Effects {
-            redraw: Redraw::Status,
-            ..Effects::default()
-        };
-        match k.key {
-            Key::Esc => self.leave_cmdline(),
-            Key::Backspace if self.cmdline.is_empty() => self.leave_cmdline(),
-            Key::Backspace => {
-                let line = &mut self.cmdline;
-                line.truncate(grapheme::prev(line, line.len()));
-                status
-            }
-            Key::Enter => {
-                let input = std::mem::take(&mut self.cmdline);
-                self.mode = Mode::Normal;
-                if input.trim().is_empty() {
-                    return status;
-                }
-                let fx = match ex::parse(&input) {
-                    Ok(cmd) => self.ex(cmd),
-                    Err(text) => {
-                        self.say(text, None);
-                        Effects::default()
-                    }
-                };
-                status.merge(fx)
-            }
-            Key::Char(c) => self.cmdline_input(c.encode_utf8(&mut [0; 4])),
-            Key::Space => self.cmdline_input(" "),
-            _ => Effects::default(),
-        }
-    }
-
-    /// Text typed on the command line. Enter runs it, so a line break in
-    /// committed text is dropped.
-    fn cmdline_input(&mut self, text: &str) -> Effects {
-        self.cmdline
-            .extend(text.chars().filter(|c| !matches!(c, '\n' | '\r')));
-        Effects {
-            redraw: Redraw::Status,
-            ..Effects::default()
-        }
-    }
-
-    /// Esc on the command line: back to Normal, the line dropped.
-    fn leave_cmdline(&mut self) -> Effects {
-        self.mode = Mode::Normal;
-        self.cmdline.clear();
-        Effects {
-            redraw: Redraw::Status,
-            ..Effects::default()
-        }
-    }
-
-    /// Carries out a command from the command line.
-    fn ex(&mut self, cmd: ExCmd) -> Effects {
-        match cmd {
-            ExCmd::Write { force } => self.write_step(force).1,
-            ExCmd::Quit { force } if !force && self.dirty => {
-                self.say(strings::NO_WRITE_SINCE_CHANGE.to_owned(), None);
-                Effects::default()
-            }
-            ExCmd::Quit { .. } => self.close(0),
-            ExCmd::Exit if !self.dirty => self.close(0),
-            ExCmd::WriteQuit | ExCmd::Exit => match self.write_step(false) {
-                (true, fx) => fx.merge(self.close(0)),
-                (false, fx) => fx,
-            },
-            ExCmd::CQuit => self.close(1),
-            ExCmd::ReloadForce => {
-                self.reload();
-                Effects::default()
-            }
-            // TODO(Task 40): `:help` shows the help overlay.
-            // TODO(Task 37): `:table` inserts a table or opens the picker.
-            ExCmd::Help | ExCmd::Table(_) => Effects::default(),
-            ExCmd::Substitute(sub) => self.substitute(sub),
-        }
-    }
-
-    /// Writes the document through the file seam: true when it was
-    /// written, which leaves the buffer clean.
-    pub fn write(&mut self, force: bool) -> bool {
-        let written = self.files.write(force);
-        if written {
-            self.dirty = false;
-        }
-        written
-    }
-
-    /// Reloads the document from disk, through the file seam.
-    pub fn reload(&mut self) {
-        self.files.reload();
-    }
-
-    /// Closes the window, exiting with `code`.
-    pub fn close(&mut self, code: i32) -> Effects {
-        Effects {
-            close: Some(code),
-            ..Effects::default()
-        }
-    }
-
-    /// `write`, with the effects of the dirty state it changed.
-    fn write_step(&mut self, force: bool) -> (bool, Effects) {
-        let was_dirty = self.dirty;
-        let written = self.write(force);
-        let fx = Effects {
-            dirty: (was_dirty && !self.dirty).then_some(false),
-            ..Effects::default()
-        };
-        (written, fx)
-    }
-
-    /// `:s`. An empty pattern is the last search's. The pattern becomes
-    /// the last search, as in vim, so `n` finds it and it is highlighted.
-    /// `n` only counts and takes priority over `c`; reader mode only
-    /// counts.
-    fn substitute(&mut self, mut sub: Sub) -> Effects {
-        if sub.pattern.is_empty() {
-            match self.search.as_ref().filter(|s| !s.query.is_empty()) {
-                Some(s) => sub.pattern.clone_from(&s.query),
-                None => {
-                    self.say(strings::NO_PREVIOUS_PATTERN.to_owned(), None);
-                    return Effects::default();
-                }
-            }
-        }
-        let visual = self.last_visual.map(|s| {
-            let (a, b) = s.ordered();
-            (a.line, b.line)
-        });
-        let n = self.buf.line_count();
-        let lines = match substitute::lines(sub.range, self.cursor.line, visual, n) {
-            Ok(lines) => lines,
-            Err(text) => {
-                self.say(text, None);
-                return Effects::default();
-            }
-        };
-        let fx = self.set_last_search(&sub.pattern);
-        fx.merge(if sub.flags.n {
-            self.count_matches(&sub, lines)
-        } else if self.reader {
-            Effects::default()
-        } else if sub.flags.c {
-            self.start_confirm(&sub, lines)
-        } else {
-            self.substitute_all(&sub, lines)
-        })
-    }
-
-    /// Makes `pattern` the last search, going the way the last one went.
-    fn set_last_search(&mut self, pattern: &str) -> Effects {
-        let forward = self.search.as_ref().is_none_or(|s| s.forward);
-        let mut s = Search::new(forward, self.vim_cursor());
-        s.query = pattern.to_owned();
-        s.refresh(&self.buf);
-        self.search = Some(s);
-        Effects {
-            redraw: Redraw::All,
-            ..Effects::default()
-        }
-    }
-
-    /// `:s///n`: says how many matches there are. Vim 9.1 then puts the
-    /// cursor on its line's first non-blank.
-    fn count_matches(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
-        let r = substitute::run(&self.buf, sub, lines);
-        if r.count == 0 {
-            self.say(strings::pattern_not_found(&sub.pattern), None);
-            return Effects::default();
-        }
-        self.say(strings::matches(r.count, r.lines), None);
-        let line = self.cursor.line;
-        self.move_across(Pos {
-            line,
-            col: vim::motion::caret_col(self.buf.line(line)),
-        })
-    }
-
-    /// `:s` without asking, as one undo step. The cursor ends on the first
-    /// non-blank of the last line changed and, undone or redone, at the
-    /// start of the first (vim 9.1).
-    fn substitute_all(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
-        let r = substitute::run(&self.buf, sub, lines);
-        let (Some(first), Some(last)) = (r.edits.first(), r.edits.last()) else {
-            self.say(strings::pattern_not_found(&sub.pattern), None);
-            return Effects::default();
-        };
-        let (first, last) = (first.range.start.line, last.range.start.line);
-        let fx = self.run(|ctx| {
-            ctx.place(Pos {
-                line: first,
-                col: 0,
-            });
-            for e in &r.edits {
-                ctx.replace(e.range.clone(), &e.text);
-            }
-            OpOutcome {
-                cursor: Pos {
-                    line: last,
-                    col: vim::motion::caret_col(ctx.buf.line(last)),
-                },
-                insert: false,
-            }
-        });
-        self.say(strings::substitutions(r.count, r.lines), None);
-        fx
-    }
-
-    /// `:s///c`: Confirm mode on the first match, or `E486` when there is
-    /// none. The whole session is one undo step, opened here and closed by
-    /// `end_confirm`.
-    fn start_confirm(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
-        let session = substitute::confirm_session(&self.buf, sub, lines);
-        if session.done() {
-            self.say(strings::pattern_not_found(&sub.pattern), None);
-            return Effects::default();
-        }
-        self.message = None;
-        self.message_until = None;
-        self.history.begin();
-        self.confirm = Some(session);
-        self.mode = Mode::Confirm;
-        self.show_confirm()
-    }
-
-    /// A key in Confirm mode: `y n a q l` in either case, or Esc to quit.
-    /// Other keys wait for an answer.
-    fn confirm_key(&mut self, k: KeyEvent) -> Effects {
-        let answer = match k.key {
-            Key::Esc => Answer::Quit,
-            Key::Char(c) => match Answer::from_key(c) {
-                Some(a) => a,
-                None => return Effects::default(),
-            },
-            _ => return Effects::default(),
-        };
-        let Some(session) = self.confirm.as_mut() else {
-            return Effects::default();
-        };
-        let edits = session.answer(answer);
-        let done = session.done();
-        let fx = if edits.is_empty() {
-            Effects::default()
-        } else {
-            self.run(|ctx| {
-                for e in &edits {
-                    ctx.replace(e.range.clone(), &e.text);
-                }
-                OpOutcome {
-                    cursor: ctx.cursor,
-                    insert: false,
-                }
-            })
-        };
-        fx.merge(if done {
-            self.end_confirm()
-        } else {
-            self.show_confirm()
-        })
-    }
-
-    /// Puts the cursor on the match being asked about, highlighted as the
-    /// current one.
-    fn show_confirm(&mut self) -> Effects {
-        let Some((line, range)) = self.confirm.as_ref().and_then(ConfirmSession::current) else {
-            return Effects::default();
-        };
-        let at = Pos {
-            line,
-            col: range.start,
-        };
-        if let Some(s) = self.search.as_mut() {
-            s.set_current(Some(&Hit {
-                line,
-                range,
-                wrapped: false,
-            }));
-        }
-        self.move_across(at).merge(Effects {
-            redraw: Redraw::All,
-            ..Effects::default()
-        })
-    }
-
-    /// The session is over: its undo step closes (with the cursor vim's
-    /// undo goes back to), the cursor goes where vim leaves it, and what
-    /// was replaced is said (nothing, when nothing was).
-    fn end_confirm(&mut self) -> Effects {
-        let Some(session) = self.confirm.take() else {
-            return Effects::default();
-        };
-        if let Some(at) = session.undo_cursor() {
-            self.history.set_cursor(at);
-        }
-        self.history.end();
-        self.mode = Mode::Normal;
-        if let Some(s) = self.search.as_mut() {
-            s.set_current(None);
-        }
-        if session.count() > 0 {
-            let text = strings::substitutions(session.count(), session.lines());
-            self.say(text, None);
-        }
-        let to = vim::rest(&self.buf, session.end_cursor(&self.buf));
-        self.move_across(to).merge(Effects {
-            redraw: Redraw::All,
-            ..Effects::default()
-        })
-    }
-
     /// `/` or `?`: Search mode, from the cursor as it is now. The last
     /// search's highlights give way to the new one's.
     fn start_search(&mut self, forward: bool, op: Option<Operator>, count: usize) -> Effects {
@@ -1006,6 +723,7 @@ impl Editor {
             goal: self.goal,
         });
         self.mode = Mode::Search;
+        self.unsay();
         Effects {
             redraw: if self.search.is_some() {
                 Redraw::All
@@ -1123,7 +841,7 @@ impl Editor {
                 }
                 if confirm && !search.query.is_empty() {
                     // vim: the pattern is the last search all the same.
-                    self.say(strings::pattern_not_found(&search.query), None);
+                    self.say(strings::pattern_not_found(&search.query));
                     search.refresh(&self.buf);
                     self.search = Some(search);
                 }
@@ -1167,7 +885,7 @@ impl Editor {
             None => {
                 let text = strings::pattern_not_found(&last.query);
                 self.vim.discard();
-                self.say(text, None);
+                self.say(text);
                 Effects::default()
             }
         }
@@ -1178,13 +896,13 @@ impl Editor {
     /// wrapped. An operator with nothing between does nothing.
     fn go_to_match(&mut self, op: Option<Operator>, hit: &Hit) -> Effects {
         if hit.wrapped {
-            self.say(
+            self.say_as(
                 strings::SEARCH_WRAPPED.to_owned(),
-                Some(search::WRAPPED_FOR_NS),
+                MsgKind::Info,
+                search::WRAPPED_FOR_NS,
             );
         } else {
-            self.message = None;
-            self.message_until = None;
+            self.unsay();
         }
         let status = Effects {
             redraw: Redraw::Status,
@@ -1718,10 +1436,36 @@ impl ViewSource for Editor {
         self.cursor
     }
     fn status(&self) -> StatusModel {
+        let left = if let Some((text, kind)) = &self.message {
+            StatusLeft::Message {
+                text: text.clone(),
+                kind: *kind,
+            }
+        } else if let Some(p) = self.prompt() {
+            StatusLeft::Prompt(p)
+        } else {
+            let typed = match (self.mode, &self.searching) {
+                (Mode::Command, _) => Some((':', &self.cmdline)),
+                (Mode::Search, Some(s)) => {
+                    Some((if s.search.forward { '/' } else { '?' }, &s.search.query))
+                }
+                _ => None,
+            };
+            match typed {
+                Some((prefix, text)) => StatusLeft::Input {
+                    prefix,
+                    text: text.clone(),
+                    cursor: text.len(),
+                },
+                None => StatusLeft::Mode(self.mode.name()),
+            }
+        };
         StatusModel {
-            mode: self.mode.name(),
+            left,
             file: self.title.clone(),
             dirty: self.dirty,
+            warnings: self.warnings.clone(),
+            showcmd: self.showcmd(),
             position: status::position(&self.buf, self.cursor),
         }
     }
@@ -1740,6 +1484,24 @@ impl ViewSource for Editor {
     }
     fn matches(&self, i: usize) -> &[Range<usize>] {
         self.search().map_or(&[], |s| s.matches_on(&self.buf, i))
+    }
+    /// While `:s///c` asks, the match it asks about (which can be one the
+    /// smartcase highlights do not show), else the search's.
+    fn current_match(&self) -> Option<(usize, Range<usize>)> {
+        match &self.confirm {
+            Some(session) => session.current(),
+            None => self.search()?.current(),
+        }
+    }
+    fn caret_shape(&self) -> CaretShape {
+        match self.mode {
+            _ if self.reader => CaretShape::Hidden,
+            Mode::Insert => CaretShape::Bar,
+            Mode::Search | Mode::Command => CaretShape::Hidden,
+            Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::Confirm | Mode::Prompt => {
+                CaretShape::Block
+            }
+        }
     }
 }
 
@@ -1966,7 +1728,7 @@ mod tests {
         let e = build(text, Config::default(), true);
         assert_eq!(e.mode(), Mode::Insert);
         assert_eq!(e.cursor(), Pos { line: 5, col: 7 });
-        assert_eq!(e.status().mode, "INSERT");
+        assert_eq!(e.status().left, StatusLeft::Mode("INSERT"));
     }
 
     #[test]
@@ -2035,7 +1797,7 @@ mod tests {
         let mut e = ed("e\u{301}x");
         at(&mut e, 0, 3);
         let s = e.status();
-        assert_eq!(s.mode, "INSERT");
+        assert_eq!(s.left, StatusLeft::Mode("INSERT"));
         assert_eq!(s.file, "notes.md");
         assert!(!s.dirty);
         assert_eq!(s.position, "1:2");

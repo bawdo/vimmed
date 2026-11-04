@@ -7,11 +7,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::buffer::Pos;
-use crate::editor::{Config, Editor, FileCalls, OpenRequest};
+use crate::editor::{Config, Editor, OpenRequest};
 use crate::effects::Effects;
 use crate::host::{Host, Waker, WindowRequest};
 use crate::input::{Input, Key, KeyEvent, Mods};
 use crate::platform::Platform;
+use crate::saver::Saver;
 
 pub(crate) use crate::view_model::ViewSource;
 
@@ -125,21 +126,24 @@ pub(crate) fn ed_with_host(text: &str) -> (Editor, FakeHost) {
     build_with_host(text, Config::default(), false)
 }
 
-/// A call the editor made to write or reload its file.
+/// A call the editor made to its `Saver`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileCall {
     Write { force: bool },
     Reload,
+    Close { code: i32 },
 }
 
 #[derive(Default)]
 struct FilesState {
     calls: Vec<FileCall>,
     fail_writes: bool,
+    /// The text on disk: what a write left, or what a reload reads.
+    disk: String,
 }
 
-/// A `FileCalls` double that records the calls. Writes succeed until
-/// `fail_writes`. Clones share one record.
+/// A `Saver` double that records the calls and keeps the text "on disk".
+/// Writes succeed until `fail_writes`. Clones share one record.
 #[derive(Default, Clone)]
 pub(crate) struct FakeFiles {
     state: Rc<RefCell<FilesState>>,
@@ -150,28 +154,49 @@ impl FakeFiles {
         self.state.borrow().calls.clone()
     }
 
-    /// Makes every write from now on fail.
+    /// Makes every write from now on fail, as a full disk does.
     pub(crate) fn fail_writes(&self) {
         self.state.borrow_mut().fail_writes = true;
     }
+
+    /// The text on disk.
+    pub(crate) fn disk(&self) -> String {
+        self.state.borrow().disk.clone()
+    }
+
+    /// Changes the text on disk, as another program would.
+    pub(crate) fn set_disk(&self, text: &str) {
+        self.state.borrow_mut().disk = text.to_owned();
+    }
 }
 
-impl FileCalls for FakeFiles {
-    fn write(&mut self, force: bool) -> bool {
+impl Saver for FakeFiles {
+    fn write(&mut self, text: &str, force: bool) -> std::io::Result<()> {
         let mut s = self.state.borrow_mut();
         s.calls.push(FileCall::Write { force });
-        !s.fail_writes
+        if s.fail_writes {
+            return Err(std::io::Error::other("No space left on device"));
+        }
+        s.disk = text.to_owned();
+        Ok(())
     }
-    fn reload(&mut self) {
-        self.state.borrow_mut().calls.push(FileCall::Reload);
+    fn reload(&mut self) -> std::io::Result<String> {
+        let mut s = self.state.borrow_mut();
+        s.calls.push(FileCall::Reload);
+        Ok(s.disk.clone())
+    }
+    fn close(&mut self, code: i32) {
+        self.state.borrow_mut().calls.push(FileCall::Close { code });
     }
 }
 
-/// Like `ed`, with a handle on the calls it makes to its file.
+/// Like `ed`, with a handle on the calls it makes to its file, which holds
+/// `text` to begin with.
 pub(crate) fn ed_with_files(text: &str) -> (Editor, FakeFiles) {
     let mut e = ed(text);
     let files = FakeFiles::default();
-    e.set_files(Box::new(files.clone()));
+    files.set_disk(text);
+    e.set_saver(Box::new(files.clone()));
     (e, files)
 }
 

@@ -197,9 +197,10 @@ mod tests {
     use super::*;
     use crate::buffer::Pos;
     use crate::editor::Editor;
-    use crate::effects::Effects;
+    use crate::effects::{Effects, Redraw};
     use crate::input::Input;
     use crate::testkit::*;
+    use crate::view_model::{MsgKind, StatusLeft, ViewSource};
     use crate::vim::Mode;
 
     fn sub(input: &str) -> Sub {
@@ -489,10 +490,46 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_write_says_why_as_an_error() {
+        let (mut e, files) = ed_with_files("hello world");
+        files.fail_writes();
+        let fx = colon(&mut e, "w");
+        assert_eq!(e.message(), Some("write failed: No space left on device"));
+        assert_eq!(
+            e.status().left,
+            StatusLeft::Message {
+                text: "write failed: No space left on device".into(),
+                kind: MsgKind::Error,
+            }
+        );
+        assert_ne!(fx.redraw, Redraw::None);
+    }
+
+    #[test]
+    fn a_write_hands_the_saver_the_text() {
+        let (mut e, files) = ed_with_files("hello world");
+        keys(&mut e, "x");
+        colon(&mut e, "w");
+        assert_eq!(files.disk(), "ello world");
+    }
+
+    #[test]
+    fn with_no_saver_a_write_fails_out_loud() {
+        let mut e = ed("hello world");
+        keys(&mut e, "x");
+        colon(&mut e, "w");
+        assert!(e.dirty());
+        assert_eq!(
+            e.message(),
+            Some("write failed: file access is not wired up yet")
+        );
+    }
+
+    #[test]
     fn q_closes_when_clean() {
         let (mut e, files) = ed_with_files("hello world");
         assert_eq!(colon(&mut e, "q").close, Some(0));
-        assert!(files.calls().is_empty());
+        assert_eq!(files.calls(), [FileCall::Close { code: 0 }]);
     }
 
     #[test]
@@ -521,12 +558,16 @@ mod tests {
 
     #[test]
     fn wq_writes_and_closes() {
+        let wrote_and_closed = [
+            FileCall::Write { force: false },
+            FileCall::Close { code: 0 },
+        ];
         let (mut e, files) = ed_with_files("hello world");
         assert_eq!(colon(&mut e, "wq").close, Some(0));
-        assert_eq!(files.calls(), [FileCall::Write { force: false }]);
+        assert_eq!(files.calls(), wrote_and_closed);
         let (mut e, files) = ed_with_files("hello world");
         assert_eq!(colon(&mut e, "wqa").close, Some(0));
-        assert_eq!(files.calls(), [FileCall::Write { force: false }]);
+        assert_eq!(files.calls(), wrote_and_closed);
     }
 
     #[test]
@@ -541,11 +582,17 @@ mod tests {
     fn x_writes_only_when_changed() {
         let (mut e, files) = ed_with_files("hello world");
         assert_eq!(colon(&mut e, "x").close, Some(0));
-        assert!(files.calls().is_empty());
+        assert_eq!(files.calls(), [FileCall::Close { code: 0 }]);
         let (mut e, files) = ed_with_files("hello world");
         keys(&mut e, "x");
         assert_eq!(colon(&mut e, "x").close, Some(0));
-        assert_eq!(files.calls(), [FileCall::Write { force: false }]);
+        assert_eq!(
+            files.calls(),
+            [
+                FileCall::Write { force: false },
+                FileCall::Close { code: 0 }
+            ]
+        );
         let (mut e, files) = ed_with_files("hello world");
         files.fail_writes();
         keys(&mut e, "x");
@@ -565,6 +612,40 @@ mod tests {
         colon(&mut e, "e!");
         assert_eq!(files.calls(), [FileCall::Reload]);
         assert_eq!(e.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn e_bang_takes_the_text_on_disk_as_one_undo_step() {
+        let (mut e, files) = ed_with_files("hello world");
+        keys(&mut e, "x");
+        files.set_disk("from disk\nsecond");
+        let fx = colon(&mut e, "e!");
+        assert_eq!(e.text(), "from disk\nsecond");
+        assert!(!e.dirty());
+        assert_eq!(fx.dirty, Some(false));
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "ello world");
+    }
+
+    #[test]
+    fn e_bang_on_a_clean_buffer_reports_clean() {
+        let (mut e, files) = ed_with_files("hello world");
+        assert!(!e.dirty());
+        files.set_disk("changed on disk");
+        let fx = colon(&mut e, "e!");
+        assert_eq!(e.text(), "changed on disk");
+        assert_eq!(fx.dirty, Some(false));
+        assert!(!e.dirty());
+    }
+
+    #[test]
+    fn closing_tells_the_saver() {
+        let (mut e, files) = ed_with_files("hello world");
+        assert_eq!(colon(&mut e, "cq").close, Some(1));
+        assert_eq!(files.calls(), [FileCall::Close { code: 1 }]);
+        let (mut e, files) = ed_with_files("hello world");
+        e.handle(Input::CloseRequested);
+        assert_eq!(files.calls(), [FileCall::Close { code: 0 }]);
     }
 
     #[test]

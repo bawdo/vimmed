@@ -23,6 +23,11 @@
 //! prefixes (`#`, `>`, list markers) hang in the left margin instead, so
 //! revealing them does not move the text.
 //!
+//! Over the text: search matches in `color.search.match` (the current one in
+//! `color.search.current`), the selection in `color.selection` (taking the
+//! grapheme under its end, as Visual does), and the caret in `color.caret`,
+//! a block one grapheme wide or a `size.caret` bar as `caret_shape` says.
+//!
 //! Fonts: a line that shaped a glyph as `.notdef` is laid out again when lazy
 //! fallback lands a face for it (`poll_fonts`).
 
@@ -30,13 +35,14 @@ use std::ops::Range;
 use std::path::Path;
 
 use editor_core::buffer::Pos;
+use editor_core::grapheme;
 use editor_core::host::Waker;
 use editor_core::markdown::{
     BlockDeco, BlockId, LineDisplay, Prefix, SpanBase, SpanStyle, display_to_src,
 };
 use editor_core::strings::IMAGE_NOT_FOUND;
 use editor_core::tokens::{TokenId, Tokens};
-use editor_core::view_model::{StatusModel, ViewSource};
+use editor_core::view_model::{CaretShape, StatusModel, ViewSource};
 
 use crate::code_track::CodeTracks;
 use crate::damage::Damage;
@@ -169,12 +175,23 @@ struct CodeLine {
 }
 
 /// What `draw_line` last painted over a line's text, in display bytes (the
-/// caret as a source column), so a recolour can repaint the line as it was.
+/// caret as source columns), so a recolour can repaint the line as it was.
 #[derive(Default)]
 struct Overlay {
     matches: Vec<Range<usize>>,
+    /// The current match, over the others.
+    current: Option<Range<usize>>,
     selection: Option<Range<usize>>,
-    caret: Option<usize>,
+    caret: Option<OverlayCaret>,
+}
+
+/// The caret as `draw_line` took it: the cursor's source column, the end
+/// of the grapheme under it (what a block covers), and its shape.
+#[derive(Clone, Copy)]
+struct OverlayCaret {
+    col: usize,
+    end: usize,
+    shape: CaretShape,
 }
 
 /// Per source line: its height in pixels (estimated until shaped), and once
@@ -290,6 +307,10 @@ pub struct DocView {
     pub(crate) damage: Damage,
     /// The caret's line and its rectangle in frame pixels, as last painted.
     caret: Option<(usize, RectF)>,
+    /// The line the cursor was on and the caret's shape when that line was
+    /// last drawn (`None` until then), so a caret that moves or changes
+    /// shape repaints its line, and one that stays put repaints nothing.
+    cursor_drawn: Option<(usize, CaretShape)>,
     /// Present once `set_images` is called.
     images: Option<Images>,
     /// True once the first decoded image has been painted (and marked).
@@ -320,6 +341,7 @@ impl DocView {
             last_status: None,
             damage: Damage::new(),
             caret: None,
+            cursor_drawn: None,
             images: None,
             image_marked: false,
             code: CodeTracks::new(),
@@ -364,6 +386,7 @@ impl DocView {
         }
         self.last_status = None;
         self.caret = None;
+        self.cursor_drawn = None;
         self.clear_frame();
     }
 
@@ -374,6 +397,7 @@ impl DocView {
         self.sync(src);
         let g = self.geo();
         self.caret = None;
+        self.cursor_drawn = None;
         let bg = self.tokens.color(TokenId::ColorBg);
         fill(
             &mut self.frame.pixmap,
@@ -398,7 +422,8 @@ impl DocView {
     /// model changed. A line whose height is unchanged damages only its own
     /// rows; a height change (or a change in the line count) repaints and
     /// damages from that line to the bottom of the text. The caret's old and
-    /// new lines are repainted when the cursor changed line.
+    /// new lines are repainted when the cursor changed line or the caret its
+    /// shape.
     ///
     /// An edit in or next to a rendered table repaints the whole table: its
     /// column widths come from every row, so any row can move them all.
@@ -418,9 +443,9 @@ impl DocView {
             }
         }
         let cursor = src.cursor().line;
-        let old = self.caret.map(|(l, _)| l);
-        if old != Some(cursor) {
-            todo.extend(old);
+        let drawn = self.cursor_drawn;
+        if drawn != Some((cursor, src.caret_shape())) {
+            todo.extend(drawn.map(|(l, _)| l));
             todo.push(cursor);
         }
         todo.retain(|&i| i < count);
@@ -1117,6 +1142,9 @@ impl DocView {
         if self.caret.is_some_and(|(l, _)| l >= first) {
             self.caret = None;
         }
+        if self.cursor_drawn.is_some_and(|(l, _)| l >= first) {
+            self.cursor_drawn = None;
+        }
         let bg = self.tokens.color(TokenId::ColorBg);
         let clip = y0..g.text_bottom;
         fill(
@@ -1141,21 +1169,40 @@ impl DocView {
         let map =
             |r: &Range<usize>| src_to_display_clamped(d, r.start)..src_to_display_clamped(d, r.end);
         let cursor = src.cursor();
+        let shape = src.caret_shape();
+        let line = src.line(i);
+        let caret = (!src.reader() && cursor.line == i && shape != CaretShape::Hidden).then(|| {
+            let col = grapheme::floor(line, cursor.col);
+            OverlayCaret {
+                col,
+                end: grapheme::next(line, col),
+                shape,
+            }
+        });
         let overlay = Overlay {
             matches: src.matches(i).iter().map(map).collect(),
+            current: src
+                .current_match()
+                .filter(|(l, _)| *l == i)
+                .map(|(_, r)| map(&r)),
             selection: src
                 .selection()
-                .and_then(|sel| sel.on_line(i, d.src_len))
+                .and_then(|sel| sel.on_line(i, line))
                 .map(|r| map(&r)),
-            caret: (!src.reader() && cursor.line == i).then_some(cursor.col),
+            caret,
         };
+        if cursor.line == i {
+            self.cursor_drawn = Some((i, shape));
+        }
         self.lines[i].overlay = overlay;
         self.paint_line(i, top);
     }
 
     /// Paints line `i` with its top at `top`: background, block decoration,
-    /// inline code backgrounds, search matches, selection, prefixes, text and
-    /// caret (the overlays as `draw_line` last took them).
+    /// inline code backgrounds, search matches (the current one in
+    /// `color.search.current`), selection, a block caret (under the text, so
+    /// the grapheme shows through), prefixes, text and a bar caret (the
+    /// overlays as `draw_line` last took them).
     fn paint_line(&mut self, i: usize, top: f32) {
         let g = self.geo();
         let t = &self.tokens;
@@ -1263,21 +1310,64 @@ impl DocView {
         for m in &slot.overlay.matches {
             highlight(m, TokenId::ColorSearchMatch);
         }
+        if let Some(m) = &slot.overlay.current {
+            highlight(m, TokenId::ColorSearchCurrent);
+        }
         if let Some(sel) = &slot.overlay.selection {
             highlight(sel, TokenId::ColorSelection);
         }
 
         let gap = (t.px(TokenId::SpacePrefixGap) * s).round();
+        let hung_x = slot
+            .hung
+            .as_ref()
+            .map(|(c, _)| (cx - gap - c.laid.width().ceil()).max(0.0));
+        let caret_rect = slot.overlay.caret.map(|c| {
+            // In the hung prefix, or the main text.
+            let (laid_c, x, from, to) = match (&slot.hung, hung_x) {
+                (Some((h, hp)), Some(hx)) if c.col < hp.end => (
+                    &h.laid,
+                    hx,
+                    c.col.saturating_sub(hp.start),
+                    c.end.min(hp.end).saturating_sub(hp.start),
+                ),
+                _ => (
+                    laid,
+                    x0,
+                    src_to_display_clamped(d, c.col),
+                    src_to_display_clamped(d, c.end),
+                ),
+            };
+            // On the main text's row, wherever it sits across.
+            let main = laid.caret(src_to_display_clamped(d, c.col));
+            let at = laid_c.caret(from);
+            let w = match c.shape {
+                CaretShape::Block => laid_c
+                    .range_rects(from..to)
+                    .first()
+                    .map(|r| r.w)
+                    // Past the last grapheme (an empty line).
+                    .unwrap_or_else(|| (t.px(TokenId::SizeCaretBlockEmpty) * s).round()),
+                _ => (t.px(TokenId::SizeCaret) * s).round().max(1.0),
+            };
+            RectF {
+                x: (x + at.x).round(),
+                y: top + main.top,
+                w: w.max(1.0),
+                h: main.height,
+            }
+        });
+        if let (Some(c), Some(r)) = (slot.overlay.caret, caret_rect)
+            && c.shape == CaretShape::Block
+        {
+            fill(pix, r.x, r.y, r.w, r.h, t.color(TokenId::ColorCaret), &clip);
+        }
         let oy = top as i32;
         if let Some(p) = &slot.prefix {
             let px = (cx + slot.prefix_dx).max(0.0) as i32;
             self.layout
                 .draw(&p.laid, &mut |m| blend(pix, px, oy, &m, &rows));
         }
-        let hung_x = slot
-            .hung
-            .as_ref()
-            .map(|(c, _)| (cx - gap - c.laid.width().ceil()).max(0.0));
         if let (Some((c, _)), Some(hx)) = (&slot.hung, hung_x) {
             // On the main text's baseline when the line mixes sizes.
             let dy = laid
@@ -1298,22 +1388,11 @@ impl DocView {
                 .draw(&l.laid, &mut |m| blend(pix, lx, oy, &m, &rows));
         }
 
-        if let Some(col) = slot.overlay.caret {
-            let main = laid.caret(src_to_display_clamped(d, col));
-            let x = match (&slot.hung, hung_x) {
-                (Some((c, hp)), Some(hx)) if col < hp.end => {
-                    hx + c.laid.caret(col.saturating_sub(hp.start)).x
-                }
-                _ => x0 + main.x,
-            };
-            let rect = RectF {
-                x: x.round(),
-                y: top + main.top,
-                w: (t.px(TokenId::SizeCaret) * s).round().max(1.0),
-                h: main.height,
-            };
-            let color = t.color(TokenId::ColorCaret);
-            fill(pix, rect.x, rect.y, rect.w, rect.h, color, &clip);
+        if let (Some(c), Some(rect)) = (slot.overlay.caret, caret_rect) {
+            if c.shape == CaretShape::Bar {
+                let color = t.color(TokenId::ColorCaret);
+                fill(pix, rect.x, rect.y, rect.w, rect.h, color, &clip);
+            }
             self.caret = Some((i, rect));
         }
     }

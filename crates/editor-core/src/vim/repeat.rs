@@ -245,6 +245,7 @@ fn type_in(ctx: &mut EditCtx, out: OpOutcome, text: Option<&str>) -> OpOutcome {
 mod tests {
     use super::*;
     use crate::testkit::*;
+    use crate::view_model::StatusLeft;
     use crate::vim::Mode;
 
     // repeatable_change_test.dart: what each command records.
@@ -1041,7 +1042,7 @@ mod tests {
         assert_eq!(fx.redraw, crate::effects::Redraw::All);
         assert!(fx.scroll_to_cursor);
         assert!(e.dirty());
-        assert_eq!(e.status().mode, "NORMAL");
+        assert_eq!(e.status().left, StatusLeft::Mode("NORMAL"));
     }
 
     #[test]

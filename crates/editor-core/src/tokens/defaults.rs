@@ -79,6 +79,7 @@ token_table! {
     SpaceQuoteGap, "space.quote.gap", Px, "8", "8";
     SizeQuoteBar, "size.quote.bar", Px, "2", "2";
     SizeCaret, "size.caret", Px, "2", "2";
+    SizeCaretBlockEmpty, "size.caret.block_empty", Px, "8", "8";
     RadiusCode, "radius.code", Px, "4", "4";
     SpaceCodePad, "space.code.pad", Px, "14", "14";
     SizeRule, "size.rule", Px, "1", "1";

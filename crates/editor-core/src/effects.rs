@@ -49,11 +49,15 @@ pub struct Effects {
     pub scroll_to_cursor: bool,
     /// Reader mode, when it changed.
     pub reader: Option<bool>,
+    /// Wake me at this time (`marks::now_ns` clock): the shell arms a timer
+    /// that feeds `Input::Tick` then, so a timed message can go.
+    pub wake_at: Option<u64>,
 }
 
 impl Effects {
     /// Two results as one, `other` after `self`: the redraws merge, the
-    /// later value of each option wins and the scroll requests combine.
+    /// later value of each option wins, the scroll requests combine and
+    /// the earlier wake time stands.
     pub fn merge(self, other: Effects) -> Effects {
         Effects {
             redraw: self.redraw.merge(other.redraw),
@@ -62,6 +66,10 @@ impl Effects {
             close: other.close.or(self.close),
             scroll_to_cursor: self.scroll_to_cursor || other.scroll_to_cursor,
             reader: other.reader.or(self.reader),
+            wake_at: match (self.wake_at, other.wake_at) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
         }
     }
 }
@@ -103,6 +111,7 @@ mod tests {
             title: Some("a".into()),
             dirty: Some(true),
             scroll_to_cursor: true,
+            wake_at: Some(9),
             ..Effects::default()
         };
         let b = Effects {
@@ -110,6 +119,7 @@ mod tests {
             title: Some("b".into()),
             close: Some(0),
             reader: Some(false),
+            wake_at: Some(4),
             ..Effects::default()
         };
         assert_eq!(
@@ -121,6 +131,7 @@ mod tests {
                 close: Some(0),
                 scroll_to_cursor: true,
                 reader: Some(false),
+                wake_at: Some(4),
             }
         );
     }

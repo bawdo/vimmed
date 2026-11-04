@@ -339,6 +339,10 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
         st.window.setDocumentEdited(d);
     }
     // TODO(later tasks): reader mode changes (`fx.reader`).
+    if let Some(at) = fx.wake_at {
+        let delay_s = at.saturating_sub(marks::now_ns()) as f64 / 1e9;
+        st.view.schedule_wake(delay_s);
+    }
     let mut redraw = fx.redraw;
     if fx.scroll_to_cursor && st.doc.scroll_to_cursor(st.editor.cursor()) {
         redraw = Redraw::All;
@@ -460,8 +464,9 @@ pub fn on_became_key() {
     });
 }
 
-/// A background worker finished: let the editor and the view take results.
-fn on_wake() {
+/// A background worker finished, or a timer the editor asked for
+/// (`Effects::wake_at`) fired: let the editor and the view take results.
+pub fn on_wake() {
     let close = with_state(|st| {
         let fx = st.editor.handle(Input::Tick {
             now_ns: marks::now_ns(),

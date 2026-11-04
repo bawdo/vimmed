@@ -571,6 +571,7 @@ mod tests {
     use crate::effects::Redraw;
     use crate::input::{Input, Key, Mods};
     use crate::testkit::*;
+    use crate::view_model::StatusLeft;
     use crate::vim::Mode;
 
     const DOC: &str = "hello world\nline two\nline three";
@@ -637,7 +638,7 @@ mod tests {
         let e = ed(DOC);
         assert_eq!(e.mode(), Mode::Normal);
         assert_eq!(e.cursor(), pos(0, 0));
-        assert_eq!(e.status().mode, "NORMAL");
+        assert_eq!(e.status().left, StatusLeft::Mode("NORMAL"));
     }
 
     #[test]
@@ -755,7 +756,7 @@ mod tests {
         let mut e = ed(DOC);
         keys(&mut e, "i");
         assert_eq!(e.mode(), Mode::Insert);
-        assert_eq!(e.status().mode, "INSERT");
+        assert_eq!(e.status().left, StatusLeft::Mode("INSERT"));
         keys(&mut e, "<Esc>");
         assert_eq!(e.mode(), Mode::Normal);
         // At the line start Esc stays put (moon_edit could go past it).

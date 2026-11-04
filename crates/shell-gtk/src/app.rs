@@ -345,6 +345,12 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     }
     // TODO(later tasks): reader mode changes (`fx.reader`). The dirty state
     // shows in the title and status bar; GTK has no edited flag.
+    if let Some(at) = fx.wake_at {
+        // Millisecond resolution: never tick before it is due.
+        let ns = at.saturating_sub(marks::now_ns());
+        let delay = Duration::from_nanos(ns) + Duration::from_millis(1);
+        glib::timeout_add_local_once(delay, on_wake);
+    }
     let mut redraw = fx.redraw;
     if fx.scroll_to_cursor && st.doc.scroll_to_cursor(st.editor.cursor()) {
         redraw = Redraw::All;
@@ -486,7 +492,8 @@ fn log_glass(st: &mut State, what: Glass, shown_us: i64) {
     }
 }
 
-/// A background worker finished: let the editor and the view take results.
+/// A background worker finished, or a timer the editor asked for
+/// (`Effects::wake_at`) fired: let the editor and the view take results.
 fn on_wake() {
     let close = with_state(|st| {
         let fx = st.editor.handle(Input::Tick {
