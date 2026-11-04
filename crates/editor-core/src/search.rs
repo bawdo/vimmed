@@ -11,7 +11,7 @@
 use std::cell::OnceCell;
 use std::ops::Range;
 
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::GraphemeCursor;
 
 use crate::buffer::{Buffer, Pos};
 use crate::vim::Cursor;
@@ -29,7 +29,9 @@ pub const WRAPPED_FOR_NS: u64 = 1_000_000_000;
 /// `OnceCell`: `ViewSource` reads through `&self`, a cell is filled once
 /// and never changed while it is shared, so the slice it lends stays
 /// valid, and only `&mut self` (a new query, an edit) empties cells.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// There is no `PartialEq`: which cells are filled is not part of a
+/// search's value, and nothing compares searches.
+#[derive(Debug, Clone)]
 pub struct Search {
     pub query: String,
     /// True for `/`, false for `?`. `n` goes this way, `N` the other.
@@ -60,10 +62,6 @@ impl Hit {
             line: self.line,
             col: self.range.start,
         }
-    }
-
-    fn same_match(&self, other: &Hit) -> bool {
-        self.line == other.line && self.range == other.range
     }
 }
 
@@ -151,59 +149,105 @@ pub fn line_matches(line: &str, query: &str) -> Vec<Range<usize>> {
     Matcher::new(query).line(line)
 }
 
-/// The first byte of U+212A KELVIN SIGN, which folds to `k`.
-const KELVIN_LEAD: u8 = 0xE2;
+/// U+212A KELVIN SIGN, the only char beyond ASCII that folds to an ASCII
+/// one (`k`); `only_the_kelvin_sign_folds_to_ascii` checks that.
+const KELVIN: char = '\u{212A}';
 
 /// A query made ready for matching line after line.
 struct Matcher<'q> {
     query: &'q str,
     sensitive: bool,
-    /// Ignoring case, the bytes a match can start with when the query
-    /// starts with an ASCII char: its two cases. The only char beyond
-    /// ASCII that folds to an ASCII one is the Kelvin sign (to `k`, lead
-    /// byte `KELVIN_LEAD`). With a first char beyond ASCII, any char
-    /// beyond ASCII is a candidate, as no ASCII char folds to it.
-    first: Option<(u8, u8)>,
+    /// Ignoring case, the query is all ASCII.
+    ascii: bool,
+    /// Ignoring case, the query holds `k`, which the Kelvin sign matches.
+    has_k: bool,
+    /// Up to two pairs of bytes a line holding a match must hold one of
+    /// each: the query's rarest bytes (by a fixed guess at how common they
+    /// are in text). Ignoring case, the pairs are the two cases of an
+    /// ASCII char other than `k`, which no other char folds to;
+    /// otherwise a byte twice.
+    needs: Vec<(u8, u8)>,
+    /// The query's rarest byte, where the ASCII window path looks first:
+    /// its offset in the query and its two cases.
+    anchor: (usize, u8, u8),
+}
+
+/// A rough guess at how common an ASCII byte is in prose, higher being
+/// more common, so a prefilter looks for the rarest bytes first.
+fn commonness(b: u8) -> usize {
+    const BY_FREQUENCY: &[u8] = b"etaoinshrdlcumwfgypbvkjxqz";
+    match b.to_ascii_lowercase() {
+        b' ' => 60,
+        c if c.is_ascii_lowercase() => 50 - BY_FREQUENCY.iter().position(|&x| x == c).unwrap_or(0),
+        c if c.is_ascii_digit() => 20,
+        c if c.is_ascii() => 10,
+        // A byte beyond ASCII.
+        _ => 5,
+    }
 }
 
 impl<'q> Matcher<'q> {
     fn new(query: &'q str) -> Matcher<'q> {
-        let first = query
-            .chars()
-            .next()
-            .filter(char::is_ascii)
-            .map(|c| (c.to_ascii_lowercase() as u8, c.to_ascii_uppercase() as u8));
+        let sensitive = case_sensitive(query);
+        let bytes = query.as_bytes();
+        let mut ranked: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .filter(|&b| sensitive || (b.is_ascii() && b != b'k'))
+            .collect();
+        ranked.sort_by_key(|&b| commonness(b));
+        ranked.dedup();
+        let needs = ranked
+            .iter()
+            .take(2)
+            .map(|&b| {
+                if sensitive {
+                    (b, b)
+                } else {
+                    (b.to_ascii_lowercase(), b.to_ascii_uppercase())
+                }
+            })
+            .collect();
+        let anchor = (0..bytes.len())
+            .min_by_key(|&i| commonness(bytes[i]))
+            .map_or((0, 0, 0), |i| {
+                (
+                    i,
+                    bytes[i].to_ascii_lowercase(),
+                    bytes[i].to_ascii_uppercase(),
+                )
+            });
         Matcher {
             query,
-            sensitive: case_sensitive(query),
-            first,
+            sensitive,
+            ascii: query.is_ascii(),
+            has_k: query.contains('k'),
+            needs,
+            anchor,
         }
     }
 
-    /// The matches on `line`. Grapheme boundaries are worked out only for
-    /// a line with a candidate match that is not all ASCII.
+    /// The matches on `line`, each checked for grapheme boundaries at its
+    /// two ends only (R12).
     fn line(&self, line: &str) -> Vec<Range<usize>> {
         let mut out = Vec::new();
         if self.query.is_empty() || !self.may_match(line.as_bytes()) {
             return out;
         }
-        let mut bounds: Option<Option<Vec<usize>>> = None;
+        // Ignoring case, an ASCII query matches only ASCII bytes unless
+        // the line holds a Kelvin sign, so whole bytes can be compared.
+        let bytewise = !self.sensitive && self.ascii && !(self.has_k && line.contains(KELVIN));
         let mut at = 0;
         while at < line.len() {
-            let Some(r) = self.next_match(line, at) else {
+            let found = if bytewise {
+                self.ascii_match(line.as_bytes(), at)
+            } else {
+                self.next_match(line, at)
+            };
+            let Some(r) = found else {
                 break;
             };
-            // On an ASCII line every byte starts a grapheme.
-            let b = bounds.get_or_insert_with(|| {
-                (!line.is_ascii()).then(|| {
-                    line.grapheme_indices(true)
-                        .map(|(i, _)| i)
-                        .chain([line.len()])
-                        .collect()
-                })
-            });
-            let on = |i: usize| b.as_ref().is_none_or(|b| b.binary_search(&i).is_ok());
-            if on(r.start) && on(r.end) {
+            if grapheme_boundary(line, r.start) && grapheme_boundary(line, r.end) {
                 at = r.end;
                 out.push(r);
             } else {
@@ -214,34 +258,43 @@ impl<'q> Matcher<'q> {
         out
     }
 
-    /// False when no match can start on `line`: a quick reject on the
-    /// bytes a match can start with (`[u8]::contains` is a memchr).
+    /// False when no match can be on `line`: it lacks a byte every match
+    /// holds.
     fn may_match(&self, line: &[u8]) -> bool {
-        if self.sensitive {
-            return line.contains(&self.query.as_bytes()[0]);
-        }
-        match self.first {
-            Some((lo, up)) => {
-                line.contains(&lo)
-                    || line.contains(&up)
-                    || (lo == b'k' && line.contains(&KELVIN_LEAD))
-            }
-            None => !line.is_ascii(),
-        }
+        // Ignoring case, a char beyond ASCII folds only to chars beyond it.
+        (self.sensitive || self.ascii || !line.is_ascii())
+            && self
+                .needs
+                .iter()
+                .all(|&(lo, up)| scan(line, |b| b == lo || b == up).is_some())
     }
 
-    /// True when a match ignoring case can start at byte `b` (a char
-    /// boundary).
-    fn starts_here(&self, b: u8) -> bool {
-        match self.first {
-            Some((lo, up)) => b == lo || b == up || (lo == b'k' && b == KELVIN_LEAD),
-            // 0xC0 and up starts a char of two or more bytes.
-            None => b >= 0xC0,
+    /// The first window of `line` from `at` equal to the ASCII query,
+    /// ignoring ASCII case, found from where its rarest byte is. It holds
+    /// only ASCII, so both its ends are char boundaries.
+    fn ascii_match(&self, line: &[u8], at: usize) -> Option<Range<usize>> {
+        let query = self.query.as_bytes();
+        let (off, lo, up) = self.anchor;
+        let mut p = at + off;
+        while p < line.len() {
+            p += scan(&line[p..], |b| b == lo || b == up)?;
+            let s = p - off;
+            if s + query.len() > line.len() {
+                return None;
+            }
+            if line[s..s + query.len()].eq_ignore_ascii_case(query) {
+                return Some(s..s + query.len());
+            }
+            p += 1;
         }
+        None
     }
 
     /// The first match in `line` starting at or after `at` (a char
-    /// boundary).
+    /// boundary). Ignoring case, chars are folded one by one, tried only
+    /// where the query's first char could start: one of its two cases (or
+    /// a Kelvin sign for `k`), or, for a first char beyond ASCII, a char
+    /// beyond ASCII.
     fn next_match(&self, line: &str, at: usize) -> Option<Range<usize>> {
         let rest = &line[at..];
         if self.sensitive {
@@ -249,13 +302,68 @@ impl<'q> Matcher<'q> {
                 .find(self.query)
                 .map(|o| at + o..at + o + self.query.len());
         }
-        rest.bytes().enumerate().find_map(|(o, b)| {
-            if !self.starts_here(b) {
-                return None;
+        let first = self.query.as_bytes()[0];
+        let (lo, up) = (first.to_ascii_lowercase(), first.to_ascii_uppercase());
+        let kelvin = lo == b'k';
+        let bytes = rest.as_bytes();
+        let mut o = 0;
+        while o < bytes.len() {
+            o += if first.is_ascii() {
+                scan(&bytes[o..], |b| {
+                    b == lo || b == up || (kelvin && b == KELVIN_LEAD)
+                })?
+            } else {
+                // 0xC0 and up starts a char of two or more bytes.
+                scan(&bytes[o..], |b| b >= 0xC0)?
+            };
+            if let Some(n) = folded_len(&rest[o..], self.query) {
+                return Some(at + o..at + o + n);
             }
-            folded_len(&rest[o..], self.query).map(|n| at + o..at + o + n)
-        })
+            o += 1;
+            while o < bytes.len() && !rest.is_char_boundary(o) {
+                o += 1;
+            }
+        }
+        None
     }
+}
+
+/// The first byte of the Kelvin sign.
+const KELVIN_LEAD: u8 = 0xE2;
+
+/// The index of the first byte of `hay` that `hit` picks. It tests 32
+/// bytes at a time without stopping early inside them, which the compiler
+/// can vectorise, then finds the byte in the block that had one.
+#[inline]
+fn scan(hay: &[u8], hit: impl Fn(u8) -> bool + Copy) -> Option<usize> {
+    let mut base = 0;
+    for block in hay.chunks(32) {
+        if block.iter().fold(false, |any, &b| any | hit(b)) {
+            return block.iter().position(|&b| hit(b)).map(|i| base + i);
+        }
+        base += block.len();
+    }
+    None
+}
+
+/// True when byte `i` (a char boundary) of `line` is a grapheme boundary,
+/// looking only around `i`.
+fn grapheme_boundary(line: &str, i: usize) -> bool {
+    let b = line.as_bytes();
+    if i == 0 || i >= b.len() {
+        return true;
+    }
+    // Between two ASCII bytes there is a boundary, but inside CR LF.
+    if b[i - 1].is_ascii() && b[i].is_ascii() {
+        return !(b[i - 1] == b'\r' && b[i] == b'\n');
+    }
+    // The whole line is the chunk, so the cursor never asks for more.
+    GraphemeCursor::new(i, line.len(), true)
+        .is_boundary(line, 0)
+        .unwrap_or_else(|_| {
+            use unicode_segmentation::UnicodeSegmentation;
+            line.grapheme_indices(true).any(|(g, _)| g == i)
+        })
 }
 
 /// The length in bytes of the start of `text` that matches `query`, case
@@ -265,7 +373,13 @@ fn folded_len(text: &str, query: &str) -> Option<usize> {
     let mut len = 0;
     for q in query.chars() {
         let c = chars.next()?;
-        if c != q && !c.to_lowercase().eq(q.to_lowercase()) {
+        let same = c == q
+            || if c.is_ascii() && q.is_ascii() {
+                c.eq_ignore_ascii_case(&q)
+            } else {
+                c.to_lowercase().eq(q.to_lowercase())
+            };
+        if !same {
             return None;
         }
         len += c.len_utf8();
@@ -277,9 +391,10 @@ fn folded_len(text: &str, query: &str) -> Option<usize> {
 /// forward or backward and wrapping round the buffer. A match at `from`
 /// itself is not counted. `None` when there is no match at all.
 ///
-/// Each step searches only as far as the next match. A count larger than
-/// the number of matches comes back round to the first one found; from
-/// there only the remainder is stepped, so any count costs at most two
+/// Each line's matches are found once and stepped through by index, as
+/// many as the count needs. Coming back round to the first match found
+/// gives the number of matches in the document, and only the remainder
+/// of the count is stepped after that, so any count costs at most two
 /// passes over the buffer.
 pub fn find(buf: &Buffer, query: &str, from: Pos, forward: bool, count: usize) -> Option<Hit> {
     if query.is_empty() {
@@ -287,21 +402,66 @@ pub fn find(buf: &Buffer, query: &str, from: Pos, forward: bool, count: usize) -
     }
     let m = Matcher::new(query);
     let first = first_hit(buf, &m, buf.clamp(from), forward)?;
-    let mut hit = first.clone();
+    if count <= 1 {
+        return Some(first);
+    }
+    // Each line's matches in the order the search meets them.
+    let matches_on = |l: usize| {
+        let mut v = m.line(buf.line(l));
+        if !forward {
+            v.reverse();
+        }
+        v
+    };
+    let n = buf.line_count();
+    let mut line = first.line;
+    let mut ms = matches_on(line);
+    let at_first = ms.iter().position(|r| *r == first.range)?;
+    let mut idx = at_first;
+    let mut left = count - 1;
     let mut wrapped = first.wrapped;
-    let mut steps = 1;
-    while steps < count.max(1) {
-        let next = first_hit(buf, &m, hit.pos(), forward)?;
-        wrapped |= next.wrapped;
-        steps += 1;
-        hit = next;
-        if hit.same_match(&first) {
-            // Round once: `steps - 1` matches in all. Skip whole rounds.
-            let round = steps - 1;
-            steps = count - (count - steps) % round;
+    let mut taken = 0;
+    let mut round_known = false;
+    while left > 0 {
+        let here = ms.len() - 1 - idx;
+        if left <= here {
+            idx += left;
+            break;
+        }
+        left -= here;
+        taken += here;
+        // On to the next line with a match; the first one's line has one.
+        loop {
+            let (next, past_end) = if forward {
+                ((line + 1) % n, line + 1 >= n)
+            } else {
+                ((line + n - 1) % n, line == 0)
+            };
+            line = next;
+            wrapped |= past_end;
+            ms = matches_on(line);
+            if !ms.is_empty() {
+                break;
+            }
+        }
+        idx = 0;
+        left -= 1;
+        taken += 1;
+        if !round_known && line == first.line {
+            // Back on the first match's line, `at_first` steps short of
+            // it: that many more make the round.
+            round_known = true;
+            if left >= at_first {
+                left = (left - at_first) % (taken + at_first);
+                idx = at_first;
+            }
         }
     }
-    Some(Hit { wrapped, ..hit })
+    Some(Hit {
+        line,
+        range: ms[idx].clone(),
+        wrapped,
+    })
 }
 
 /// The nearest match after `from` (forward) or before it, wrapping.
@@ -532,6 +692,98 @@ mod tests {
             find(&buf, "a", pos(0, 0), false, 2).map(|h| h.pos()),
             Some(pos(0, 9))
         );
+    }
+
+    /// `find` as it was first built: every match collected, then indexed.
+    fn find_by_index(
+        buf: &Buffer,
+        query: &str,
+        from: Pos,
+        forward: bool,
+        count: usize,
+    ) -> Option<(Pos, bool)> {
+        let first = find(buf, query, from, forward, 1)?;
+        let all: Vec<(usize, Range<usize>)> = (0..buf.line_count())
+            .flat_map(|i| {
+                line_matches(buf.line(i), query)
+                    .into_iter()
+                    .map(move |r| (i, r))
+            })
+            .collect();
+        let n = all.len();
+        let i = all
+            .iter()
+            .position(|(l, r)| *l == first.line && *r == first.range)?;
+        let steps = count.max(1) - 1;
+        let (j, wrapped) = if forward {
+            ((i + steps % n) % n, steps >= n - i)
+        } else {
+            ((i + n - steps % n) % n, steps > i)
+        };
+        let (line, range) = all[j].clone();
+        Some((
+            Pos {
+                line,
+                col: range.start,
+            },
+            first.wrapped || wrapped,
+        ))
+    }
+
+    #[test]
+    fn counted_find_agrees_with_collecting_every_match() {
+        let long = "ab ".repeat(2_000);
+        let mixed = "a1 a2\n\nb a\nx\na a a\n\u{212A}a é a";
+        for (text, query, froms) in [
+            (
+                long.as_str(),
+                "a",
+                vec![pos(0, 0), pos(0, 3000), pos(0, 5997)],
+            ),
+            (mixed, "a", vec![pos(0, 0), pos(2, 2), pos(4, 4), pos(5, 0)]),
+            (mixed, "ka", vec![pos(0, 0), pos(5, 0)]),
+        ] {
+            let buf = lines(text);
+            for &from in &froms {
+                for forward in [true, false] {
+                    for count in [
+                        1,
+                        2,
+                        3,
+                        7,
+                        13,
+                        1_999,
+                        2_000,
+                        2_001,
+                        4_001,
+                        30_000,
+                        1_000_000_000,
+                    ] {
+                        assert_eq!(
+                            find(&buf, query, from, forward, count).map(|h| (h.pos(), h.wrapped)),
+                            find_by_index(&buf, query, from, forward, count),
+                            "{query:?} from {from:?} forward {forward} count {count}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bytewise_path_matches_the_char_by_char_one() {
+        // ASCII queries ignoring case, on lines with and without text
+        // beyond ASCII, a Kelvin sign and graphemes a match must not split.
+        for (line, query, want) in [
+            ("The THE the", "the", vec![0..3, 4..7, 8..11]),
+            // é is two bytes, and not an e.
+            ("café the Thé", "the", just(6..9)),
+            ("e\u{301}e", "e", just(3..4)),
+            ("\u{212A}M km KM", "km", vec![0..4, 5..7, 8..10]),
+            ("ab", "abc", vec![]),
+        ] {
+            assert_eq!(line_matches(line, query), want, "{line:?} {query:?}");
+        }
     }
 
     #[test]
@@ -1010,6 +1262,8 @@ mod tests {
 mod timing {
     use std::time::Instant;
 
+    use super::find;
+    use crate::buffer::Buffer;
     use crate::editor::Editor;
     use crate::input::{Input, Key, KeyEvent, Mods};
     use crate::testkit::*;
@@ -1072,7 +1326,23 @@ mod timing {
     fn search_keys_and_n() {
         let text = doc();
         // From the middle of the document, so a hit can be either side.
-        for query in ["e", "lazy d", "école", "Quick", "numéro 9", "zzzzzz"] {
+        for query in [
+            "e",
+            "lazy d",
+            "école",
+            "Quick",
+            "numéro 9",
+            "zzzzzz",
+            "elephant",
+            "the cat",
+            "résumé",
+            "wombat",
+            "Elephant",
+            "ezzzz",
+            "éxyz",
+            "👩zz",
+            "👩",
+        ] {
             let mut e = ed(&text);
             keys(&mut e, "5000G");
             press(&mut e, Key::Char('/'));
@@ -1085,12 +1355,17 @@ mod timing {
         for (query, label) in [
             ("fox", "n, common match"),
             ("numéro 5001", "n, one match (wraps the document)"),
+            (
+                "école, naïve façade 👩\u{200d}👩\u{200d}👧",
+                "n, every 4th line, long query beyond ASCII",
+            ),
+            ("ÉCOLE", "n, case sensitive, no match"),
         ] {
             let mut e = ed(&text);
             keys(&mut e, "5000G");
             keys(&mut e, &format!("/{query}<CR>"));
             let times = (0..10).map(|_| timed(&mut e, Key::Char('n'))).collect();
-            summary(&format!("{label} {query:?}"), times);
+            summary(&format!("n {query:?} ({label})"), times);
             let times = (0..10).map(|_| timed(&mut e, Key::Char('N'))).collect();
             summary(&format!("N {query:?}"), times);
         }
@@ -1104,5 +1379,20 @@ mod timing {
             })
             .collect();
         summary("1000n \"fox\"", times);
+    }
+
+    #[test]
+    #[ignore = "timing harness, run by hand in release"]
+    fn counts_on_a_long_line() {
+        // One 60 KB line with 20,000 matches.
+        let buf = Buffer::from_text(&"ab ".repeat(20_000));
+        for count in [1, 100, 1000, 30_000, 1_000_000_000] {
+            let t = Instant::now();
+            let hit = find(&buf, "a", pos(0, 0), true, count).map(|h| h.pos());
+            println!(
+                "count {count} on a long line: {:.3} ms, at {hit:?}",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
 }
