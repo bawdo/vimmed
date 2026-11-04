@@ -118,7 +118,7 @@ use crate::file::recovery::{Found, Recovery};
 use crate::file::{self, DiskEvent, Loaded, RegisterStore, StateDir, Watcher};
 use crate::grapheme;
 use crate::host::Host;
-use crate::input::{Input, Key, KeyEvent, Mods};
+use crate::input::{Input, Key, KeyEvent, Mods, MouseEvent, MouseKind};
 use crate::markdown::{
     BlockId, Blocks, InlineKind, LineDisplay, LineKind, Prefix, Reveal, SpanBase, TableId, code_bg,
     line_display, ordered_display, parse_line,
@@ -500,9 +500,20 @@ impl Editor {
     }
 
     pub fn handle(&mut self, input: Input) -> Effects {
-        // With vim off, any input but a tick or a composition ends the
-        // typing run unless it types more of it (`nonvim_keys`).
-        if !self.cfg.vim && !matches!(input, Input::Tick { .. } | Input::Preedit { .. }) {
+        // With vim off, any input but a tick, a composition, the wheel or
+        // the pointer's hover ends the typing run unless it types more of
+        // it (`nonvim_keys`).
+        let passive = matches!(
+            input,
+            Input::Tick { .. }
+                | Input::Preedit { .. }
+                | Input::Scroll { .. }
+                | Input::Mouse(MouseEvent {
+                    kind: MouseKind::Move,
+                    ..
+                })
+        );
+        if !self.cfg.vim && !passive {
             self.plain.input();
         }
         let dirty = self.dirty;

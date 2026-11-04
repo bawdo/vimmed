@@ -555,9 +555,16 @@ fn on_mouse(kind: MouseKind, x: f64, y: f64, state: gdk::ModifierType) {
             return None;
         }
         let hit = st.doc.hit_test(x as f32, y as f32);
+        let composing = st.editor.preedit().is_some();
         let fx = st
             .editor
             .handle(Input::Mouse(MouseEvent { kind, hit, mods }));
+        // A press the editor took dropped the composition: so does the
+        // input method, rather than committing it later where the caret
+        // went.
+        if composing && st.editor.preedit().is_none() {
+            st.im.reset();
+        }
         apply_changed(st, fx)
     });
     if let Some(Some(code)) = close {

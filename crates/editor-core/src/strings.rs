@@ -188,21 +188,31 @@ pub fn open_link_prompt(target: &str) -> String {
     format!("open {}? [o]pen [c]ancel", shown_safely(target))
 }
 
-/// True for the characters that reorder the text around them: the bidi
-/// marks, embeddings, overrides and isolates.
-fn is_bidi_format(c: char) -> bool {
+/// True for the characters that reorder the text around them (the bidi
+/// marks, embeddings, overrides and isolates), or show as nothing or as a
+/// break (the zero-width space, joiners, byte order mark and the line and
+/// paragraph separators).
+fn is_unseen(c: char) -> bool {
     matches!(
         c,
-        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
     )
 }
 
-/// `text` with every control character and bidi format character written
-/// as a `\u{...}` escape, for showing text a document supplied.
+/// `text` with every control character, bidi format character and
+/// invisible character written as a `\u{...}` escape, for showing text a
+/// document supplied. A backslash is doubled, so a literal `\u{202e}` in
+/// the text cannot pass for an escaped one.
 pub fn shown_safely(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c.is_control() || is_bidi_format(c) {
+        if c == '\\' {
+            out.push_str("\\\\");
+        } else if c.is_control() || is_unseen(c) {
             out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
         } else {
             out.push(c);

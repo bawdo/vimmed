@@ -336,6 +336,9 @@ pub struct DocView {
     lines: Vec<LineSlot>,
     pub(crate) status_cache: Vec<Cached>,
     pub(crate) last_status: Option<StatusModel>,
+    /// Each status bar item as last painted: its text and where it runs
+    /// across, in frame pixels (`status_items`).
+    pub(crate) status_items: Vec<(String, Range<f32>)>,
     pub(crate) damage: Damage,
     /// The caret's line and its rectangle in frame pixels, as last painted.
     caret: Option<(usize, RectF)>,
@@ -393,6 +396,7 @@ impl DocView {
             lines: Vec::new(),
             status_cache: Vec::new(),
             last_status: None,
+            status_items: Vec::new(),
             damage: Damage::new(),
             caret: None,
             cursor_drawn: None,
@@ -769,6 +773,12 @@ impl DocView {
             .text
             .as_ref()
             .map(|c| c.key.spans.as_slice())
+    }
+
+    /// The status bar's items as last painted, left to right on each side:
+    /// each one's text and the pixels it runs across from the frame's left.
+    pub fn status_items(&self) -> &[(String, Range<f32>)] {
+        &self.status_items
     }
 
     /// Where line `i`'s text starts, in frame pixels from the left, while it

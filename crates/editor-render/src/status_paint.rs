@@ -153,15 +153,31 @@ impl DocView {
 
         let pad = (t.px(TokenId::SpaceStatusPad) * s).round();
         let width = |c: &Option<Cached>| c.as_ref().map_or(0.0, |c| c.laid.width());
-        // The room a prompt or message has: the bar less its padding and
-        // the right side.
+        // The room a prompt or message has: the bar less its padding, the
+        // right side and the left items after it (the file name, `changes
+        // not saved`, warnings). When those would leave it less than half
+        // the bar, they make way while it shows: the question comes first.
         if elide && let Some(i) = slots.iter().position(|(_, k)| *k == 0) {
-            let right_w: f32 = slots
-                .iter()
-                .filter(|(_, k)| *k >= n_left)
-                .map(|(c, _)| width(c) + pad)
-                .sum();
-            let room = (g.width - 2.0 * pad - right_w).max(0.0);
+            let sum = |slots: &[(Option<Cached>, usize)], f: &dyn Fn(usize) -> bool| -> f32 {
+                slots
+                    .iter()
+                    .filter(|(_, k)| f(*k))
+                    .map(|(c, _)| width(c) + pad)
+                    .sum()
+            };
+            let right_w = sum(&slots, &|k| k >= n_left);
+            let others_w = sum(&slots, &|k| k > 0 && k < n_left);
+            let full = (g.width - 2.0 * pad - right_w).max(0.0);
+            let first_w = width(&slots[i].0);
+            let mut room = (full - others_w).max(0.0);
+            if first_w > room && room < full / 2.0 {
+                for (c, k) in slots.iter_mut() {
+                    if *k > 0 && *k < n_left {
+                        *c = None;
+                    }
+                }
+                room = full;
+            }
             let mut slot = slots[i].0.take();
             for _ in 0..4 {
                 let Some(c) = slot.as_ref() else { break };
@@ -188,6 +204,11 @@ impl DocView {
                 .sum::<f32>()
             + pad;
         let mut x = pad;
+        // A left item after the first that would run into the right side
+        // is not painted (nor any after it).
+        let right_start = right_x;
+        let mut left_full = false;
+        let mut items = Vec::new();
         let rows = top as u32..self.frame.height_px;
         let caret_w = (t.px(TokenId::SizeCaret) * s).round().max(1.0);
         let caret_color = t.color(TokenId::ColorCaret);
@@ -200,10 +221,15 @@ impl DocView {
                 right_x += w + pad;
                 at
             } else {
+                left_full |= *k > 0 && x + w > right_start - pad;
+                if left_full {
+                    continue;
+                }
                 let at = x;
                 x += w + pad;
                 at
             };
+            items.push((c.key_text().to_owned(), px..px + w));
             let y = (top + (bar_h - laid.height) / 2.0).round();
             let pix = &mut self.frame.pixmap;
             let (ox, oy) = (px.round() as i32, y as i32);
@@ -216,6 +242,7 @@ impl DocView {
                 fill(pix, cx, y, caret_w, laid.height, caret_color, &clip);
             }
         }
+        self.status_items = items;
         self.status_cache
             .extend(slots.into_iter().filter_map(|(c, _)| c));
         self.damage.add(rows);

@@ -553,10 +553,21 @@ pub fn on_mouse(view: &NSView, event: &NSEvent, kind: MouseKind) {
             return None;
         }
         let hit = st.doc.hit_test(at.x as f32, at.y as f32);
+        let composing = st.editor.preedit().is_some();
         let fx = st
             .editor
             .handle(Input::Mouse(MouseEvent { kind, hit, mods }));
-        apply_changed(st, fx)
+        let close = apply_changed(st, fx);
+        // A press the editor took dropped the composition: the input
+        // method drops it too, rather than committing it later where the
+        // caret went.
+        if composing
+            && st.editor.preedit().is_none()
+            && let Some(ctx) = st.view.inputContext()
+        {
+            IME_CALL.with(|c| *c.borrow_mut() = Some((ctx, false)));
+        }
+        close
     });
     flush_ime();
     if let Some(Some(code)) = close {

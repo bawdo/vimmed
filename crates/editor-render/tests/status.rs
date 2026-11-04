@@ -388,6 +388,24 @@ fn normal_mode_caret_is_a_block_and_insert_a_bar() {
     );
 }
 
+/// The status items as painted: no two overlap, each is inside the frame,
+/// and the right side (`2d`, `1:1`) is there.
+fn assert_no_overlap(v: &DocView) {
+    let items = v.status_items();
+    for (k, (text, r)) in items.iter().enumerate() {
+        assert!(r.start >= 0.0 && r.end <= W_PT, "{text} at {r:?}");
+        for (other, o) in &items[k + 1..] {
+            assert!(
+                r.end <= o.start || o.end <= r.start,
+                "{text} at {r:?} overlaps {other} at {o:?}"
+            );
+        }
+    }
+    for want in ["2d", "1:1"] {
+        assert!(items.iter().any(|(t, _)| t == want), "{items:?}");
+    }
+}
+
 #[test]
 fn a_long_prompt_keeps_its_start_and_end_on_one_row() {
     let t = Tokens::defaults(Theme::Light);
@@ -411,17 +429,27 @@ fn a_long_prompt_keeps_its_start_and_end_on_one_row() {
         shown.text
     );
     assert!(shown.text.contains('\u{2026}'), "{}", shown.text);
-    // It fits in the frame beside the right side (`2d` and `1:1`, with
-    // padding).
-    let right = ("2d".len() + "1:1".len()) as f32 * ADVANCE;
+    // Nothing on the left runs into the right side (`2d` and `1:1`), and
+    // nothing runs past the frame's edge.
+    assert_no_overlap(&v);
+    // With the file name, `changes not saved` and a warning after it too.
+    src.dirty = true;
+    src.warnings = vec!["read-only"];
+    v.paint_all(&src);
+    assert_no_overlap(&v);
+    let items = v.status_items();
     assert!(
-        shown.text.len() as f32 * ADVANCE <= W_PT - right,
-        "{}",
-        shown.text
+        items[0].0.ends_with("report.pdf? [o]pen [c]ancel"),
+        "{items:?}"
     );
     // A short prompt shows whole.
     src.left = StatusLeft::Prompt("open ftp://a? [o]pen [c]ancel".into());
     v.paint_lines(&src, 0..0);
     let drawn = status_drawn(&probe, &t);
     assert!(texts(&drawn).contains(&"open ftp://a? [o]pen [c]ancel"));
+    // With room, the file name and the rest still show beside it.
+    let shown: Vec<&str> = v.status_items().iter().map(|(s, _)| s.as_str()).collect();
+    assert!(shown.contains(&"notes.md"), "{shown:?}");
+    assert!(shown.contains(&"read-only"), "{shown:?}");
+    assert_no_overlap(&v);
 }

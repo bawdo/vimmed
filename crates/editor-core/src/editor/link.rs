@@ -548,6 +548,19 @@ mod tests {
         );
         keys(&mut e, "o");
         assert_eq!(host.state().opened, [target]);
+        // A literal `\u{202e}` in a target cannot pass for an escaped one,
+        // and zero-width and line separator chars show too.
+        let target = "ftp://h/\\u{202e}a\u{200b}b\u{200d}c\u{feff}d\u{2028}e\u{2029}";
+        e.open_link(target);
+        assert_eq!(
+            asked(&e),
+            Some(
+                r"open ftp://h/\\u{202e}a\u{200b}b\u{200d}c\u{feff}d\u{2028}e\u{2029}? [o]pen [c]ancel"
+                    .to_owned()
+            )
+        );
+        keys(&mut e, "o");
+        assert_eq!(host.state().opened.last().map(String::as_str), Some(target));
     }
 
     #[test]

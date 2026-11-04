@@ -18,7 +18,13 @@
 //!   with vim off the selection ends after it. A drag after it keeps the
 //!   selection. Past a line's end it is a click; on a link a click opens,
 //!   nothing (its first click opened it).
-//! - A click while in Visual leaves Visual.
+//! - Every press the editor takes (on a link or checkbox too) leaves
+//!   Visual, drops the vim-off selection, cancels pending keys (`d`
+//!   waiting for its motion) and drops an input method's composition, so
+//!   it never commits where the caret went. A drag off the text turns a
+//!   press on a link or checkbox into a drag: `Up` then does nothing.
+//! - A held press holds back a reload of the file changed on disk until
+//!   `Up` (`disk`).
 //! - A click on a task's checkbox (`Zone::Prefix`) toggles it on `Up`
 //!   (`lists::toggle_task`, as Ctrl+Space does), as an undo step of its
 //!   own, the cursor staying where it is.
@@ -298,8 +304,27 @@ impl Editor {
         }
     }
 
+    /// What every press the editor takes does first: a composition in
+    /// progress is dropped (the input method is told by the shell), and
+    /// Visual, the vim-off selection and any pending keys (`d` waiting for
+    /// its motion) go.
+    fn take_press(&mut self) -> Effects {
+        let fx = self.release_press().merge(self.clear_preedit());
+        if self.visual() {
+            self.mode = Mode::Normal;
+            self.anchor = None;
+        }
+        if !self.cfg.vim {
+            self.anchor = None;
+        }
+        if !(self.cfg.vim && self.mode == Mode::Insert) {
+            self.vim.cancel();
+        }
+        fx
+    }
+
     /// `Down`: a link or checkbox waits for `Up`; anything else places the
-    /// cursor, leaving Visual (and, with vim off, dropping the selection).
+    /// cursor. Either way Visual (and, with vim off, the selection) goes.
     fn press(&mut self, hit: Option<MouseHit>, mods: Mods) -> Effects {
         let Some(hit) = hit else {
             return Effects::default();
@@ -307,30 +332,22 @@ impl Editor {
         if matches!(hit.zone, Zone::Picker { .. }) {
             return Effects::default();
         }
-        let fx = self.release_press();
+        // Worked out before Visual goes: a link click in Visual places the
+        // cursor rather than opening.
         let on_up = self.on_up(&hit, mods);
         // Reader view takes link clicks only.
         if self.reader && !matches!(on_up, OnUp::Open(_)) {
-            return fx;
+            return self.release_press();
         }
         let before = self.selection_lines();
         let reveal = self.reveal_at();
-        let mut fx = fx;
+        let mut fx = self.take_press();
         if on_up == OnUp::Nothing {
-            if self.visual() {
-                self.mode = Mode::Normal;
-                self.anchor = None;
-            }
-            if !self.cfg.vim {
-                self.anchor = None;
-            }
             if self.cfg.vim && self.mode == Mode::Insert {
                 // As an arrow key: the typing after it is a new step.
                 self.history.end();
                 self.history.begin();
                 self.vim.arrowed();
-            } else {
-                self.vim.cancel();
             }
             fx = fx.merge(self.place(self.press_pos(&hit)));
         }
@@ -362,9 +379,9 @@ impl Editor {
         let (Some(range), true) = (range, wordy) else {
             return self.press(Some(hit), mods);
         };
-        let fx = self.release_press();
         let before = self.selection_lines();
         let reveal = self.reveal_at();
+        let fx = self.take_press();
         let last = grapheme::prev(self.buf.line(line), range.end);
         let start = Pos {
             line,
@@ -395,7 +412,12 @@ impl Editor {
 
     /// `Drag`: from the press, a selection to the point.
     fn drag(&mut self, hit: Option<MouseHit>) -> Effects {
+        // Off the text the selection stays as it was, but the press is no
+        // longer a click: its link or checkbox does nothing on `Up`.
         let (Some(hit), Some(p)) = (hit, self.pressed.as_ref()) else {
+            if let Some(p) = self.pressed.as_mut() {
+                p.on_up = OnUp::Nothing;
+            }
             return Effects::default();
         };
         if p.word || self.reader || matches!(hit.zone, Zone::Picker { .. }) {
@@ -768,6 +790,106 @@ mod tests {
     }
 
     #[test]
+    fn a_checkbox_or_link_click_in_visual_exits_visual_too() {
+        let mut e = ed("- [ ] a\nb c");
+        keys(&mut e, "jvl");
+        assert_eq!(e.mode(), Mode::Visual);
+        let p = zoned(pos(0, 6), Zone::Prefix);
+        send(&mut e, MouseKind::Down, p.clone(), Mods::default());
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.selection(), None);
+        send(&mut e, MouseKind::Up, p, Mods::default());
+        assert_eq!(e.text(), "- [x] a\nb c");
+        assert_eq!(e.mode(), Mode::Normal);
+        // A link click in Visual leaves it, and places the cursor.
+        let (mut e, host) = ed_with_host(LINKED);
+        keys(&mut e, "vl");
+        send(&mut e, MouseKind::Down, on_link(), Mods::default());
+        send(&mut e, MouseKind::Up, on_link(), Mods::default());
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.selection(), None);
+        assert!(host.state().opened.is_empty());
+    }
+
+    #[test]
+    fn a_click_cancels_a_pending_operator() {
+        // `d` waits for a motion; a click on a link (which does not move
+        // the cursor) must not leave it waiting.
+        let (mut e, _) = ed_with_host(LINKED);
+        keys(&mut e, "d");
+        assert_eq!(e.showcmd(), "d");
+        send(&mut e, MouseKind::Down, on_link(), Mods::default());
+        send(&mut e, MouseKind::Up, on_link(), Mods::default());
+        assert_eq!(e.showcmd(), "");
+        keys(&mut e, "l");
+        assert_eq!(e.text(), LINKED, "`l` is a motion, not `dl`");
+        // A checkbox click too.
+        let mut e = ed("- [ ] a");
+        keys(&mut e, "d");
+        let p = zoned(pos(0, 6), Zone::Prefix);
+        send(&mut e, MouseKind::Down, p.clone(), Mods::default());
+        send(&mut e, MouseKind::Up, p, Mods::default());
+        keys(&mut e, "l");
+        assert_eq!(e.text(), "- [x] a");
+    }
+
+    #[test]
+    fn a_drag_off_the_text_from_a_link_opens_nothing() {
+        let (mut e, host) = ed_with_host(LINKED);
+        send(&mut e, MouseKind::Down, on_link(), Mods::default());
+        send(&mut e, MouseKind::Drag, None, Mods::default());
+        send(&mut e, MouseKind::Up, None, Mods::default());
+        assert!(host.state().opened.is_empty());
+        // Nor a checkbox.
+        let mut e = ed("- [ ] a");
+        let p = zoned(pos(0, 6), Zone::Prefix);
+        send(&mut e, MouseKind::Down, p, Mods::default());
+        send(&mut e, MouseKind::Drag, None, Mods::default());
+        send(&mut e, MouseKind::Up, None, Mods::default());
+        assert_eq!(e.text(), "- [ ] a");
+    }
+
+    #[test]
+    fn a_click_drops_a_composition_rather_than_moving_it() {
+        let mut e = ed("hello");
+        keys(&mut e, "i");
+        e.handle(Input::Preedit {
+            text: "に".into(),
+            cursor: 3,
+        });
+        assert!(e.preedit().is_some());
+        click(&mut e, pos(0, 4));
+        assert_eq!(e.preedit(), None);
+        assert_eq!(e.cursor(), pos(0, 4));
+        assert_eq!(e.text(), "hello");
+        // With vim off too.
+        let (mut e, _) = plain_with_host("hello");
+        e.handle(Input::Preedit {
+            text: "に".into(),
+            cursor: 3,
+        });
+        send(
+            &mut e,
+            MouseKind::DoubleClick,
+            on(pos(0, 1), pos(0, 1)),
+            Mods::default(),
+        );
+        assert_eq!(e.preedit(), None);
+        assert_eq!(e.text(), "hello");
+    }
+
+    #[test]
+    fn scrolling_does_not_split_a_vim_off_typing_run() {
+        let (mut e, _) = plain_with_host("");
+        keys(&mut e, "ab");
+        e.handle(Input::Scroll { dy_pt: 30.0 });
+        keys(&mut e, "cd");
+        assert_eq!(e.text(), "abcd");
+        keys(&mut e, "<D-z>");
+        assert_eq!(e.text(), "", "one undo step");
+    }
+
+    #[test]
     fn prefix_click_toggles_task() {
         let mut e = ed("- [ ] a\nb");
         keys(&mut e, "j");
@@ -1075,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn status_is_unchanged_by_a_ignored_click() {
+    fn status_is_unchanged_by_an_ignored_click() {
         let mut e = ed("x");
         keys(&mut e, ":");
         click(&mut e, pos(0, 0));
