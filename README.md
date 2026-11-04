@@ -111,3 +111,125 @@ results, including the unpacked contents of the `.deb` and the `.rpm`, for every
 current name. It passes with `0 hits` and the launcher's `--version` showing the throwaway
 name. Nothing in the working tree changes, and no other file (this README included) needs an
 edit when the name does.
+
+## Manual checks
+
+These checks need a real window, so the automated suite can't run them. They are pending for
+v0.9. Run them on the Mac (and on Linux at Checkpoint 3, Task 45), then tick them off.
+
+Build the release bundle and open a file with the window binary inside it:
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME=/tmp/claude-501/cargo-home cargo xtask bundle-mac --release
+target/dist/<BundleName>.app/Contents/MacOS/<name> test.md
+```
+
+Starting it this way waits until the window closes, the same as the launcher does without `-b`.
+
+### Test file
+
+Put this in `test.md`, and create an `other.md` and a `run.sh` next to it:
+
+```markdown
+# Heading with **bold** text
+
+Plain line with **bold** and [web](https://example.com) and [other](other.md) and [script](run.sh).
+
+- [ ] task one
+- [x] task two
+
+![pic](missing.png)
+
+word_one   word_two, punct!
+```
+
+### Mouse (Task 38b)
+
+1. **Click places the cursor.** In Normal, click a letter of "Plain". The block cursor lands on
+   that letter, even when you click its right half. Press `i` and click between two letters:
+   the bar lands on the nearer boundary.
+2. **Reveal waits for release.** Press and hold on "bold". The `**` markers do not appear while
+   the button is down, and do appear when you release. Drag sideways from "bold": the text does
+   not shift under the pointer.
+3. **Drag enters Visual.** Drag across "Plain line" in Normal. The status shows VISUAL and the
+   selection follows the pointer. `d` deletes it and `u` undoes that.
+4. **Drag from Insert.** Press `i`, type `xy`, then drag across some text. Visual appears. Press
+   Esc, then `u`: the `xy` goes as one step.
+5. **Double-click.**
+   - On `word_two`: the word is selected in Visual, with the cursor on its last `o`.
+   - On the run of spaces between the words: the whole run is selected.
+   - On `,`: just the comma is selected.
+   - On the `_` inside `word_one`: the whole word is selected.
+6. **A click in Visual leaves it.** Select with `vll`, then click elsewhere: you're back in
+   Normal at the click. Do it again, clicking a checkbox or a link this time: Visual still ends.
+7. **Task checkbox.** Click the box of "task one". It becomes `[x]`, the cursor and the view stay
+   put, and `u` undoes it. Repeat in Insert. In reader view (Cmd+Shift+R), nothing changes.
+8. **Links.**
+   - In Normal, a plain click on "web" opens the browser, and the cursor doesn't move.
+   - A double-click on "web" opens it once, not twice.
+   - In Insert, a plain click on "web" only places the caret. Cmd+click opens it.
+   - A plain click on "other" opens `other.md` in a new window of ours.
+   - A plain click on "script" asks `open /.../run.sh? [o]pen [c]ancel`, and `c` cancels it.
+     While that question shows, clicks and drags do nothing, and the wheel still scrolls.
+   - Press on "web", drag off the text and release: nothing opens.
+   - In reader view (Cmd+Shift+R), a plain click on "web" opens it.
+9. **Waiting launcher.** From a terminal, start the window without `-b`, then click "other". A
+   new window opens with `other.md`, and the terminal is still waiting. It returns only when
+   the first window closes.
+10. **No clicks under a question.** Type `:` (or `/`, or Cmd+L for the `link:` prompt), then
+    click and drag in the text: nothing moves. Run `:s/o/0/gc` and click while it asks: nothing
+    happens. Press Esc to get out.
+11. **Wheel and trackpad.**
+    - Trackpad scrolling is smooth and the cursor stays put.
+    - A mouse wheel scrolls about one line per notch.
+    - Typing or moving afterwards scrolls back to the cursor.
+12. **Table picker.**
+    - On an empty line, run `:table`. The highlighted size follows the pointer, and clicking a
+      cell inserts a table of that size.
+    - Run `:table` again and scroll until the cursor's line leaves the top: the picker stays at
+      the top of the window.
+    - Make the window very narrow: the picker stays inside it.
+13. **Long open-link question.** Click a link to
+    `ftp://host/a/very/long/path/that/goes/on/and/on/and/on/and/on/and/on/report.pdf`. The status
+    bar shows the start, `…`, `report.pdf` and the answers on one row, and nothing overlaps the
+    line:col on the right.
+14. **Hidden characters.** Click a link whose target holds a real U+202E (right-to-left
+    override). The question shows `\u{202e}` literally, not reversed text.
+15. **Composition.** With a Japanese input method, start composing in Insert, then click
+    elsewhere on the same line. The composition is dropped, not committed at the click.
+16. **Vim off** (needs Task 35's config: `vim = false`). Dragging selects with no mode shown,
+    double-click selects the word, and a plain click on a link opens it.
+
+### Editing and file state (Tasks 32, 33b, 39b, 41, 43)
+
+17. **Vim off keys (Task 41)**, with `vim = false`:
+    - Cmd+F opens the find bar. Enter finds the next match and Shift+Enter the previous one.
+    - Alt+Left and Alt+Right move by word. Cmd+Left and Cmd+Right go to the line start and end.
+      Cmd+Up and Cmd+Down go to the document start and end.
+    - Cmd+B bolds and Cmd+I italicises the selection. Cmd+Z undoes and Cmd+Shift+Z redoes.
+18. **Link prompt (Task 39b).** Select a word and press Cmd+L. A `link: ` prompt appears. Type a
+    URL and press Enter: the word becomes `[word](url)`. With nothing selected, Cmd+L then Enter
+    puts in `[](url)` with the cursor inside the `[]`. Esc cancels and leaves everything as it was.
+19. **Same file in two windows (Task 33b).** Open `test.md`, then open it again from a second
+    terminal. The second window asks
+    `already open in another window (pid N): [o]pen read-only [e]dit anyway [q]uit`. Esc does
+    nothing there. `o` opens it read-only, `e` edits anyway, and `q` closes the window.
+20. **Changed on disk (Task 32).**
+    - While the window is clean, edit `test.md` in another editor and save. The window reloads.
+    - Make the window dirty, then change the file elsewhere. The window warns instead of
+      reloading, and `:w` asks before writing over the other change.
+    - `rm test.md`: the window warns that the file is gone.
+    - `chmod 444 test.md`, then focus the window: it shows read-only. `chmod 644 test.md`, then
+      focus it again: the read-only warning clears.
+21. **Title and edited dot (Task 43).** The window title shows the file name. Type something:
+    the edited dot appears in the red close button (on Linux, a mark in front of the title).
+    `:w` clears it.
+
+### Config and theme (Task 35)
+
+Steps for these are added when Task 35 merges.
+
+### Linux (Task 45)
+
+Repeat 1, 2, 3, 5, 7, 8 (Ctrl+click in Insert), 11 and 12 under GTK. On Linux a wheel notch
+scrolls about the page height to the power 2/3, in points, as GTK's own scrolled windows do.
