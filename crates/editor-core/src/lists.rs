@@ -41,7 +41,12 @@ impl EditPlan {
 /// the content, then the closing fence.
 const FENCE_CLOSE: &str = "\n\n```";
 
-/// Insert-mode Enter at `cursor`. `blocks` must describe `buf`.
+/// Insert-mode Enter at `cursor`.
+///
+/// `blocks` must describe `buf`. Where they visibly disagree (an offset past
+/// the line or off a char boundary, a prefix that is not there) this declines
+/// with `None` rather than panic. The same holds for every function here.
+/// `cursor` is clamped to a grapheme boundary first.
 ///
 /// On a list item (outside code):
 /// - an item with nothing but whitespace after its prefix becomes one empty
@@ -51,9 +56,9 @@ const FENCE_CLOSE: &str = "\n\n```";
 ///   bullet marker, the next number (`n+1.`), or `- [ ] ` for a task;
 /// - with the cursor inside the prefix, `None` (a plain split).
 ///
-/// On an opening fence with the cursor at the end of the line, an empty line
-/// and a closing fence are inserted below, cursor on the empty line. Any
-/// other line gives `None`.
+/// On the opening fence of an unclosed block, with the cursor at the end of
+/// the line, an empty line and a closing fence are inserted below, cursor on
+/// the empty line. Any other line gives `None`.
 pub fn enter(buf: &Buffer, blocks: &Blocks, cursor: Pos) -> Option<EditPlan> {
     let cursor = buf.clamp(cursor);
     let text = buf.line(cursor.line);
@@ -64,7 +69,8 @@ pub fn enter(buf: &Buffer, blocks: &Blocks, cursor: Pos) -> Option<EditPlan> {
             ..
         } => {
             let line = cursor.line;
-            if text[content_offset..].trim().is_empty() {
+            let content = item_content(text, content_offset)?;
+            if content.trim().is_empty() {
                 return Some(EditPlan::one(
                     Pos { line, col: 0 }..Pos {
                         line,
@@ -94,25 +100,36 @@ pub fn enter(buf: &Buffer, blocks: &Blocks, cursor: Pos) -> Option<EditPlan> {
                 },
             ))
         }
-        LineKind::FenceOpen { .. } if cursor.col == text.len() => Some(EditPlan::one(
-            cursor..cursor,
-            FENCE_CLOSE,
-            Pos {
-                line: cursor.line + 1,
-                col: 0,
-            },
-        )),
+        // Divergence (R43): moon_edit (document_controller.dart:339-341)
+        // auto-closes on any opening fence (its `codeBlockId == null` branch
+        // is dead), so Enter on a closed block's opener adds a second closer
+        // and turns everything below into code. Only unclosed blocks close.
+        LineKind::FenceOpen { block, .. }
+            if cursor.col == text.len()
+                && text.starts_with("```")
+                && blocks.code_block(block).close.is_none() =>
+        {
+            Some(EditPlan::one(
+                cursor..cursor,
+                FENCE_CLOSE,
+                Pos {
+                    line: cursor.line + 1,
+                    col: 0,
+                },
+            ))
+        }
         _ => None,
     }
 }
 
-/// Indents list item `line` by 2 spaces. `cursor` is mapped through the
-/// edit (it moves right by 2 when it is on `line`). `None` when `line` is
-/// not a list item.
+/// Indents list item `line` by 2 spaces. `blocks` must describe `buf` (see
+/// `enter`). `cursor` is clamped, then mapped through the edit (it moves
+/// right by 2 when it is on `line`). `None` when `line` is not a list item.
 pub fn indent(buf: &Buffer, blocks: &Blocks, line: usize, cursor: Pos) -> Option<EditPlan> {
     if !is_item(buf, blocks, line) {
         return None;
     }
+    let cursor = buf.clamp(cursor);
     let at = Pos { line, col: 0 };
     let cursor = if cursor.line == line {
         Pos {
@@ -125,14 +142,17 @@ pub fn indent(buf: &Buffer, blocks: &Blocks, line: usize, cursor: Pos) -> Option
     Some(EditPlan::one(at..at, INDENT, cursor))
 }
 
-/// Outdents list item `line` by removing up to 2 leading whitespace chars
-/// (one column each, tabs included). `cursor` is mapped through the edit (a
-/// cursor in the removed whitespace goes to col 0). `None` when `line` is not
-/// a list item or has no leading whitespace.
+/// Outdents list item `line` by removing up to 2 leading whitespace chars.
+/// Each char counts as one column, a tab included: `\t\t\t- a` becomes
+/// `\t- a`, not `\t\t- a`. `blocks` must describe `buf` (see `enter`).
+/// `cursor` is clamped, then mapped through the edit (a cursor in the removed
+/// whitespace goes to col 0). `None` when `line` is not a list item or has no
+/// leading whitespace.
 pub fn outdent(buf: &Buffer, blocks: &Blocks, line: usize, cursor: Pos) -> Option<EditPlan> {
     if !is_item(buf, blocks, line) {
         return None;
     }
+    let cursor = buf.clamp(cursor);
     let text = buf.line(line);
     let removed: usize = text
         .chars()
@@ -159,8 +179,9 @@ pub fn outdent(buf: &Buffer, blocks: &Blocks, line: usize, cursor: Pos) -> Optio
 }
 
 /// Toggles the task checkbox on `line`: `[ ]` becomes `[x]`, and `[x]` or
-/// `[X]` becomes `[ ]`. `cursor` is left where it is (the edit keeps the
-/// line's length). `None` when `line` is not a task item.
+/// `[X]` becomes `[ ]`. `blocks` must describe `buf` (see `enter`). `cursor`
+/// is clamped and otherwise left where it is (the edit keeps the line's
+/// length). `None` when `line` is not a task item.
 pub fn toggle_task(buf: &Buffer, blocks: &Blocks, line: usize, cursor: Pos) -> Option<EditPlan> {
     if line >= buf.line_count() {
         return None;
@@ -174,11 +195,20 @@ pub fn toggle_task(buf: &Buffer, blocks: &Blocks, line: usize, cursor: Pos) -> O
         return None;
     };
     // The prefix ends `[?] `, so the box char sits 3 bytes before the content.
-    let col = content_offset - 3;
+    let col = content_offset.checked_sub(3)?;
+    let found = buf.line(line).get(col.checked_sub(1)?..content_offset)?;
+    let expected = if checked {
+        ["[x] ", "[X] "].contains(&found)
+    } else {
+        found == "[ ] "
+    };
+    if !expected {
+        return None;
+    }
     Some(EditPlan::one(
         Pos { line, col }..Pos { line, col: col + 1 },
         if checked { " " } else { "x" },
-        cursor,
+        buf.clamp(cursor),
     ))
 }
 
@@ -186,7 +216,21 @@ pub fn toggle_task(buf: &Buffer, blocks: &Blocks, line: usize, cursor: Pos) -> O
 const INDENT: &str = "  ";
 
 fn is_item(buf: &Buffer, blocks: &Blocks, line: usize) -> bool {
-    line < buf.line_count() && matches!(blocks.kind(line), LineKind::ListItem { .. })
+    line < buf.line_count()
+        && matches!(
+            *blocks.kind(line),
+            LineKind::ListItem { content_offset, .. }
+                if item_content(buf.line(line), content_offset).is_some()
+        )
+}
+
+/// The item text after the prefix, or `None` when `content_offset` does not
+/// fit `text` (past the end, off a char boundary, or no list marker after the
+/// leading whitespace), which means `blocks` lags the buffer.
+fn item_content(text: &str, content_offset: usize) -> Option<&str> {
+    let prefix = text.get(..content_offset)?;
+    let marker = prefix.trim_start().bytes().next()?;
+    (marker == b'-' || marker == b'*' || marker.is_ascii_digit()).then(|| &text[content_offset..])
 }
 
 /// The least grapheme boundary at or after `col`.
@@ -581,5 +625,104 @@ mod tests {
             }
             assert_eq!(buf.to_text(), text);
         }
+    }
+
+    // Round 1 additions.
+
+    // Divergence (R43): moon_edit auto-closes on any opening fence, so Enter
+    // at the end of a closed block's opener adds a second closer and turns
+    // the rest of the document into code. A closed opener declines.
+    #[test]
+    fn closed_fence_does_not_auto_close() {
+        let text = "```bash\necho\n```\n\npara";
+        assert!(enter_at(text, pos(0, 7)).is_none());
+        // Unclosed openers still auto-close.
+        assert!(enter_at("```bash\necho", pos(0, 7)).is_some());
+        assert!(enter_at("para\n```", pos(1, 3)).is_some());
+    }
+
+    #[test]
+    fn stale_blocks_decline_without_panic() {
+        // Blocks made from another text: offsets past or inside the line.
+        fn stale(
+            from: &str,
+            text: &str,
+            f: impl Fn(&Buffer, &Blocks) -> Option<EditPlan>,
+        ) -> Option<EditPlan> {
+            let blocks = Blocks::new(&Buffer::from_text(from));
+            f(&Buffer::from_text(text), &blocks)
+        }
+        assert!(stale("1234. item", "- ", |b, k| enter(b, k, pos(0, 2))).is_none());
+        assert!(stale("- [ ] item", "ab", |b, k| toggle_task(b, k, 0, pos(0, 0))).is_none());
+        assert!(stale("- [ ] item", "- [ ", |b, k| toggle_task(b, k, 0, pos(0, 0))).is_none());
+        // Content offset 3 falls inside the 2-byte `é`.
+        assert!(stale("1. x", "- \u{e9}", |b, k| enter(b, k, pos(0, 4))).is_none());
+        assert!(stale("- item", "plain", |b, k| indent(b, k, 0, pos(0, 0))).is_none());
+        assert!(stale("  - item", "  plain", |b, k| outdent(b, k, 0, pos(0, 0))).is_none());
+    }
+
+    #[test]
+    fn incoming_cursor_is_clamped() {
+        // Past the end of the line, then inside a cluster, then past the end
+        // of the buffer.
+        let (_, c) = run("- item", |b, k| indent(b, k, 0, pos(0, 99))).unwrap();
+        assert_eq!(c, pos(0, 8));
+        let (_, c) = run("  - e\u{301}", |b, k| outdent(b, k, 0, pos(0, 6))).unwrap();
+        assert_eq!(c, pos(0, 2));
+        let (_, c) = run("- [ ] e\u{301}", |b, k| toggle_task(b, k, 0, pos(0, 7))).unwrap();
+        assert_eq!(c, pos(0, 6));
+        let (_, c) = run("- [ ] x", |b, k| toggle_task(b, k, 0, pos(5, 0))).unwrap();
+        assert_eq!(c, pos(0, 0));
+    }
+
+    #[test]
+    fn outdent_counts_a_tab_as_one_column() {
+        let (buf, c) = run("\t\t\t- item", |b, k| outdent(b, k, 0, pos(0, 5))).unwrap();
+        assert_eq!(buf.line(0), "\t- item");
+        assert_eq!(c, pos(0, 3));
+        let (buf, _) = run("\t  - item", |b, k| outdent(b, k, 0, pos(0, 0))).unwrap();
+        assert_eq!(buf.line(0), " - item");
+    }
+
+    #[test]
+    fn multi_edit_plan_applies_in_sequence() {
+        // The second range only exists after the first edit (line 1 is new).
+        let plan = EditPlan {
+            edits: vec![
+                Edit {
+                    range: pos(0, 1)..pos(0, 1),
+                    text: "\n".to_owned(),
+                },
+                Edit {
+                    range: pos(1, 0)..pos(1, 1),
+                    text: "c".to_owned(),
+                },
+            ],
+            cursor: pos(1, 1),
+        };
+        let mut buf = Buffer::from_text("ab");
+        apply(&mut buf, &plan);
+        assert_eq!(lines(&buf), ["a", "c"]);
+    }
+
+    #[test]
+    fn crlf_enter_continues_and_keeps_eol() {
+        let (buf, c) = enter_at("- a\r\n- b\r\n", pos(1, 3)).unwrap();
+        assert_eq!(buf.to_text(), "- a\r\n- b\r\n- \r\n");
+        assert_eq!(c, pos(2, 2));
+        let (buf, _) = enter_at("1. a\r\n- \r\n", pos(1, 2)).unwrap();
+        assert_eq!(buf.to_text(), "1. a\r\n\r\n");
+    }
+
+    #[test]
+    fn tab_indented_enter_keeps_the_tab() {
+        let (buf, c) = enter_at("\t1. b", pos(0, 5)).unwrap();
+        assert_eq!(buf.line(1), "\t2. ");
+        assert_eq!(c, pos(1, 4));
+        let (buf, c) = enter_at("\t- [x] a", pos(0, 8)).unwrap();
+        assert_eq!(buf.line(1), "\t- [ ] ");
+        assert_eq!(c, pos(1, 7));
+        let (buf, _) = enter_at("\t- a", pos(0, 4)).unwrap();
+        assert_eq!(buf.line(1), "\t- ");
     }
 }
