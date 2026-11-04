@@ -20,8 +20,8 @@ pub mod visual;
 use crate::buffer::{Buffer, Pos};
 use crate::grapheme;
 use crate::input::{Key, KeyEvent};
-use crate::vim::operator::{EditCtx, OpOutcome};
-use crate::vim::repeat::Change;
+use crate::vim::operator::{EditCtx, ListKey, OpOutcome};
+use crate::vim::repeat::{Change, Typed};
 
 pub use count::Count;
 pub use motion::{Motion, MotionKind, MotionResult};
@@ -114,6 +114,9 @@ pub enum Step {
     },
     /// An operator over the inner code block (`yic dic cic`).
     InnerCode { op: Operator },
+    /// A list key in Normal: Tab, Shift+Tab, `gx` or Ctrl+Space
+    /// (`operator::list_plan`). Where it does not apply, nothing happens.
+    List(ListKey),
 }
 
 /// The Normal-mode command being typed.
@@ -246,19 +249,28 @@ impl Vim {
         }
     }
 
-    /// Text typed in the Insert session of the pending change.
+    /// Text typed (or pasted) in the Insert session of the pending change.
     pub fn typed(&mut self, text: &str) {
         if let Some(t) = self.pending.as_mut().and_then(Change::text_mut) {
-            t.push_str(&text.replace("\r\n", "\n"));
+            t.push_text(text);
         }
     }
 
-    /// Backspace in the Insert session: the last grapheme typed goes. Text
+    /// A list key pressed in the Insert session of the pending change,
+    /// which `.` presses again.
+    pub fn pressed(&mut self, key: ListKey) {
+        if let Some(t) = self.pending.as_mut().and_then(Change::text_mut) {
+            t.push_key(key);
+        }
+    }
+
+    /// Backspace in the Insert session: the last grapheme typed goes (or,
+    /// after a list key, the Backspace is kept, `Typed::backspace`). Text
     /// from before the session is not the change's, so past its start
     /// nothing changes.
     pub fn backspaced(&mut self) {
         if let Some(t) = self.pending.as_mut().and_then(Change::text_mut) {
-            t.truncate(grapheme::prev(t, t.len()));
+            t.backspace();
         }
     }
 
@@ -268,7 +280,7 @@ impl Vim {
         if self.pending.is_some() {
             self.pending = Some(Change::Insert {
                 entry: 'i',
-                text: String::new(),
+                text: Typed::default(),
             });
         }
     }
@@ -313,19 +325,21 @@ impl Vim {
         let m = match k.key {
             Key::Char(c) if k.mods.ctrl => return self.ctrl(c),
             Key::Char(c) => return self.char(c, buf, cur),
+            Key::Tab if k.mods.shift => return self.list_key(ListKey::BackTab),
+            Key::Tab => return self.list_key(ListKey::Tab),
+            Key::Space if k.mods.ctrl => return self.list_key(ListKey::Toggle),
             Key::Left => Motion::Left,
             Key::Right => Motion::Right,
             Key::Up => Motion::Up,
             Key::Down => Motion::Down,
             Key::Home => Motion::LineStart,
             Key::End => Motion::LineEnd,
-            // TODO(later tasks): Enter, Backspace, Space, Delete, Tab and
-            // paging in Normal mode.
+            // TODO(later tasks): Enter, Backspace, Space, Delete and paging
+            // in Normal mode.
             Key::Esc
             | Key::Enter
             | Key::Backspace
             | Key::Delete
-            | Key::Tab
             | Key::PageUp
             | Key::PageDown
             | Key::Space => {
@@ -334,6 +348,19 @@ impl Vim {
             }
         };
         self.motion(m, buf, cur)
+    }
+
+    /// Tab, Shift+Tab, `gx` or Ctrl+Space: a change of its own, which the
+    /// editor discards when the line is not one it acts on. Counts do not
+    /// apply; after an operator or another prefix it cancels.
+    fn list_key(&mut self, key: ListKey) -> Step {
+        let plain = self.op.is_none() && self.prefix.is_none();
+        self.reset();
+        if !plain {
+            return Step::Pending;
+        }
+        self.pending = Some(Change::List(key));
+        Step::List(key)
     }
 
     /// Ctrl and a char: Ctrl+R redoes; nothing else means anything yet.
@@ -403,13 +430,18 @@ impl Vim {
                     if op != Operator::Yank {
                         self.pending = Some(Change::InnerCode {
                             op,
-                            inserted: (op == Operator::Change).then(String::new),
+                            inserted: (op == Operator::Change).then(Typed::default),
                         });
                     }
                     Step::InnerCode { op }
                 }
                 _ => Step::Pending,
             };
+        }
+        if self.prefix == Some('g') && c == 'x' {
+            // `gx` toggles a task (vim opens a link; Task 36 makes it this).
+            self.prefix = None;
+            return self.list_key(ListKey::Toggle);
         }
         if let Some(step) = self.counted(c, buf, cur) {
             return step;
@@ -438,7 +470,7 @@ impl Vim {
                     self.pending = Some(if c == 'D' {
                         Change::CapD
                     } else {
-                        Change::CapC(String::new())
+                        Change::CapC(Typed::default())
                     });
                 }
                 step
@@ -473,7 +505,7 @@ impl Vim {
                 self.reset();
                 self.pending = Some(Change::Insert {
                     entry: c,
-                    text: String::new(),
+                    text: Typed::default(),
                 });
                 insert_entry(c, buf, cur.pos)
             }
@@ -519,7 +551,7 @@ impl Vim {
                     self.pending = Some(Change::Line {
                         op,
                         count,
-                        inserted: (op == Operator::Change).then(String::new),
+                        inserted: (op == Operator::Change).then(Typed::default),
                     });
                 }
                 Step::Operate {
@@ -548,7 +580,7 @@ impl Vim {
                 reverse: c == 'N',
                 count,
                 pattern: None,
-                inserted: (op == Operator::Change).then(String::new),
+                inserted: (op == Operator::Change).then(Typed::default),
             });
         }
         match c {
@@ -579,7 +611,7 @@ impl Vim {
                     op,
                     motion: m,
                     count,
-                    inserted: (op == Operator::Change).then(String::new),
+                    inserted: (op == Operator::Change).then(Typed::default),
                 });
             }
             return Step::Operate { op, range };
@@ -1007,7 +1039,7 @@ mod tests {
     #[test]
     fn g_then_another_key_clears_without_moving() {
         let mut e = ed(DOC);
-        keys(&mut e, "gx");
+        keys(&mut e, "gz");
         assert_eq!(e.cursor(), pos(0, 0));
         assert_eq!(e.showcmd(), "");
         // The g is gone: a following g alone does not complete gg.

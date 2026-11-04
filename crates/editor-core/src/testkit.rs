@@ -236,8 +236,8 @@ pub(crate) fn key(k: Key) -> Input {
     key_with(k, Mods::default())
 }
 
-/// The key a `<name>` escape stands for: `Esc`, `CR`, `BS`, `Tab`, `Del`,
-/// `Space`, `lt`, the arrows, `Home`, `End`, `C-x` for Ctrl and a char, or
+/// The key a `<name>` escape stands for: `Esc`, `CR`, `BS`, `Tab`, `S-Tab`
+/// (Shift+Tab), `Del`, `Space`, `C-Space` (Ctrl+Space), `lt`, the arrows, `Home`, `End`, `C-x` for Ctrl and a char, or
 /// `D-x` for Cmd and a char (the primary modifier on the Mac, which the
 /// test editors run as).
 fn named(name: &str) -> Option<(Key, Mods)> {
@@ -247,6 +247,20 @@ fn named(name: &str) -> Option<(Key, Mods)> {
         "CR" => plain(Key::Enter),
         "BS" => plain(Key::Backspace),
         "Tab" => plain(Key::Tab),
+        "S-Tab" => Some((
+            Key::Tab,
+            Mods {
+                shift: true,
+                ..Mods::default()
+            },
+        )),
+        "C-Space" => Some((
+            Key::Space,
+            Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+        )),
         "Del" => plain(Key::Delete),
         "Space" => plain(Key::Space),
         "lt" => plain(Key::Char('<')),

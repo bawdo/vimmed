@@ -6,17 +6,95 @@
 //! the change becomes the one `.` repeats when the command is done. `.`
 //! replays it through the same operators, so the repeat lands where the
 //! command itself would at the new cursor.
+//!
+//! An Insert session is recorded as vim's redo buffer records it: text goes
+//! back in as it was typed (or pasted), but the list keys (Enter, Tab,
+//! Shift+Tab, Ctrl+Space) are pressed again, so each acts on the line it
+//! lands on. Checked against vim 9.1 with `comments=b:-,b:*` and `fo+=r`:
+//! `A<CR>b<Esc>` on `- a`, then `j.` on `* c`, gives `* b`, not `- b`.
 
+use crate::grapheme;
 use crate::markdown::Blocks;
 use crate::search;
 use crate::vim::motion::Motion;
-use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator};
+use crate::vim::operator::{self, EditCtx, ListKey, OpOutcome, OpRange, Operator};
 use crate::vim::textobj;
 use crate::vim::visual::{self, Shape};
-use crate::vim::{Cursor, insert_at, leave_insert};
+use crate::vim::{Cursor, insert_at, leave_insert, rest};
+
+/// One thing done in an Insert session, as `.` does it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Piece {
+    /// Text that goes back in as it is: typed, or pasted.
+    Text(String),
+    /// A list key, pressed again (`operator::insert_list_key`).
+    Key(ListKey),
+    /// Backspace straight after a key, pressed again. After text it takes
+    /// the text's last grapheme instead (`Typed::backspace`).
+    Backspace,
+}
+
+/// What an Insert session typed, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Typed(Vec<Piece>);
+
+impl Typed {
+    /// Text typed or pasted. `\r\n` goes in as `\n`.
+    pub fn push_text(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n");
+        if text.is_empty() {
+            return;
+        }
+        match self.0.last_mut() {
+            Some(Piece::Text(t)) => t.push_str(&text),
+            _ => self.0.push(Piece::Text(text)),
+        }
+    }
+
+    /// A list key pressed.
+    pub fn push_key(&mut self, key: ListKey) {
+        self.0.push(Piece::Key(key));
+    }
+
+    /// Backspace: the last grapheme of typed text goes, or after a key the
+    /// Backspace is kept to press again. With nothing typed (the session's
+    /// own start) nothing changes.
+    pub fn backspace(&mut self) {
+        match self.0.last_mut() {
+            None => {}
+            Some(Piece::Text(t)) => {
+                t.truncate(grapheme::prev(t, t.len()));
+                if t.is_empty() {
+                    self.0.pop();
+                }
+            }
+            Some(_) => self.0.push(Piece::Backspace),
+        }
+    }
+
+    /// What was done, oldest first.
+    pub fn pieces(&self) -> &[Piece] {
+        &self.0
+    }
+}
+
+/// For tests: `text` as typed keys, each `\n` an Enter.
+#[cfg(test)]
+impl From<&str> for Typed {
+    fn from(text: &str) -> Typed {
+        let mut t = Typed::default();
+        for (i, part) in text.split('\n').enumerate() {
+            if i > 0 {
+                t.push_key(ListKey::Enter);
+            }
+            t.push_text(part);
+        }
+        t
+    }
+}
 
 /// A repeatable change, as `.` replays it. Counts are the effective count
-/// (`2d3w` records 6). `inserted` is the text typed in the Insert session
+/// (`2d3w` records 6). `inserted` is what was typed in the Insert session
 /// a change (`c`) opened: `None` for a delete, `Some` for a change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
@@ -27,20 +105,20 @@ pub enum Change {
         op: Operator,
         motion: Motion,
         count: usize,
-        inserted: Option<String>,
+        inserted: Option<Typed>,
     },
     /// A doubled operator over whole lines (`dd`, `cc`).
     Line {
         op: Operator,
         count: usize,
-        inserted: Option<String>,
+        inserted: Option<Typed>,
     },
     /// An Insert session from `i a A I o O`, with the text typed in it.
-    Insert { entry: char, text: String },
+    Insert { entry: char, text: Typed },
     /// `p` (`after`) or `P`.
     Put { after: bool, count: usize },
-    /// `C` without a count, with the text typed after it.
-    CapC(String),
+    /// `C` without a count, with what was typed after it.
+    CapC(Typed),
     /// `D` without a count.
     CapD,
     /// An operator over a Visual selection, repeated over a region the
@@ -48,12 +126,12 @@ pub enum Change {
     Visual {
         op: Operator,
         shape: Shape,
-        inserted: Option<String>,
+        inserted: Option<Typed>,
     },
     /// An operator over the inner code block (`dic`, `cic`).
     InnerCode {
         op: Operator,
-        inserted: Option<String>,
+        inserted: Option<Typed>,
     },
     /// An operator up to a match: of the last search as it is at the
     /// repeat (`dn`, `cN`), or of the query and direction it typed
@@ -64,13 +142,15 @@ pub enum Change {
         reverse: bool,
         count: usize,
         pattern: Option<(String, bool)>,
-        inserted: Option<String>,
+        inserted: Option<Typed>,
     },
+    /// Tab, Shift+Tab, `gx` or Ctrl+Space in Normal.
+    List(ListKey),
 }
 
 impl Change {
-    /// The text typed in the change's Insert session, when it has one.
-    pub fn text_mut(&mut self) -> Option<&mut String> {
+    /// What was typed in the change's Insert session, when it has one.
+    pub fn text_mut(&mut self) -> Option<&mut Typed> {
         match self {
             Change::Op { inserted, .. }
             | Change::Line { inserted, .. }
@@ -78,7 +158,7 @@ impl Change {
             | Change::InnerCode { inserted, .. }
             | Change::Search { inserted, .. } => inserted.as_mut(),
             Change::Insert { text, .. } | Change::CapC(text) => Some(text),
-            Change::X(_) | Change::Put { .. } | Change::CapD => None,
+            Change::X(_) | Change::Put { .. } | Change::CapD | Change::List(_) => None,
         }
     }
 
@@ -93,7 +173,10 @@ impl Change {
             | Change::Search { count, .. } => *count = n,
             // The region's size is the selection's, and `ic` takes no
             // count.
-            Change::Insert { .. } | Change::Visual { .. } | Change::InnerCode { .. } => {}
+            Change::Insert { .. }
+            | Change::Visual { .. }
+            | Change::InnerCode { .. }
+            | Change::List(_) => {}
             Change::CapC(text) => {
                 *self = Change::Op {
                     op: Operator::Change,
@@ -134,7 +217,7 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
         } => match OpRange::from_motion(*op, *motion, ctx.buf, cur, *count) {
             Some(r) => {
                 let out = operator::operate(ctx, *op, r);
-                type_in(ctx, out, inserted.as_deref())
+                type_in(ctx, out, inserted.as_ref())
             }
             None => stay,
         },
@@ -145,7 +228,7 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
         } => {
             let r = OpRange::lines(ctx.buf, cur.pos.line, cur.pos.col, *count);
             let out = operator::operate(ctx, *op, r);
-            type_in(ctx, out, inserted.as_deref())
+            type_in(ctx, out, inserted.as_ref())
         }
         Change::CapC(text) => {
             match OpRange::from_motion(Operator::Change, Motion::LineEnd, ctx.buf, cur, 1) {
@@ -170,14 +253,14 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
         } => {
             let r = visual::region(ctx.buf, cur.pos, *shape);
             let out = operator::operate(ctx, *op, r);
-            type_in(ctx, out, inserted.as_deref())
+            type_in(ctx, out, inserted.as_ref())
         }
         Change::InnerCode { op, inserted } => {
             // `.` is rare enough that rescanning the blocks is fine.
             match textobj::code_block(&Blocks::new(ctx.buf), cur.pos.line) {
                 Some(block) if textobj::acts(*op, Some(&block)) => {
                     let out = textobj::operate(ctx, *op, block);
-                    type_in(ctx, out, inserted.as_deref())
+                    type_in(ctx, out, inserted.as_ref())
                 }
                 _ => stay,
             }
@@ -199,7 +282,7 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
             match target.and_then(|hit| OpRange::exclusive(ctx.buf, cur.pos, hit.pos())) {
                 Some(r) => {
                     let out = operator::operate(ctx, *op, r);
-                    type_in(ctx, out, inserted.as_deref())
+                    type_in(ctx, out, inserted.as_ref())
                 }
                 None => stay,
             }
@@ -219,19 +302,51 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
             };
             type_in(ctx, out, Some(text))
         }
+        Change::List(key) => {
+            // Rescanned, as for `ic`: the blocks must describe the buffer.
+            let blocks = Blocks::new(ctx.buf);
+            match operator::list_plan(*key, ctx.buf, &blocks, cur.pos) {
+                Some(plan) => {
+                    let at = ctx.apply_plan(plan);
+                    let cursor = rest(ctx.buf, at);
+                    ctx.place(cursor);
+                    OpOutcome {
+                        cursor,
+                        insert: false,
+                    }
+                }
+                None => stay,
+            }
+        }
     }
 }
 
-/// After a command: types `text` where it left the cursor and leaves
-/// Insert, when it entered Insert. `None` leaves the outcome as it is.
-fn type_in(ctx: &mut EditCtx, out: OpOutcome, text: Option<&str>) -> OpOutcome {
-    let Some(text) = text else {
+/// After a command: does again what was typed where it left the cursor
+/// and leaves Insert, when it entered Insert. `None` leaves the outcome as
+/// it is. Each list key rescans the blocks, so they describe the buffer as
+/// the pieces before it left it.
+fn type_in(ctx: &mut EditCtx, out: OpOutcome, typed: Option<&Typed>) -> OpOutcome {
+    let Some(typed) = typed else {
         return out;
     };
     let at = ctx.buf.clamp(out.cursor);
     ctx.place(at);
-    if !text.is_empty() {
-        ctx.replace(at..at, text);
+    for piece in typed.pieces() {
+        let at = ctx.buf.clamp(ctx.cursor);
+        match piece {
+            Piece::Text(text) => {
+                ctx.replace(at..at, text);
+            }
+            Piece::Key(key) => {
+                let plan = operator::list_plan(*key, ctx.buf, &Blocks::new(ctx.buf), at);
+                operator::insert_list_key(ctx, *key, plan);
+            }
+            Piece::Backspace => {
+                if let Some(r) = operator::backspace_range(ctx.buf, at) {
+                    ctx.replace(r, "");
+                }
+            }
+        }
     }
     let cursor = leave_insert(ctx.buf, ctx.cursor);
     ctx.place(cursor);
@@ -477,17 +592,31 @@ mod tests {
         );
         keys(&mut e, ".");
         assert_eq!(e.text(), "fofoxx");
-        // Backspace over a line break takes the break out of the text too,
-        // and over a whole cluster takes the cluster.
+        // Backspace over a whole cluster takes the cluster. Enter is a key
+        // `.` presses again (it may continue a list where it lands), so a
+        // Backspace straight after it is kept to press again too, as vim's
+        // redo buffer keeps it.
         let mut e = ed("");
         keys(&mut e, "ia<CR><BS>👩\u{200d}👩\u{200d}👧<BS>b<Esc>");
+        assert_eq!(e.text(), "ab");
+        let mut want = Typed::from("a\n");
+        want.push_text("x");
+        want.backspace();
+        assert_eq!(
+            want.pieces(),
+            [Piece::Text("a".into()), Piece::Key(ListKey::Enter)]
+        );
+        want.backspace();
+        want.push_text("b");
         assert_eq!(
             e.last_change(),
             Some(&Change::Insert {
                 entry: 'i',
-                text: "ab".into(),
+                text: want,
             })
         );
+        keys(&mut e, ".");
+        assert_eq!(e.text(), "aabb");
     }
 
     #[test]
