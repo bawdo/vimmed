@@ -8,7 +8,7 @@ use std::io;
 use crate::buffer::Pos;
 use crate::effects::{Effects, Redraw};
 use crate::ex::{self, ExCmd, Sub};
-use crate::file::Loaded;
+use crate::file::{Loaded, WriteError};
 use crate::grapheme;
 use crate::input::{Key, KeyEvent};
 use crate::search::{Hit, Search};
@@ -129,21 +129,27 @@ impl Editor {
     /// point, removes the recovery copy and rebases the file watch, saying
     /// nothing. A failed or refused write says why, as an Error.
     pub(super) fn write_quietly(&mut self, force: bool) -> bool {
-        match self.saver.write(&self.buf.to_text(), force) {
-            Ok(()) => {
-                self.dirty = false;
-                self.history.mark_saved();
-                if let Some(r) = self.recovery.as_mut() {
-                    r.delete();
-                }
-                self.wrote();
-                true
-            }
+        match self.write_checked(force) {
+            Ok(()) => true,
             Err(e) => {
                 self.say_as(e.message(), MsgKind::Error, status::MESSAGE_FOR_NS);
                 false
             }
         }
+    }
+
+    /// `write_quietly`'s work, handing back why a write failed or was
+    /// refused rather than saying it (Primary+S with vim off asks about a
+    /// file changed on disk: `nonvim_keys`).
+    pub(super) fn write_checked(&mut self, force: bool) -> Result<(), WriteError> {
+        self.saver.write(&self.buf.to_text(), force)?;
+        self.dirty = false;
+        self.history.mark_saved();
+        if let Some(r) = self.recovery.as_mut() {
+            r.delete();
+        }
+        self.wrote();
+        Ok(())
     }
 
     /// Reloads the document from disk through the `Saver`, dropping the

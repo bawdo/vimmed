@@ -9,16 +9,18 @@
 //! open in reader view too.
 //!
 //! Primary+L, in Normal, Insert, Visual and Visual Line (and with vim
-//! off), opens the command line as the link prompt `link: `. It reuses the
-//! command line's typing (`cmdline`): the line is `self.cmdline`, in
-//! Command mode, with `linking` saying what Enter does. Enter puts in
-//! `[<selection>](<input>)` over a selection, back in Normal with the
-//! cursor on the `)`, or `[](<input>)` at the cursor with no selection, in
-//! Insert with the cursor inside the `[]`. The input is trimmed. The
-//! insertion is one undo step (text typed into the `[]` afterwards is the
-//! Insert session's own). Esc, Backspace on an empty line, or Enter on a
-//! blank one cancel, back to the mode, cursor and selection the prompt
-//! came from. Reader view is read-only, so Primary+L does nothing there.
+//! off, Primary+K too), opens the command line as the link prompt
+//! `link: `. It reuses the command line's typing (`cmdline`): the line is
+//! `self.cmdline`, in Command mode, with `linking` saying what Enter does.
+//! Enter puts in `[<selection>](<input>)` over a selection, back in Normal
+//! with the cursor on the `)`, or `[](<input>)` at the cursor with no
+//! selection, in Insert with the cursor inside the `[]`. With vim off
+//! there is no Normal: over a selection the cursor goes after the `)`,
+//! still typing. The input is trimmed. The insertion is one undo step
+//! (text typed into the `[]` afterwards is the Insert session's own). Esc,
+//! Backspace on an empty line, or Enter on a blank one cancel, back to the
+//! mode, cursor and selection the prompt came from. Reader view is
+//! read-only, so Primary+L does nothing there.
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -105,9 +107,13 @@ impl Editor {
         }
         let before = self.selection_lines();
         let selection = self.shown_selection().filter(|_| self.visual());
-        let range = match selection {
-            Some(sel) => visual::paste_range(&self.buf, sel, &mut String::new()),
-            None => {
+        // Vim off, the selection Shift and the arrows made.
+        let plain = self.plain_range().filter(|_| !self.cfg.vim);
+        let selected = selection.is_some() || plain.is_some();
+        let range = match (selection, plain) {
+            (Some(sel), _) => visual::paste_range(&self.buf, sel, &mut String::new()),
+            (None, Some(r)) => r,
+            (None, None) => {
                 let at = self.buf.clamp(self.cursor);
                 at..at
             }
@@ -116,7 +122,7 @@ impl Editor {
         let fx = self.clear_preedit();
         self.linking = Some(Linking {
             range,
-            selected: selection.is_some(),
+            selected,
             ret: self.mode,
             cursor: self.cursor,
             anchor: self.anchor,
@@ -172,7 +178,12 @@ impl Editor {
             self.vim.arrowed();
         }
         let insert = !l.selected;
-        self.mode = if insert { Mode::Insert } else { Mode::Normal };
+        let vim_on = self.cfg.vim;
+        self.mode = if insert || !vim_on {
+            Mode::Insert
+        } else {
+            Mode::Normal
+        };
         let fx = self.run(|ctx| {
             let start = range.start;
             let end = ctx.replace(range, &text).range.end;
@@ -182,6 +193,9 @@ impl Editor {
                     col: start.col + 1,
                     ..start
                 }
+            } else if !vim_on {
+                // After the `)`, typing on.
+                end
             } else {
                 // On the `)` (one byte), where Normal mode rests after a put.
                 vim::rest(

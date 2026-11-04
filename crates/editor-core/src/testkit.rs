@@ -252,6 +252,29 @@ pub(crate) fn plain_with_host(text: &str) -> (Editor, FakeHost) {
     )
 }
 
+/// Like `plain_with_host`, on Linux, where Ctrl is the primary modifier.
+pub(crate) fn plain_linux_with_host(text: &str) -> (Editor, FakeHost) {
+    build_on(
+        text,
+        Config {
+            vim: false,
+            ..Config::default()
+        },
+        Platform::Linux,
+        false,
+    )
+}
+
+/// Like `plain_with_host`, with a handle on the calls it makes to its
+/// file, which holds `text` to begin with.
+pub(crate) fn plain_with_files(text: &str) -> (Editor, FakeFiles) {
+    let (mut e, _host) = plain_with_host(text);
+    let files = FakeFiles::default();
+    files.set_disk(text);
+    e.set_saver(Box::new(files.clone()));
+    (e, files)
+}
+
 pub(crate) fn pos(line: usize, col: usize) -> Pos {
     Pos { line, col }
 }
@@ -268,63 +291,50 @@ pub(crate) fn key(k: Key) -> Input {
     key_with(k, Mods::default())
 }
 
-/// The key a `<name>` escape stands for: `Esc`, `CR`, `BS`, `Tab`, `S-Tab`
-/// (Shift+Tab), `Del`, `Space`, `C-Space` (Ctrl+Space), `lt`, the arrows, `Home`, `End`, `C-x` for Ctrl and a char, or
-/// `D-x` for Cmd and a char (the primary modifier on the Mac, which the
-/// test editors run as).
+/// The key a `<name>` escape stands for: `Esc`, `CR`, `BS`, `Tab`, `Del`,
+/// `Space`, `lt`, the arrows, `Home`, `End`, or a single char, after any
+/// run of modifier prefixes: `S-` Shift, `C-` Ctrl, `M-` Alt (Option) and
+/// `D-` Cmd (the primary modifier on the Mac, which the test editors run
+/// as). So `S-Tab`, `C-Space`, `D-s`, `M-Left` and `D-S-z`. A bare char
+/// needs a prefix (`<x>` is no escape).
 fn named(name: &str) -> Option<(Key, Mods)> {
-    let plain = |k| Some((k, Mods::default()));
-    match name {
-        "Esc" => plain(Key::Esc),
-        "CR" => plain(Key::Enter),
-        "BS" => plain(Key::Backspace),
-        "Tab" => plain(Key::Tab),
-        "S-Tab" => Some((
-            Key::Tab,
-            Mods {
-                shift: true,
-                ..Mods::default()
-            },
-        )),
-        "C-Space" => Some((
-            Key::Space,
-            Mods {
-                ctrl: true,
-                ..Mods::default()
-            },
-        )),
-        "Del" => plain(Key::Delete),
-        "Space" => plain(Key::Space),
-        "lt" => plain(Key::Char('<')),
-        "Left" => plain(Key::Left),
-        "Right" => plain(Key::Right),
-        "Up" => plain(Key::Up),
-        "Down" => plain(Key::Down),
-        "Home" => plain(Key::Home),
-        "End" => plain(Key::End),
-        _ => {
-            let (mods, rest) = if let Some(rest) = name.strip_prefix("C-") {
-                (
-                    Mods {
-                        ctrl: true,
-                        ..Mods::default()
-                    },
-                    rest,
-                )
-            } else {
-                (
-                    Mods {
-                        cmd: true,
-                        ..Mods::default()
-                    },
-                    name.strip_prefix("D-")?,
-                )
-            };
-            let mut rest = rest.chars();
-            let c = rest.next()?;
-            rest.next().is_none().then_some((Key::Char(c), mods))
-        }
+    let mut mods = Mods::default();
+    let mut rest = name;
+    loop {
+        let flag = match rest.get(..2) {
+            Some("S-") => &mut mods.shift,
+            Some("C-") => &mut mods.ctrl,
+            Some("M-") => &mut mods.alt,
+            Some("D-") => &mut mods.cmd,
+            _ => break,
+        };
+        *flag = true;
+        rest = &rest[2..];
     }
+    let key = match rest {
+        "Esc" => Key::Esc,
+        "CR" => Key::Enter,
+        "BS" => Key::Backspace,
+        "Tab" => Key::Tab,
+        "Del" => Key::Delete,
+        "Space" => Key::Space,
+        "lt" => Key::Char('<'),
+        "Left" => Key::Left,
+        "Right" => Key::Right,
+        "Up" => Key::Up,
+        "Down" => Key::Down,
+        "Home" => Key::Home,
+        "End" => Key::End,
+        _ => {
+            let mut chars = rest.chars();
+            let c = chars.next()?;
+            if chars.next().is_some() || mods == Mods::default() {
+                return None;
+            }
+            Key::Char(c)
+        }
+    };
+    Some((key, mods))
 }
 
 /// Presses each key in `seq`. `<Esc>`-style escapes name special keys (see

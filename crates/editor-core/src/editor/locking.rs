@@ -116,9 +116,14 @@ impl Editor {
     }
 
     /// True while the document refuses edits: reader view, or opened
-    /// read-only from the already-open prompt.
+    /// read-only from the already-open prompt. With vim off, also a
+    /// document read from a file that is not valid UTF-8 (never written
+    /// back): with no mode to show, an edit there would look like one that
+    /// could be saved. Vim keeps editing it, `:w` refusing.
     pub(super) fn refuses_edits(&self) -> bool {
-        self.reader || self.read_only_chosen
+        self.reader
+            || self.read_only_chosen
+            || (!self.cfg.vim && self.warnings.contains(&strings::NOT_UTF8_READ_ONLY))
     }
 
     /// A write refused because the document was opened read-only, saying
