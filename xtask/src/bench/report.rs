@@ -68,10 +68,57 @@ pub fn stages(marks: &BTreeMap<String, Vec<f64>>) -> Vec<(String, f64, f64)> {
     out
 }
 
+/// `key_draw_ms` grouped by input kind, by redraw kind and by both, from the
+/// `key_draw_kind_ms.<input>.<redraw>` samples. Empty when a log has none.
+fn draw_by_kind(samples: &BTreeMap<String, Vec<f64>>) -> String {
+    let mut by_input: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    let mut by_redraw: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    let mut by_both: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for (name, v) in samples {
+        if let Some((input, redraw)) = marks::parse_key_draw_kind(name) {
+            by_input.entry(input).or_default().extend(v);
+            by_redraw.entry(redraw).or_default().extend(v);
+            by_both
+                .entry(format!("{input}.{redraw}"))
+                .or_default()
+                .extend(v);
+        }
+    }
+    let mut s = String::new();
+    if by_both.is_empty() {
+        return s;
+    }
+    let mut table = |title: &str, rows: Vec<(&str, &Vec<f64>)>| {
+        let _ = writeln!(s, "{} by {title}", names::KEY_DRAW_MS);
+        for (kind, v) in rows {
+            let sv = sorted(v);
+            let _ = writeln!(
+                s,
+                "  {kind}: n={} median {:.1} p95 {:.1} max {:.1}",
+                v.len(),
+                nearest_rank(&sv, 0.5),
+                nearest_rank(&sv, 0.95),
+                max(v),
+            );
+        }
+    };
+    table("input", by_input.iter().map(|(k, v)| (*k, v)).collect());
+    table("redraw", by_redraw.iter().map(|(k, v)| (*k, v)).collect());
+    table(
+        "input and redraw",
+        by_both.iter().map(|(k, v)| (k.as_str(), v)).collect(),
+    );
+    s
+}
+
 pub fn summarise(samples: &BTreeMap<String, Vec<f64>>, platform: Platform) -> String {
     let mut s = String::new();
 
     for (name, v) in samples {
+        // Shown grouped below, not one line per kind.
+        if marks::parse_key_draw_kind(name).is_some() {
+            continue;
+        }
         let sv = sorted(v);
         let _ = writeln!(
             s,
@@ -84,6 +131,11 @@ pub fn summarise(samples: &BTreeMap<String, Vec<f64>>, platform: Platform) -> St
         );
     }
     s.push('\n');
+    let kinds = draw_by_kind(samples);
+    if !kinds.is_empty() {
+        s.push_str(&kinds);
+        s.push('\n');
+    }
 
     if let Some(v) = samples.get(names::FIRST_FRAME).filter(|v| !v.is_empty()) {
         let sv = sorted(v);
@@ -194,6 +246,59 @@ mod tests {
             Platform::Macos,
         );
         assert!(s.contains("2.40 refresh periods (<= 2.5 PASS)"), "{s}");
+    }
+
+    #[test]
+    fn bench_summary_groups_draw_by_kind() {
+        let mut samples = BTreeMap::new();
+        super::super::parse_log(
+            "key_draw_ms,1.000\nkey_draw_kind_ms.text.lines,1.000\n\
+             key_draw_ms,30.000\nkey_draw_kind_ms.enter.lines,30.000\n\
+             key_draw_ms,2.000\nkey_draw_kind_ms.text.lines,2.000\n\
+             key_draw_ms,0.500\nkey_draw_kind_ms.arrow.status,0.500\n\
+             key_draw_ms,4.000\nkey_draw_kind_ms.enter.all,4.000\n",
+            &mut samples,
+        );
+        let s = summarise(&samples, Platform::Macos);
+        assert!(s.contains("key_draw_ms: n=5 median 2.0"), "{s}");
+        assert!(s.contains("key_draw_ms by input\n"), "{s}");
+        assert!(
+            s.contains("  enter: n=2 median 4.0 p95 30.0 max 30.0\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("  text: n=2 median 1.0 p95 2.0 max 2.0\n"),
+            "{s}"
+        );
+        assert!(s.contains("key_draw_ms by redraw\n"), "{s}");
+        assert!(
+            s.contains("  lines: n=3 median 2.0 p95 30.0 max 30.0\n"),
+            "{s}"
+        );
+        assert!(s.contains("  status: n=1 median 0.5"), "{s}");
+        assert!(s.contains("key_draw_ms by input and redraw\n"), "{s}");
+        assert!(s.contains("  enter.all: n=1 median 4.0"), "{s}");
+        assert!(
+            !s.contains("key_draw_kind_ms."),
+            "kind samples only appear grouped: {s}"
+        );
+    }
+
+    #[test]
+    fn bench_summary_without_kinds_is_unchanged() {
+        let samples = m(&[
+            ("key_draw_ms", vec![1.0, 2.0, 3.0]),
+            ("first_frame", vec![200.0]),
+        ]);
+        let s = summarise(&samples, Platform::Macos);
+        assert_eq!(
+            s,
+            "first_frame: n=1 median 200.0 p95 200.0 p99 200.0 max 200.0\n\
+             key_draw_ms: n=3 median 2.0 p95 3.0 p99 3.0 max 3.0\n\
+             \n\
+             cold start: median 200.0 ms (<= 250 PASS)\n\
+             cold start: p95 200.0 ms (<= 400 PASS)\n"
+        );
     }
 
     #[test]

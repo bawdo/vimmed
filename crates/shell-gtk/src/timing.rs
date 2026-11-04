@@ -11,7 +11,13 @@
 //! `CLOCK_MONOTONIC`, but a synthetic source (wtype) may not: when the event
 //! time is implausibly far from the handler, timing starts at the handler
 //! instead and `key_time_fallback` is logged.
+//!
+//! Beside `key_draw_ms`, the same time is logged under
+//! `key_draw_kind_ms.<input>.<redraw>`: what the key was (`input_kind`) and
+//! what the editor asked to repaint for it (`redraw_kind`).
 
+use editor_core::effects::Redraw;
+use editor_core::input::{Input, Key};
 use marks::names;
 
 /// Logged (value 1) for a key whose event time could not be trusted.
@@ -45,6 +51,48 @@ pub struct KeyTimes {
     pub handled_ns: u64,
     pub snap_start_ns: u64,
     pub snap_end_ns: u64,
+    /// From `names::input`; empty until the key is handled.
+    pub input: &'static str,
+    /// From `names::redraw`; empty until the key is handled.
+    pub redraw: &'static str,
+}
+
+/// The kind of key `inp` is, from `names::input`. A printable key held
+/// with Control or Command is `other` (a shortcut, not text).
+pub fn input_kind(inp: &Input) -> &'static str {
+    use names::input;
+    match inp {
+        Input::Text(_) => input::TEXT,
+        Input::Key(k) => match k.key {
+            Key::Char(_) | Key::Space if !k.mods.ctrl && !k.mods.cmd => input::TEXT,
+            Key::Enter => input::ENTER,
+            Key::Backspace => input::BACKSPACE,
+            Key::Delete => input::DELETE,
+            Key::Left | Key::Right | Key::Up | Key::Down => input::ARROW,
+            _ => input::OTHER,
+        },
+        _ => input::OTHER,
+    }
+}
+
+/// The kind of repaint `r` asks for, from `names::redraw`.
+pub fn redraw_kind(r: &Redraw) -> &'static str {
+    match r {
+        Redraw::None => names::redraw::NONE,
+        Redraw::Status => names::redraw::STATUS,
+        Redraw::Lines(_) => names::redraw::LINES,
+        Redraw::All => names::redraw::ALL,
+    }
+}
+
+/// `key_draw_ms` again, under the name for this key's kinds; `None` before
+/// they are known.
+pub fn kind_value(k: &KeyTimes) -> Option<(String, f64)> {
+    if k.input.is_empty() || k.redraw.is_empty() {
+        return None;
+    }
+    let ms = k.snap_end_ns.saturating_sub(k.snap_start_ns) as f64 / MS as f64;
+    Some((marks::key_draw_kind(k.input, k.redraw), ms))
 }
 
 impl KeyTimes {
@@ -124,6 +172,7 @@ impl FirstFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor_core::input::{KeyEvent, Mods};
 
     fn get(v: &[(&str, f64)], n: &str) -> Option<f64> {
         v.iter().find(|(name, _)| *name == n).map(|p| p.1)
@@ -170,6 +219,44 @@ mod tests {
         assert!(close(get(&v, names::KEY_DRAW_MS), 2.0));
         assert!(close(get(&v, names::KEY_RENDER_MS), 4.0));
         assert_eq!(get(&v, KEY_TIME_FALLBACK), None);
+
+        assert_eq!(kind_value(&k), None, "no kinds recorded yet");
+        k.input = names::input::ENTER;
+        k.redraw = names::redraw::LINES;
+        let (name, draw) = kind_value(&k).unwrap();
+        assert_eq!(name, "key_draw_kind_ms.enter.lines");
+        assert!(close(Some(draw), 2.0), "the same draw time");
+    }
+
+    #[test]
+    fn key_kinds_name_the_input_and_redraw() {
+        let key = |key, mods| {
+            Input::Key(KeyEvent {
+                key,
+                mods,
+                time_ns: 0,
+            })
+        };
+        let plain = Mods::default();
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert_eq!(input_kind(&key(Key::Char('a'), plain)), "text");
+        assert_eq!(input_kind(&key(Key::Space, plain)), "text");
+        assert_eq!(input_kind(&Input::Text("é".into())), "text");
+        assert_eq!(input_kind(&key(Key::Char('s'), ctrl)), "other");
+        assert_eq!(input_kind(&key(Key::Enter, plain)), "enter");
+        assert_eq!(input_kind(&key(Key::Backspace, plain)), "backspace");
+        assert_eq!(input_kind(&key(Key::Delete, plain)), "delete");
+        for k in [Key::Left, Key::Right, Key::Up, Key::Down] {
+            assert_eq!(input_kind(&key(k, plain)), "arrow");
+        }
+        assert_eq!(input_kind(&key(Key::Tab, plain)), "other");
+        assert_eq!(redraw_kind(&Redraw::None), "none");
+        assert_eq!(redraw_kind(&Redraw::Status), "status");
+        assert_eq!(redraw_kind(&Redraw::Lines(0..1)), "lines");
+        assert_eq!(redraw_kind(&Redraw::All), "all");
     }
 
     #[test]

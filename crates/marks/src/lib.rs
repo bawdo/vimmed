@@ -49,6 +49,30 @@ pub mod names {
     pub const KEY_MS: &str = "key_ms";
     pub const KEY_WAIT_MS: &str = "key_wait_ms";
     pub const KEY_DRAW_MS: &str = "key_draw_ms";
+    /// Logged beside each `key_draw_ms` with the same value, under
+    /// `key_draw_kind_ms.<input>.<redraw>` (see `super::key_draw_kind`), so
+    /// the bench can group draw times by key and by repaint.
+    pub const KEY_DRAW_KIND_MS: &str = "key_draw_kind_ms";
+
+    /// What a key was, for `KEY_DRAW_KIND_MS`.
+    pub mod input {
+        /// A printable key or committed text.
+        pub const TEXT: &str = "text";
+        pub const ENTER: &str = "enter";
+        pub const BACKSPACE: &str = "backspace";
+        pub const DELETE: &str = "delete";
+        /// Left, right, up or down.
+        pub const ARROW: &str = "arrow";
+        pub const OTHER: &str = "other";
+    }
+
+    /// What the editor asked to repaint for a key, for `KEY_DRAW_KIND_MS`.
+    pub mod redraw {
+        pub const NONE: &str = "none";
+        pub const STATUS: &str = "status";
+        pub const LINES: &str = "lines";
+        pub const ALL: &str = "all";
+    }
     pub const KEY_RENDER_MS: &str = "key_render_ms";
     pub const KEY_HANDLER_MS: &str = "key_handler_ms";
     pub const KEY_GLASS_MS: &str = "key_glass_ms";
@@ -62,6 +86,21 @@ pub mod names {
     pub const WINDOW_OPEN_URLS: &str = "window_open_urls";
     /// A value: the pid of a sibling window process just spawned.
     pub const ROUTED_SPAWN: &str = "routed_spawn";
+}
+
+/// The mark name for a key's draw time by kind: `input` from
+/// `names::input`, `redraw` from `names::redraw`.
+pub fn key_draw_kind(input: &str, redraw: &str) -> String {
+    format!("{}.{input}.{redraw}", names::KEY_DRAW_KIND_MS)
+}
+
+/// The (input, redraw) kinds in a name made by `key_draw_kind`.
+pub fn parse_key_draw_kind(name: &str) -> Option<(&str, &str)> {
+    let rest = name
+        .strip_prefix(names::KEY_DRAW_KIND_MS)?
+        .strip_prefix('.')?;
+    rest.split_once('.')
+        .filter(|(i, r)| !i.is_empty() && !r.is_empty() && !r.contains('.'))
 }
 
 struct Log {
@@ -144,6 +183,18 @@ mod tests {
             format_line(names::FIRST_FRAME, 12.3449),
             "first_frame,12.345"
         );
+    }
+
+    #[test]
+    fn key_draw_kind_names_round_trip() {
+        let n = key_draw_kind(names::input::ENTER, names::redraw::LINES);
+        assert_eq!(n, "key_draw_kind_ms.enter.lines");
+        assert_eq!(format_line(&n, 1.5), "key_draw_kind_ms.enter.lines,1.500");
+        assert_eq!(parse_key_draw_kind(&n), Some(("enter", "lines")));
+        assert_eq!(parse_key_draw_kind(names::KEY_DRAW_MS), None);
+        assert_eq!(parse_key_draw_kind("key_draw_kind_ms"), None);
+        assert_eq!(parse_key_draw_kind("key_draw_kind_ms.enter"), None);
+        assert_eq!(parse_key_draw_kind("key_draw_kind_msx.a.b"), None);
     }
 
     #[test]
