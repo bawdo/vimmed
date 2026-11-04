@@ -12,7 +12,8 @@
 //! timer, as the shell's wakes would.
 //!
 //! The timer wraps `paint_lines` only. The p95 must stay under the 2 ms
-//! keystroke draw budget.
+//! keystroke draw budget, and after every paint the image line must still
+//! hold its resampled copy (a blit, not a fast placeholder).
 
 mod common;
 
@@ -92,6 +93,8 @@ fn enter_above_image_on_fixture() {
 
         let mut times = Vec::with_capacity(ITERS);
         for n in 0..ITERS {
+            // Where the image is once this key is applied.
+            let shifted = if n % 2 == 0 { image + 1 } else { image };
             let range = if n % 2 == 0 {
                 src.insert_line(edit + 1, "");
                 src.cursor = Pos {
@@ -110,6 +113,13 @@ fn enter_above_image_on_fixture() {
             let start = Instant::now();
             v.paint_lines(&src, range);
             times.push(start.elapsed());
+            // Outside the timer, before any poll could hand a copy over: the
+            // paint blitted the image, it did not fall back to the placeholder.
+            assert!(
+                v.has_scaled_image(shifted),
+                "key {n}: the image on line {} lost its copy",
+                shifted + 1
+            );
             v.take_damage();
             v.poll_async();
             v.take_damage();

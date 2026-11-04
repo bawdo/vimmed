@@ -657,8 +657,8 @@ impl DocView {
     /// source: images resampled on the worker into the space their lines
     /// already reserved (a decode alone paints nothing new: its placeholder
     /// stays until the resampled copy lands), and code colour onto lines that
-    /// keep their metrics. No relayout of other lines. Returns true when rows were damaged; the shell then copies
-    /// `take_damage()` to the screen.
+    /// keep their metrics. No relayout of other lines. Returns true when rows
+    /// were damaged; the shell then copies `take_damage()` to the screen.
     pub fn poll_async(&mut self) -> bool {
         let images = self.poll_images();
         let code = self.poll_highlight();
@@ -707,6 +707,8 @@ impl DocView {
                     if img.scaled.is_none() {
                         continue;
                     }
+                    // The image covers its box: the pending label goes.
+                    self.lines[i].label = None;
                 }
                 // A decode that failed: repaint the placeholder over its label.
                 _ if was_pending => {}
@@ -1051,10 +1053,23 @@ impl DocView {
                 );
                 let r = images.reserve(i, src);
                 let known = r.w_pt > 0.0;
+                let boxed = known.then(|| ((r.w_pt * s).round(), (r.h_pt * s).ceil()));
+                // Keep the resampled copy while the box and the image are
+                // unchanged. Otherwise take one already made, or ask the
+                // worker for it and paint as a pending decode until it lands.
+                let scaled = match (&r.state, boxed) {
+                    (ImageState::Ready(_), Some((w_px, h_px))) => old_image
+                        .filter(|o| o.src == *src && o.w_px == w_px && o.h_px == h_px)
+                        .and_then(|o| o.scaled)
+                        .or_else(|| images.scaled(src, w_px as u32, h_px as u32)),
+                    _ => None,
+                };
                 let mut link = false;
                 let label = match &r.state {
-                    ImageState::Ready(_) => None,
-                    ImageState::Pending => (!alt.is_empty()).then(|| alt.clone()),
+                    ImageState::Ready(_) if scaled.is_some() => None,
+                    ImageState::Ready(_) | ImageState::Pending => {
+                        (!alt.is_empty()).then(|| alt.clone())
+                    }
                     ImageState::Missing if alt.is_empty() => Some(IMAGE_NOT_FOUND.to_owned()),
                     ImageState::Missing => Some(alt.clone()),
                     ImageState::Remote(url) => {
@@ -1076,30 +1091,15 @@ impl DocView {
                     None => slot.label = None,
                 }
                 let label_h = slot.label.as_ref().map_or(0.0, |c| c.laid.height.ceil());
-                let (w_px, h_px) = if known {
-                    ((r.w_pt * s).round(), (r.h_pt * s).ceil())
-                } else {
-                    (width, slot.height.max(label_h))
-                };
+                let (w_px, h_px) = boxed.unwrap_or((width, slot.height.max(label_h)));
                 slot.height = h_px;
-                // Keep the resampled copy while the box and the image are
-                // unchanged. Otherwise take one already made, or ask the
-                // worker for it and paint the placeholder until it lands.
-                let kept = old_image
-                    .filter(|o| o.src == *src && o.w_px == w_px && o.h_px == h_px)
-                    .and_then(|o| o.scaled);
-                let mut line = ImageLine {
+                slot.image = Some(ImageLine {
                     src: src.clone(),
                     w_px,
                     h_px,
                     state: r.state,
-                    scaled: None,
-                };
-                if matches!(line.state, ImageState::Ready(_)) {
-                    let (bw, bh) = line.box_px();
-                    line.scaled = kept.or_else(|| images.scaled(src, bw, bh));
-                }
-                slot.image = Some(line);
+                    scaled,
+                });
             }
             _ => slot.label = None,
         }

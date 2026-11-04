@@ -315,6 +315,46 @@ fn claim(images: &mut Images, src: &str, w: u32, h: u32) -> Scaled {
 }
 
 #[test]
+fn pending_resample_keeps_the_alt_label() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    write_png(dir.path(), "img1.png", 1200, 700);
+    let (w, _) = waker();
+    let src = Fake::new(&["alpha", "![a picture](img1.png)", "omega"], t.clone());
+    let mut v = view(&t, 2.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    until("the image to land", || v.poll_async());
+
+    // Decoded, but the new box has no copy yet: paint as a pending decode
+    // does, the placeholder with the alt text on it.
+    v.resize(W_PT, H_PT, 1.0);
+    v.paint_all(&src);
+    assert!(!v.has_scaled_image(1));
+    let ph = t.color(TokenId::ColorImagePlaceholder);
+    let top = t.px(TokenId::SpacePageTop).round() as usize + v.line_height_px(0).unwrap() as usize;
+    let left = (W_PT / 2.0 - t.px(TokenId::SpaceColumn) / 2.0) as usize;
+    let label_rows = top..top + t.px(TokenId::FontSize) as usize * 2;
+    let inked = |v: &editor_render::view::DocView, colour: [u8; 3]| {
+        (left..left + 120).any(|x| label_rows.clone().any(|y| pixel(v, x, y)[..3] != colour))
+    };
+    assert!(
+        inked(&v, [ph.r, ph.g, ph.b]),
+        "the alt label is drawn on the placeholder"
+    );
+
+    until("the new box to land", || v.poll_async());
+    v.paint_all(&src);
+    assert!(v.has_scaled_image(1));
+    let img = pixel(&v, left + 2, top + 2);
+    assert!(img[0] > 150 && img[1] < 80, "the image, got {img:?}");
+    assert!(
+        !inked(&v, [img[0], img[1], img[2]]),
+        "no label over the landed image"
+    );
+}
+
+#[test]
 fn image_resample_not_on_ui_thread() {
     let t = Tokens::defaults(Theme::Light);
     let dir = TempDir::new();
