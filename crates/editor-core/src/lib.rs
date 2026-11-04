@@ -15,6 +15,7 @@ pub mod search;
 pub mod status;
 pub mod strings;
 pub mod substitute;
+pub mod tables;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod tokens;
