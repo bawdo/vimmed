@@ -38,6 +38,7 @@ impl Editor {
                 line.truncate(grapheme::prev(line, line.len()));
                 status
             }
+            Key::Enter if self.linking() => self.finish_link(),
             Key::Enter => {
                 let input = std::mem::take(&mut self.cmdline);
                 self.mode = Mode::Normal;
@@ -70,8 +71,12 @@ impl Editor {
         }
     }
 
-    /// Esc on the command line: back to Normal, the line dropped.
+    /// Esc on the command line: back to Normal, the line dropped. The
+    /// link prompt goes back to where it came from.
     fn leave_cmdline(&mut self) -> Effects {
+        if self.linking() {
+            return self.cancel_link();
+        }
         self.mode = Mode::Normal;
         self.cmdline.clear();
         Effects {

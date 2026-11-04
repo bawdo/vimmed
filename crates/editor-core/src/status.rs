@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(
             left(&e),
             StatusLeft::Input {
-                prefix: ':',
+                prefix: ":",
                 text: "s/a".into(),
                 cursor: 3,
             }
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(
             left(&e),
             StatusLeft::Input {
-                prefix: '?',
+                prefix: "?",
                 text: "b".into(),
                 cursor: 1,
             }
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(
             left(&e),
             StatusLeft::Input {
-                prefix: '/',
+                prefix: "/",
                 text: String::new(),
                 cursor: 0,
             }
@@ -179,7 +179,7 @@ mod tests {
         let mut e = ed("abc");
         keys(&mut e, ":foo<CR>:");
         assert_eq!(e.message(), None);
-        assert!(matches!(left(&e), StatusLeft::Input { prefix: ':', .. }));
+        assert!(matches!(left(&e), StatusLeft::Input { prefix: ":", .. }));
     }
 
     #[test]

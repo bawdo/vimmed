@@ -21,7 +21,9 @@ impl Editor {
     /// command `.` repeats, and in Visual without leaving it. Elsewhere,
     /// and in reader mode, nothing.
     pub(super) fn ctrl_space(&mut self, k: KeyEvent) -> Effects {
-        if self.reader {
+        // The link prompt is a line being typed: the document stays as
+        // it is, so the range the link wraps stays right.
+        if self.reader || self.linking() {
             return Effects::default();
         }
         if !self.cfg.vim {

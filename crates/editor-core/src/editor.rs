@@ -50,12 +50,16 @@
 //! read-only, with keys that scroll the view; `:help` shows the cheat
 //! sheet over the document until Esc.
 //!
+//! Links (`link`): `open_link` opens a link's target through the host, and
+//! Primary+L opens the command line as the `link: ` prompt.
+//!
 //! Every position that comes from the user goes through `Buffer::clamp` or
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
 
 mod cmdline;
 mod ime;
+mod link;
 mod list_keys;
 mod prompt;
 mod reader;
@@ -211,6 +215,12 @@ pub struct Editor {
     preedit: Option<(String, usize)>,
     /// The question Prompt mode asks (`prompt`).
     asking: Option<Prompt>,
+    /// The file the document is from: an empty path for an unnamed
+    /// buffer. Links resolve against its directory (`link`).
+    path: PathBuf,
+    /// The link prompt, while the command line is asking for a link
+    /// (`link`).
+    linking: Option<link::Linking>,
 }
 
 impl Editor {
@@ -333,6 +343,8 @@ impl Editor {
             saver: Box::new(Unwired),
             preedit: None,
             asking: None,
+            path: req.path,
+            linking: None,
         }
     }
 
@@ -432,6 +444,9 @@ impl Editor {
                     time_ns: 0,
                 }))
             });
+        }
+        if self.linking() {
+            return self.cmdline_input(text);
         }
         if !self.cfg.vim || self.mode == Mode::Insert {
             return self.insert(text);
@@ -612,6 +627,10 @@ impl Editor {
             Key::Char('r' | 'R') if primary && k.mods.shift && !k.mods.alt => {
                 return self.toggle_reader();
             }
+            // Primary+L opens the link prompt (`link`).
+            Key::Char('l') if primary && !k.mods.shift && !k.mods.alt => {
+                return self.start_link();
+            }
             // Primary+S is `:w`, from any mode but Confirm, whose `:s///c`
             // session is one undo step a save point must not split. Reader
             // view is read-only, so it does nothing there (nor can `:w`
@@ -659,6 +678,10 @@ impl Editor {
         if (k.mods.ctrl || self.platform.primary(k.mods)) && !redo {
             // Shortcuts arrive with later tasks.
             return Effects::default();
+        }
+        // The link prompt is the command line, with vim or without.
+        if self.linking() {
+            return self.command_key(k);
         }
         // Reader view's keys scroll the view (`reader`).
         if self.reader
@@ -1200,6 +1223,12 @@ impl Editor {
     /// to Normal. In Insert the cursor ends after the text; in Normal on
     /// its last grapheme.
     fn paste(&mut self) -> Effects {
+        // The link prompt takes the clipboard as typed text (a URL to
+        // paste in), line breaks dropped.
+        if self.linking() {
+            let text = self.host.clipboard_get().unwrap_or_default();
+            return self.cmdline_input(&text);
+        }
         let active = self.takes_keys() || self.mode == Mode::Insert;
         if self.reader || !active {
             return Effects::default();
@@ -1669,9 +1698,10 @@ impl ViewSource for Editor {
             StatusLeft::Prompt(p)
         } else {
             let typed = match (self.mode, &self.searching) {
-                (Mode::Command, _) => Some((':', &self.cmdline)),
+                (Mode::Command, _) if self.linking() => Some((strings::LINK_PROMPT, &self.cmdline)),
+                (Mode::Command, _) => Some((":", &self.cmdline)),
                 (Mode::Search, Some(s)) => {
-                    Some((if s.search.forward { '/' } else { '?' }, &s.search.query))
+                    Some((if s.search.forward { "/" } else { "?" }, &s.search.query))
                 }
                 _ => None,
             };
@@ -1749,7 +1779,7 @@ impl ViewSource for Editor {
     /// Only Insert's composition shows in the document; the command line's
     /// and a search's show in the status bar (`status`).
     fn preedit(&self) -> Option<(&str, usize)> {
-        let typing = !self.cfg.vim || self.mode == Mode::Insert;
+        let typing = (!self.cfg.vim && !self.linking()) || self.mode == Mode::Insert;
         Editor::preedit(self).filter(|_| typing)
     }
     fn line_shifts_since(&self, since: Option<ShiftMark>) -> Option<LineShifts> {

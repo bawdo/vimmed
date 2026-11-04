@@ -37,9 +37,10 @@ pub enum StatusLeft {
     /// The mode name, for example `INSERT`.
     Mode(&'static str),
     /// A line being typed in the status bar: `:` commands, `/` and `?`
-    /// searches. `cursor` is a byte offset into `text`.
+    /// searches, the link prompt's `link: `. `cursor` is a byte offset
+    /// into `text`.
     Input {
-        prefix: char,
+        prefix: &'static str,
         text: String,
         cursor: usize,
     },

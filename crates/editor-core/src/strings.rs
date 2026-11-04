@@ -125,6 +125,9 @@ pub fn confirm_replace(replacement: &str) -> String {
 /// Status message prefix when a link target does not exist; the path follows.
 pub const NO_SUCH_FILE: &str = "no such file: ";
 
+/// The status-line prompt Primary+L opens for a link's URL or path.
+pub const LINK_PROMPT: &str = "link: ";
+
 /// The table picker's size label: `<columns> x <rows>`.
 pub fn table_size(cols: u32, rows: u32) -> String {
     format!("{cols} x {rows}")

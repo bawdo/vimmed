@@ -2,7 +2,6 @@
 //! child processes must not inherit.
 
 use std::ffi::OsStr;
-use std::process::Command;
 
 /// Renderer variables a person (or the bench) may set to choose a renderer.
 pub const GSK_RENDERER: &str = "GSK_RENDERER";
@@ -27,17 +26,6 @@ pub fn strip_from_child(name: &OsStr, prefix: &str) -> bool {
         return false;
     };
     CHILD_STRIP.contains(&name) || (!prefix.is_empty() && name.starts_with(prefix))
-}
-
-/// A command for `program` with the stripped variables removed.
-pub fn child_command(program: impl AsRef<OsStr>) -> Command {
-    let mut cmd = Command::new(program);
-    for (name, _) in std::env::vars_os() {
-        if strip_from_child(&name, app_meta::ENV_PREFIX) {
-            cmd.env_remove(&name);
-        }
-    }
-    cmd
 }
 
 #[cfg(test)]
