@@ -121,7 +121,116 @@ fn capture(cmd: &mut Command) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-pub fn run(root: &Path, new_slug: &str) -> Result<(), String> {
+/// One old-name hit: the file, the form found, and its byte offset in the
+/// file's contents or, when `in_name` is set, in the entry's own name.
+#[derive(Debug)]
+pub struct Hit {
+    pub path: PathBuf,
+    pub form: String,
+    pub offset: usize,
+    pub in_name: bool,
+}
+
+/// Unpacks a gzipped tarball into `dest` (created if missing).
+pub fn unpack_tarball(tarball: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let ok = Command::new("tar")
+        .arg("-xzf")
+        .arg(tarball)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .map_err(|e| format!("tar: {e}"))?
+        .success();
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("tar could not unpack {}", tarball.display()))
+    }
+}
+
+/// Scans `path` (a file, or every file under a directory) for `forms`, in
+/// file contents and in the names of every entry below `path`. Symlinks are
+/// not followed; their target text is scanned instead. Returns the number
+/// of files scanned and the hits.
+pub fn scan_tree(path: &Path, forms: &[String]) -> Result<(usize, Vec<Hit>), String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+    if meta.is_dir() {
+        let (mut files, mut hits) = (0, Vec::new());
+        let entries = fs::read_dir(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read {}: {e}", path.display()))?;
+            let name = entry.file_name();
+            hits.extend(find_forms(name.as_encoded_bytes(), forms).into_iter().map(
+                |(form, offset)| Hit {
+                    path: entry.path(),
+                    form,
+                    offset,
+                    in_name: true,
+                },
+            ));
+            let (f, h) = scan_tree(&entry.path(), forms)?;
+            files += f;
+            hits.extend(h);
+        }
+        return Ok((files, hits));
+    }
+    let bytes = if meta.file_type().is_symlink() {
+        let target = fs::read_link(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        target.as_os_str().as_encoded_bytes().to_vec()
+    } else {
+        fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?
+    };
+    let hits = find_forms(&bytes, forms)
+        .into_iter()
+        .map(|(form, offset)| Hit {
+            path: path.to_path_buf(),
+            form,
+            offset,
+            in_name: false,
+        })
+        .collect();
+    Ok((1, hits))
+}
+
+/// Paths, relative to the package root, that the `.deb` and the `.rpm` must
+/// both install (the brief's install layout).
+pub fn expected_package_files(n: &Names) -> Vec<String> {
+    vec![
+        format!("usr/bin/{}", n.slug),
+        format!(
+            "{}/{}",
+            n.linux_libexec_dir.trim_start_matches('/'),
+            n.window_bin
+        ),
+        format!("usr/share/applications/{}.desktop", n.bundle_id),
+        format!("usr/share/metainfo/{}.metainfo.xml", n.bundle_id),
+    ]
+}
+
+/// What runs in the check container over the renamed copy: package, unpack
+/// both packages, and record the Linux launcher's `--version`.
+pub fn linux_script() -> String {
+    r#"set -eu
+cargo xtask package-linux
+t="$CARGO_TARGET_DIR"
+ex="$t/extract"
+rm -rf "$ex"
+mkdir -p "$ex/deb" "$ex/rpm"
+for f in "$t"/dist/*.deb; do dpkg-deb -R "$f" "$ex/deb"; done
+for f in "$t"/dist/*.rpm; do (cd "$ex/rpm" && rpm2cpio "$f" | cpio -idm --quiet); done
+"$t/release/launcher" --version > "$ex/version.txt"
+"#
+    .to_string()
+}
+
+/// One group of artefacts to scan, with a label for the summary.
+struct Artefact {
+    label: &'static str,
+    path: PathBuf,
+}
+
+pub fn run(root: &Path, new_slug: &str, linux: bool) -> Result<(), String> {
     let (old_slug, prefix) = read_manifest_names(root)?;
     let old = Names::from_slug(&old_slug, &prefix)?;
     let new = Names::from_slug(new_slug, &prefix)?;
@@ -173,45 +282,179 @@ pub fn run(root: &Path, new_slug: &str) -> Result<(), String> {
     }
     let target = copy.join("target");
     println!("rename test: building release copy as {new_slug} (this takes a few minutes)");
-    let status = Command::new("cargo")
-        .current_dir(&copy)
-        .args(["build", "--release", "--locked", "--workspace"])
-        .env("RUSTFLAGS", flags.join(" "))
-        .env("CARGO_TARGET_DIR", &target)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err("rename test: release build failed".into());
+    let in_copy = |args: &[&str]| -> Result<(), String> {
+        let ok = Command::new("cargo")
+            .current_dir(&copy)
+            .args(args)
+            .env("RUSTFLAGS", flags.join(" "))
+            .env("CARGO_TARGET_DIR", &target)
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .status()
+            .map_err(|e| e.to_string())?
+            .success();
+        if ok {
+            Ok(())
+        } else {
+            Err(format!("rename test: cargo {} failed", args.join(" ")))
+        }
+    };
+    in_copy(&["build", "--release", "--locked", "--workspace"])?;
+
+    let release = target.join("release");
+    let mut artefacts = vec![
+        Artefact {
+            label: "launcher",
+            path: release.join("launcher"),
+        },
+        Artefact {
+            label: "window",
+            path: release.join("window"),
+        },
+    ];
+    // The launcher must announce the new name.
+    let mut launchers = vec![release.join("launcher")];
+
+    // The `.app`, laid out by the copy's own xtask so its names are the new ones.
+    if cfg!(target_os = "macos") {
+        println!("rename test: bundling the copy");
+        in_copy(&[
+            "run",
+            "--locked",
+            "-p",
+            "xtask",
+            "--",
+            "bundle-mac",
+            "--release",
+        ])?;
+        let app = target.join("dist").join(format!("{}.app", new.bundle_name));
+        launchers.push(app.join("Contents/MacOS").join(&new.slug));
+        artefacts.push(Artefact {
+            label: ".app",
+            path: app,
+        });
+    }
+
+    for exe in &launchers {
+        for arg in ["--version", "--help"] {
+            let out = capture(Command::new(exe).arg(arg))?;
+            println!("{} {arg}: {out}", exe.display());
+            if !out.contains(&new.slug) {
+                return Err(format!(
+                    "{} {arg} does not show {}",
+                    exe.display(),
+                    new.slug
+                ));
+            }
+        }
+    }
+
+    // The Linux packages, built and unpacked in the check container.
+    if linux {
+        artefacts.extend(linux_packages(root, &copy, &new)?);
     }
 
     // Scan every output byte for old-name forms.
-    let release = target.join("release");
-    let outputs = [release.join("launcher"), release.join("window")];
-    let mut hits = 0usize;
-    let mut files = 0usize;
-    for path in &outputs {
-        let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        files += 1;
-        for (form, off) in find_forms(&bytes, &forms) {
-            hits += 1;
-            eprintln!("HIT {} offset {off} form {form:?}", path.display());
+    let (mut hits, mut files) = (0usize, 0usize);
+    for a in &artefacts {
+        let (f, h) = scan_tree(&a.path, &forms)?;
+        for hit in &h {
+            let place = if hit.in_name { "name" } else { "offset" };
+            eprintln!(
+                "HIT {} {place} {} form {:?}",
+                hit.path.display(),
+                hit.offset,
+                hit.form
+            );
         }
+        println!("rename test: {}: {} hits in {f} files", a.label, h.len());
+        files += f;
+        hits += h.len();
     }
     println!("rename test: {hits} hits in {files} files");
-
-    // The launcher must announce the new name.
-    for arg in ["--version", "--help"] {
-        let out = capture(Command::new(release.join("launcher")).arg(arg))?;
-        println!("launcher {arg}: {out}");
-        if !out.contains(&new.slug) {
-            return Err(format!("launcher {arg} does not show {}", new.slug));
-        }
-    }
     if hits > 0 {
         return Err(format!("rename test: {hits} old-name hit(s)"));
     }
     Ok(())
+}
+
+/// Packages the renamed `copy` in the check container, checks both packages
+/// hold the install layout under the new names and that the Linux launcher
+/// prints the new name, and returns the artefacts to scan.
+fn linux_packages(root: &Path, copy: &Path, new: &Names) -> Result<Vec<Artefact>, String> {
+    println!("rename test: packaging the copy in the Linux check container");
+    let (image, volume) = crate::ci::check_image(root).map_err(|e| format!("rename test: {e}"))?;
+    let env = [
+        ("CARGO_TARGET_DIR", "/work/target-linux".to_string()),
+        (
+            "RUSTFLAGS",
+            "--remap-path-prefix=/work=/build --remap-path-prefix=/cargo/home=/cargo".to_string(),
+        ),
+    ];
+    crate::ci::run_in_container(copy, &image, &volume, &env, &linux_script())
+        .map_err(|e| format!("rename test: Linux packaging failed: {e}"))?;
+
+    let t = copy.join("target-linux");
+    let ex = t.join("extract");
+    for kind in ["deb", "rpm"] {
+        for rel in expected_package_files(new) {
+            let p = ex.join(kind).join(&rel);
+            if !p.is_file() {
+                return Err(format!("rename test: the .{kind} lacks /{rel}"));
+            }
+        }
+    }
+    let pkgbuild = t.join("pkg/arch/PKGBUILD");
+    if !pkgbuild.is_file() {
+        return Err(format!("rename test: no {}", pkgbuild.display()));
+    }
+    // The source tarball is compressed, so scanning it raw proves nothing:
+    // unpack it and scan its contents and paths as a group of its own.
+    let tarball = t
+        .join("pkg/arch")
+        .join(format!("{}-{}.tar.gz", new.kebab, app_meta::VERSION));
+    if !tarball.is_file() {
+        return Err(format!("rename test: no {}", tarball.display()));
+    }
+    let tree = ex.join("arch-source");
+    unpack_tarball(&tarball, &tree)?;
+    let version = fs::read_to_string(ex.join("version.txt")).unwrap_or_default();
+    println!("Linux launcher --version: {}", version.trim());
+    if !version.contains(&new.slug) {
+        return Err(format!(
+            "rename test: Linux launcher --version does not show {}",
+            new.slug
+        ));
+    }
+    Ok(vec![
+        Artefact {
+            label: "Linux binaries",
+            path: t.join("release/launcher"),
+        },
+        Artefact {
+            label: "Linux window",
+            path: t.join("release/window"),
+        },
+        Artefact {
+            label: "staging and PKGBUILD",
+            path: t.join("pkg"),
+        },
+        Artefact {
+            label: ".deb and .rpm files",
+            path: t.join("dist"),
+        },
+        Artefact {
+            label: ".deb contents",
+            path: ex.join("deb"),
+        },
+        Artefact {
+            label: ".rpm contents",
+            path: ex.join("rpm"),
+        },
+        Artefact {
+            label: "Arch source tarball contents",
+            path: tree,
+        },
+    ])
 }
 
 #[cfg(test)]
@@ -280,6 +523,88 @@ mod tests {
         assert_eq!(paths.len(), 8);
         drop(dirs);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn scan_tree_counts_files_and_hits_recursively() {
+        let base = scratch_base("scan");
+        let n = Names::from_slug("abc_def", "com.bawdo").unwrap();
+        fs::create_dir_all(base.join("a/b")).unwrap();
+        fs::write(base.join("a/clean"), b"nothing here").unwrap();
+        fs::write(base.join("a/b/dirty"), b"xx AbcDef yy abc-def").unwrap();
+        std::os::unix::fs::symlink("/usr/bin/abc_def", base.join("a/link")).unwrap();
+        let (files, hits) = scan_tree(&base, &name_forms(&n)).unwrap();
+        assert_eq!(files, 3);
+        assert_eq!(hits.len(), 3, "two in the file, one in the link target");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn planted_name_in_the_source_tarball_is_reported() {
+        use crate::package_linux::{source_files, source_tarball};
+        let base = scratch_base("tarball");
+        let n = Names::from_slug("abc_def", "com.bawdo").unwrap();
+        let tree = base.join("tree");
+        for (f, text) in [
+            ("Cargo.toml", "[workspace]\n"),
+            ("crates/x/src/lib.rs", "// clean\n"),
+            ("crates/x/src/planted.rs", "const N: &str = \"AbcDef\";\n"),
+            (
+                "crates/abc_def/src/lib.rs",
+                "// clean contents, named path\n",
+            ),
+            ("docs/plan.md", "abc_def is not a build input\n"),
+        ] {
+            let p = tree.join(f);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        }
+        let tarball = base.join("arch/t-1.tar.gz");
+        source_tarball(&tree, &source_files(&tree).unwrap(), &tarball, "t-1").unwrap();
+
+        let out = base.join("unpacked");
+        unpack_tarball(&tarball, &out).unwrap();
+        let (files, hits) = scan_tree(&out, &name_forms(&n)).unwrap();
+        assert_eq!(files, 4, "docs/ stays out of the tarball");
+        let in_content = hits.iter().filter(|h| !h.in_name).count();
+        let in_names = hits.iter().filter(|h| h.in_name).count();
+        assert_eq!(in_content, 1, "the planted constant");
+        assert_eq!(in_names, 1, "the crates/abc_def directory");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn scan_tree_of_a_single_file() {
+        let base = scratch_base("scan1");
+        let n = Names::from_slug("abc_def", "com.bawdo").unwrap();
+        fs::write(base.join("f"), b"ABC_DEF_X").unwrap();
+        let (files, hits) = scan_tree(&base.join("f"), &name_forms(&n)).unwrap();
+        assert_eq!((files, hits.len()), (1, 1));
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn expected_package_files_follow_the_install_layout() {
+        let n = Names::from_slug("abc_def", "com.bawdo").unwrap();
+        assert_eq!(
+            expected_package_files(&n),
+            [
+                "usr/bin/abc_def",
+                "usr/lib/abc_def/abc_def-window",
+                "usr/share/applications/com.bawdo.abc-def.desktop",
+                "usr/share/metainfo/com.bawdo.abc-def.metainfo.xml",
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_script_packages_and_extracts_both_formats() {
+        let s = linux_script();
+        assert!(s.contains("cargo xtask package-linux"));
+        assert!(s.contains("dpkg-deb -R"));
+        assert!(s.contains("rpm2cpio"));
+        assert!(s.contains("| cpio -idm"));
+        assert!(s.contains("--version"));
     }
 
     #[test]

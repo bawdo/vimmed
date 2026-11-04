@@ -1,0 +1,42 @@
+# Rendered by `cargo xtask package-linux` into `<target>/pkg/arch/`, beside
+# the source tarball and the rendered desktop and metainfo files it lists.
+# Build it there with `makepkg`.
+
+# Maintainer: {{maintainer}}
+
+pkgname={{kebab}}
+pkgver={{version}}
+pkgrel=1
+pkgdesc='A fast, keyboard-driven Markdown editor'
+arch=('x86_64' 'aarch64')
+license=('{{license}}')
+depends=('gtk4' 'fontconfig' 'glibc' 'gcc-libs')
+makedepends=('rustup')
+source=("{{kebab}}-{{version}}.tar.gz"
+        "{{bundle_id}}.desktop"
+        "{{bundle_id}}.metainfo.xml")
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+_tree="{{kebab}}-{{version}}"
+
+prepare() {
+  cd "$srcdir/$_tree"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$srcdir/$_tree"
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p launcher -p window
+}
+
+package() {
+  cd "$srcdir/$_tree"
+  install -Dm755 target/release/launcher "$pkgdir/usr/bin/{{slug}}"
+  install -Dm755 target/release/window "$pkgdir{{libexec}}/{{slug}}-window"
+  install -Dm644 "$srcdir/{{bundle_id}}.desktop" \
+    "$pkgdir/usr/share/applications/{{bundle_id}}.desktop"
+  install -Dm644 "$srcdir/{{bundle_id}}.metainfo.xml" \
+    "$pkgdir/usr/share/metainfo/{{bundle_id}}.metainfo.xml"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

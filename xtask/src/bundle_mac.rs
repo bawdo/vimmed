@@ -7,11 +7,16 @@
 //! - `Contents/Info.plist`, from `packaging/templates/Info.plist.in`.
 //!
 //! Nothing here needs the WindowServer.
+//!
+//! `cargo xtask install-mac` builds the release bundle and installs it for
+//! the current user: `~/Applications/<BUNDLE_NAME>.app`, and the symlink
+//! `~/.local/bin/<SLUG>` to the launcher inside it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::templates;
+use app_meta::derive::Names;
 
 /// Where the bundle goes, relative to the workspace root.
 pub fn app_dir(root: &Path) -> PathBuf {
@@ -67,18 +72,178 @@ pub fn write_bundle(root: &Path, bin: &Path, app: &Path) -> Result<(), String> {
         let (src, dst) = (bin.join(from), macos.join(to));
         std::fs::copy(&src, &dst).map_err(|e| err("copy", &src, e))?;
     }
-    let tpl = root.join("packaging/templates/Info.plist.in");
-    let text = std::fs::read_to_string(&tpl).map_err(|e| err("read", &tpl, e))?;
-    let plist = templates::render(&text, &templates::app_vars())?;
+    let plist = templates::render_file(root, "Info.plist.in", &templates::current_names())?;
     let contents = app.join("Contents");
     std::fs::write(contents.join("Info.plist"), plist).map_err(|e| err("write", &contents, e))?;
     std::fs::write(contents.join("PkgInfo"), "APPL????").map_err(|e| err("write", &contents, e))?;
     Ok(())
 }
 
+/// Where `install-mac` puts things for a given home directory.
+#[derive(Debug)]
+pub struct InstallPaths {
+    /// `~/Applications/<BUNDLE_NAME>.app`
+    pub app: PathBuf,
+    /// `~/.local/bin/<SLUG>`, the command on PATH.
+    pub link: PathBuf,
+    /// The launcher inside the installed bundle, which `link` points at.
+    pub link_target: PathBuf,
+}
+
+pub fn install_paths(home: &Path, n: &Names) -> InstallPaths {
+    let app = home
+        .join("Applications")
+        .join(format!("{}.app", n.bundle_name));
+    InstallPaths {
+        link: home.join(".local/bin").join(&n.slug),
+        link_target: app.join("Contents/MacOS").join(&n.slug),
+        app,
+    }
+}
+
+/// Copies `src_app` to `~/Applications` (replacing an older copy) and points
+/// `~/.local/bin/<SLUG>` at its launcher. The launcher resolves the link to
+/// find the window binary beside it. A regular file where the link goes is
+/// left alone and reported, since it isn't ours to replace.
+pub fn install(src_app: &Path, home: &Path, n: &Names) -> Result<InstallPaths, String> {
+    let p = install_paths(home, n);
+    if let Ok(meta) = std::fs::symlink_metadata(&p.link)
+        && !meta.file_type().is_symlink()
+    {
+        return Err(format!(
+            "{} exists and is not a symlink; move it aside and run again",
+            p.link.display()
+        ));
+    }
+    let err =
+        |what: &str, path: &Path, e: std::io::Error| format!("{what} {}: {e}", path.display());
+    if p.app.exists() {
+        std::fs::remove_dir_all(&p.app).map_err(|e| err("remove", &p.app, e))?;
+    }
+    copy_tree(src_app, &p.app)?;
+    let bin = p.link.parent().expect("the link has a parent");
+    std::fs::create_dir_all(bin).map_err(|e| err("create", bin, e))?;
+    if std::fs::symlink_metadata(&p.link).is_ok() {
+        std::fs::remove_file(&p.link).map_err(|e| err("remove", &p.link, e))?;
+    }
+    std::os::unix::fs::symlink(&p.link_target, &p.link).map_err(|e| err("link", &p.link, e))?;
+    Ok(p)
+}
+
+/// Copies a directory tree, keeping file permissions and symlinks.
+pub fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    let err =
+        |what: &str, path: &Path, e: std::io::Error| format!("{what} {}: {e}", path.display());
+    std::fs::create_dir_all(to).map_err(|e| err("create", to, e))?;
+    for entry in std::fs::read_dir(from).map_err(|e| err("read", from, e))? {
+        let entry = entry.map_err(|e| err("read", from, e))?;
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type().map_err(|e| err("stat", &src, e))?;
+        if kind.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if kind.is_symlink() {
+            let target = std::fs::read_link(&src).map_err(|e| err("read link", &src, e))?;
+            std::os::unix::fs::symlink(target, &dst).map_err(|e| err("link", &dst, e))?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| err("copy", &src, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// `cargo xtask install-mac`: builds the release bundle, then installs it
+/// for the current user.
+pub fn install_mac(root: &Path, args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: cargo xtask install-mac".into());
+    }
+    if !cfg!(target_os = "macos") {
+        return Err("install-mac runs on macOS only".into());
+    }
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    run(root, &["--release".into()])?;
+    let p = install(
+        &app_dir(root),
+        Path::new(&home),
+        &templates::current_names(),
+    )?;
+    println!("installed: {}", p.app.display());
+    println!(
+        "command:   {} -> {}",
+        p.link.display(),
+        p.link_target.display()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn abc() -> Names {
+        Names::from_slug("abc_def", "com.bawdo").unwrap()
+    }
+
+    fn fake_app(dir: &Path) -> PathBuf {
+        let app = dir.join("AbcDef.app");
+        let macos = app.join("Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::write(macos.join("abc_def"), "l").unwrap();
+        std::fs::write(macos.join("AbcDef"), "w").unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), "p").unwrap();
+        app
+    }
+
+    #[test]
+    fn install_paths_are_under_home() {
+        let p = install_paths(Path::new("/h"), &abc());
+        assert_eq!(p.app, Path::new("/h/Applications/AbcDef.app"));
+        assert_eq!(p.link, Path::new("/h/.local/bin/abc_def"));
+        assert_eq!(
+            p.link_target,
+            Path::new("/h/Applications/AbcDef.app/Contents/MacOS/abc_def")
+        );
+    }
+
+    #[test]
+    fn install_copies_the_app_and_links_the_launcher() {
+        let s = std::env::temp_dir().join(format!("install-mac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&s);
+        let src = fake_app(&s.join("dist"));
+        let home = s.join("home");
+        let p = install(&src, &home, &abc()).unwrap();
+        assert_eq!(std::fs::read_to_string(&p.link_target).unwrap(), "l");
+        assert_eq!(std::fs::read_link(&p.link).unwrap(), p.link_target);
+        // A second install replaces the old bundle and the old link.
+        std::fs::write(p.app.join("Contents/old"), "x").unwrap();
+        std::fs::write(src.join("Contents/MacOS/abc_def"), "l2").unwrap();
+        let p = install(&src, &home, &abc()).unwrap();
+        assert!(!p.app.join("Contents/old").exists());
+        assert_eq!(std::fs::read_to_string(&p.link).unwrap(), "l2");
+        std::fs::remove_dir_all(&s).unwrap();
+    }
+
+    #[test]
+    fn install_refuses_to_replace_a_regular_file() {
+        let s = std::env::temp_dir().join(format!("install-mac-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&s);
+        let src = fake_app(&s.join("dist"));
+        let home = s.join("home");
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin/abc_def"), "mine").unwrap();
+        assert!(install(&src, &home, &abc()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(home.join(".local/bin/abc_def")).unwrap(),
+            "mine"
+        );
+        std::fs::remove_dir_all(&s).unwrap();
+    }
+
+    #[test]
+    fn install_mac_rejects_arguments() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        assert!(install_mac(&root, &["--force".into()]).is_err());
+    }
 
     #[test]
     fn lays_out_the_bundle() {

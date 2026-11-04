@@ -44,7 +44,7 @@ pub fn lint_name(root: &Path) -> Result<(), String> {
     lint::run(root, &app_meta::derive::Names::from_slug(&slug, &prefix)?)
 }
 fn rename_test(root: &Path) -> Result<(), String> {
-    rename::run(root, rename::DEFAULT_NAME)
+    rename::run(root, rename::DEFAULT_NAME, false)
 }
 
 const STEPS: &[Step] = &[
@@ -189,32 +189,44 @@ fn docker(root: &Path, args: &[&str]) -> Result<(), String> {
 
 /// Runs `script` with bash in the check container.
 fn in_container(root: &Path, image: &str, volume: &str, script: &str) -> Result<(), String> {
-    let work = format!("{}:{WORK}", root.display());
-    let cache = format!("{volume}:/cargo");
-    docker(
-        root,
-        &[
-            "run",
-            "--rm",
-            "-v",
-            &work,
-            "-v",
-            &cache,
-            "-w",
-            WORK,
-            "-e",
-            "CARGO_HOME=/cargo/home",
-            "-e",
-            "CARGO_TARGET_DIR=/cargo/target",
-            image,
-            "bash",
-            "-c",
-            script,
-        ],
-    )
+    let env = [("CARGO_TARGET_DIR", "/cargo/target".to_string())];
+    run_in_container(root, image, volume, &env, script)
 }
 
-pub fn linux_check(root: &Path) -> Result<(), String> {
+/// Runs `script` with bash in the check container, with `work` mounted at
+/// `/work`, the named `volume` at `/cargo`, `CARGO_HOME=/cargo/home`, and
+/// the extra `env`.
+pub fn run_in_container(
+    work: &Path,
+    image: &str,
+    volume: &str,
+    env: &[(&str, String)],
+    script: &str,
+) -> Result<(), String> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "-v".into(),
+        format!("{}:{WORK}", work.display()),
+        "-v".into(),
+        format!("{volume}:/cargo"),
+        "-w".into(),
+        WORK.into(),
+        "-e".into(),
+        "CARGO_HOME=/cargo/home".into(),
+    ];
+    for (k, v) in env {
+        args.push("-e".into());
+        args.push(format!("{k}={v}"));
+    }
+    args.extend([image.into(), "bash".into(), "-c".into(), script.into()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    docker(work, &args)
+}
+
+/// Builds the check image from `docker/Dockerfile.check` and returns its
+/// name and the name of its cargo volume.
+pub fn check_image(root: &Path) -> Result<(String, String), String> {
     let pinned = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .map_err(|e| format!("rust-toolchain.toml: {e}"))?;
     let channel = toolchain_channel(&pinned).ok_or("rust-toolchain.toml: no `channel` found")?;
@@ -231,7 +243,12 @@ pub fn linux_check(root: &Path) -> Result<(), String> {
         &image,
         "docker",
     ];
-    docker(root, &build_image).map_err(|e| format!("linux-check: image build failed: {e}"))?;
+    docker(root, &build_image).map_err(|e| format!("image build failed: {e}"))?;
+    Ok((image, volume))
+}
+
+pub fn linux_check(root: &Path) -> Result<(), String> {
+    let (image, volume) = check_image(root).map_err(|e| format!("linux-check: {e}"))?;
     let run = |script: &str| in_container(root, &image, &volume, script);
     run("cargo build --workspace --all-targets")
         .map_err(|e| format!("linux-check: build failed: {e}"))?;
