@@ -50,7 +50,10 @@ impl Ask {
             Ask::AlreadyOpen { pid } => strings::already_open(pid),
             Ask::Recovery => strings::RECOVERY_PROMPT.to_owned(),
             Ask::ChangedOnDisk { .. } => strings::CHANGED_ON_DISK_PROMPT.to_owned(),
-            Ask::OpenLink => strings::open_link_prompt(opening.unwrap_or_default()),
+            Ask::OpenLink => {
+                debug_assert!(opening.is_some(), "the open-link prompt has a target");
+                strings::open_link_prompt(opening.unwrap_or_default())
+            }
         }
     }
 

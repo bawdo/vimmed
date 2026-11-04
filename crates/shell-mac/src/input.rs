@@ -1,7 +1,8 @@
-//! Turning AppKit key events into editor input. The mapping is pure so it
-//! is tested everywhere; only `from_event` touches `NSEvent`.
+//! Turning AppKit key, mouse and scroll events into editor input. The
+//! mapping is pure so it is tested everywhere; only `from_event` touches
+//! `NSEvent` (and `app`, for the mouse, which needs the view's hit test).
 
-use editor_core::input::{Input, Key, KeyEvent, Mods};
+use editor_core::input::{Input, Key, KeyEvent, Mods, MouseKind};
 
 /// Virtual key codes from `HIToolbox/Events.h` (layout independent).
 mod code {
@@ -109,6 +110,31 @@ pub fn utf16_to_byte(text: &str, utf16: usize) -> usize {
         units += c.len_utf16();
     }
     text.len()
+}
+
+/// The editor's kind for a button press with AppKit's `clickCount`: the
+/// second click of a double-click is `DoubleClick`; any other press (a
+/// third click too) is `Down`.
+pub fn press_kind(click_count: isize) -> MouseKind {
+    if click_count == 2 {
+        MouseKind::DoubleClick
+    } else {
+        MouseKind::Down
+    }
+}
+
+/// Points down the document for a scroll event's `scrollingDeltaY`, which
+/// is positive towards the document's start. A trackpad's delta
+/// (`hasPreciseScrollingDeltas`) is in points already; a wheel's is in
+/// lines, which AppKit's scroll views scroll by the line height,
+/// `line_pt`.
+pub fn scroll_pt(delta_y: f64, precise: bool, line_pt: f32) -> f32 {
+    let lines_or_pt = -delta_y as f32;
+    if precise {
+        lines_or_pt
+    } else {
+        lines_or_pt * line_pt
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -251,6 +277,26 @@ mod tests {
         assert_eq!(utf16_to_byte("a😀b", 2), 5);
         assert_eq!(utf16_to_byte("ab", 9), 2);
         assert_eq!(utf16_to_byte("", 0), 0);
+    }
+
+    #[test]
+    fn the_second_click_is_a_double_click() {
+        assert_eq!(press_kind(1), MouseKind::Down);
+        assert_eq!(press_kind(2), MouseKind::DoubleClick);
+        // A third click starts over.
+        assert_eq!(press_kind(3), MouseKind::Down);
+        assert_eq!(press_kind(0), MouseKind::Down);
+    }
+
+    #[test]
+    fn scroll_deltas_become_points_down_the_document() {
+        // A trackpad's precise delta is points, up the document when
+        // positive.
+        assert_eq!(scroll_pt(3.5, true, 24.0), -3.5);
+        assert_eq!(scroll_pt(-2.0, true, 24.0), 2.0);
+        // A wheel's delta is lines.
+        assert_eq!(scroll_pt(-1.0, false, 24.0), 24.0);
+        assert_eq!(scroll_pt(2.0, false, 24.0), -48.0);
     }
 
     #[test]

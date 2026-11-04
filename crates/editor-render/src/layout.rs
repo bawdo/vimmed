@@ -197,6 +197,21 @@ impl LaidLine {
             .max(row.text.start)
     }
 
+    /// The display bytes of the cluster under the point `x, y` (pixels from
+    /// the line's top left), on the row `hit` picks. `None` left of the
+    /// row's first cluster, right of its last, or between clusters.
+    pub fn cluster_at(&self, x: f32, y: f32) -> Option<Range<usize>> {
+        let row = self
+            .geom
+            .iter()
+            .find(|r| y < r.top + r.height)
+            .or(self.geom.last())?;
+        row.glyphs
+            .iter()
+            .find(|g| g.x <= x && x < g.x + g.w)
+            .map(|g| g.bytes.clone())
+    }
+
     /// One rectangle per row covering the clusters that overlap display
     /// bytes `r`. Empty ranges give nothing.
     pub fn range_rects(&self, r: Range<usize>) -> Vec<RectF> {

@@ -4,6 +4,10 @@
 //! place with a `size.caret` caret), then the file name, `changes not
 //! saved` in `color.status.dirty` and any disk warnings in
 //! `color.status.warning`. On the right, the pending keys and `line:col`.
+//! A prompt or message too long for the room left of the right side keeps
+//! its start and end and loses its middle to an ellipsis, so the open-link
+//! question still shows the target's scheme or path head, its file name and
+//! the answers.
 //! It repaints only when its model changed, and damages only its own rows.
 //!
 //! Its layouts are cached by text and spans, and the spans carry every
@@ -18,6 +22,30 @@ use editor_core::view_model::{MsgKind, StatusLeft, ViewSource};
 use crate::layout::{FontRole, StyledSpan};
 use crate::paint::{blend, fill, span_for};
 use crate::view::{Cached, DocView, lay};
+
+/// A wrap width no status item reaches: an elided item is laid out on one
+/// row so its whole width can be measured.
+const NO_WRAP: f32 = 1.0e7;
+
+/// The ellipsis that stands for the chars an elided item leaves out.
+const ELLIPSIS: char = '\u{2026}';
+
+/// `text` cut to `keep` chars with an ellipsis in place of its middle:
+/// two fifths of them from its start (a path's head, or a URL's scheme and
+/// host) and the rest from its end (a file name, and a question's
+/// answers). `None` when it already fits, or too little would be left.
+fn elide_middle(text: &str, keep: usize) -> Option<String> {
+    let n = text.chars().count();
+    if keep >= n || keep < 2 {
+        return None;
+    }
+    let head = keep * 2 / 5;
+    let tail = keep - head;
+    let mut out: String = text.chars().take(head).collect();
+    out.push(ELLIPSIS);
+    out.extend(text.chars().skip(n - tail));
+    Some(out)
+}
 
 /// The colour a message of `kind` shows in.
 fn message_color(kind: MsgKind) -> TokenId {
@@ -60,6 +88,11 @@ impl DocView {
         // The left side, in order, and where the typed line's caret goes
         // in the first item.
         let mut caret = None;
+        // A prompt or message is shortened in its middle to fit.
+        let elide = matches!(
+            model.left,
+            StatusLeft::Prompt(_) | StatusLeft::Message { .. }
+        );
         let first = match &model.left {
             StatusLeft::Mode(m) => (m.to_string(), text_color),
             StatusLeft::Input {
@@ -92,25 +125,60 @@ impl DocView {
         // Lay every item out first: the right side is placed from its width.
         let mut old = std::mem::take(&mut self.status_cache);
         let mut slots: Vec<(Option<Cached>, usize)> = Vec::new();
-        for (k, (text, color)) in left.into_iter().chain(right).enumerate() {
-            if text.is_empty() {
-                continue;
-            }
+        let mono = |text: &str, color: TokenId| {
             let mut sp = span_for(&SpanStyle::plain(SpanBase::Body), 0..text.len(), t, s);
             sp.role = FontRole::Mono;
             sp.size_px = t.px(TokenId::FontSizeStatus) * s;
             sp.color = t.color(color);
-            let spans: Vec<StyledSpan> = vec![sp];
+            vec![sp]
+        };
+        let mut first_color = text_color;
+        for (k, (text, color)) in left.into_iter().chain(right).enumerate() {
+            if text.is_empty() {
+                continue;
+            }
+            // An elided item is laid on one row, to be measured whole.
+            let wrap = if k == 0 && elide { NO_WRAP } else { g.width };
+            if k == 0 {
+                first_color = color;
+            }
+            let spans: Vec<StyledSpan> = mono(&text, color);
             let mut slot = old
                 .iter()
-                .position(|c| c.key_matches(&text, &spans, g.width))
+                .position(|c| c.key_matches(&text, &spans, wrap))
                 .map(|p| old.swap_remove(p));
-            lay(self.layout.as_mut(), &mut slot, text, spans, g.width);
+            lay(self.layout.as_mut(), &mut slot, text, spans, wrap);
             slots.push((slot, k));
         }
 
         let pad = (t.px(TokenId::SpaceStatusPad) * s).round();
         let width = |c: &Option<Cached>| c.as_ref().map_or(0.0, |c| c.laid.width());
+        // The room a prompt or message has: the bar less its padding and
+        // the right side.
+        if elide && let Some(i) = slots.iter().position(|(_, k)| *k == 0) {
+            let right_w: f32 = slots
+                .iter()
+                .filter(|(_, k)| *k >= n_left)
+                .map(|(c, _)| width(c) + pad)
+                .sum();
+            let room = (g.width - 2.0 * pad - right_w).max(0.0);
+            let mut slot = slots[i].0.take();
+            for _ in 0..4 {
+                let Some(c) = slot.as_ref() else { break };
+                let (w, text) = (c.laid.width(), c.key_text().to_owned());
+                if w <= room {
+                    break;
+                }
+                let n = text.chars().count();
+                let keep = ((n as f32 * room / w).floor() as usize).saturating_sub(1);
+                let Some(short) = elide_middle(&text, keep) else {
+                    break;
+                };
+                let spans = mono(&short, first_color);
+                lay(self.layout.as_mut(), &mut slot, short, spans, NO_WRAP);
+            }
+            slots[i].0 = slot;
+        }
         let mut right_x = g.width
             - pad
             - slots

@@ -12,7 +12,8 @@
 //! The table picker `:table` opens (`editor_core::tables::TablePicker`)
 //! is painted the same way, as a panel under the cursor's line
 //! (`paint_picker`). `PickerLayout` places it and finds the cell under a
-//! point, for hover and clicks (TODO(Task 38): mouse input).
+//! point, for hover and clicks (`DocView::hit_test`). It stays on screen
+//! when its line scrolls off, and inside a narrow frame (`place`).
 
 use editor_core::help::{self, HelpRow};
 use editor_core::markdown::{SpanBase, SpanStyle};
@@ -207,15 +208,27 @@ impl PickerLayout {
     /// Anchored to the cursor's line (`line_top..line_bottom`): just under
     /// it, or just above it when the text area (which ends at
     /// `text_bottom`) has no room below, or at the frame's top when it has
-    /// none above either.
-    pub(crate) fn place(self, line_top: f32, line_bottom: f32, text_bottom: f32) -> PickerLayout {
+    /// none above either. It always stays on screen: with its line
+    /// scrolled off (the wheel scrolls without the cursor) it sits at the
+    /// top or bottom of the text area, the edge its line went past, and it
+    /// moves left to end at the frame's right edge (`frame_w`) when it
+    /// would pass it, but never past the left edge.
+    pub(crate) fn place(
+        self,
+        line_top: f32,
+        line_bottom: f32,
+        text_bottom: f32,
+        frame_w: f32,
+    ) -> PickerLayout {
         let h = self.height();
         let y = if line_bottom + h <= text_bottom {
             line_bottom
         } else {
-            (line_top - h).max(0.0)
+            line_top - h
         };
-        PickerLayout { y, ..self }
+        let y = y.min(text_bottom - h).max(0.0);
+        let x = self.x.min(frame_w - self.width()).max(0.0);
+        PickerLayout { x, y, ..self }
     }
 
     /// The cell under the point `x, y` (pixels), as `(col, row)`: the cell,
@@ -237,8 +250,8 @@ impl PickerLayout {
 impl DocView {
     /// The table picker's cell under the point `x_pt, y_pt`, as `(col,
     /// row)`, while it shows (as last painted). `None` without it, or off
-    /// its grid. For the shell to turn hover and clicks into
-    /// `TablePicker::select` (TODO(Task 38): not wired yet).
+    /// its grid. `hit_test` reports it as `Zone::Picker`, for the editor
+    /// to turn hover and clicks into `TablePicker::select`.
     pub fn picker_cell_at(&self, x_pt: f32, y_pt: f32) -> Option<(u32, u32)> {
         let s = self.frame.scale;
         self.picker_at?.cell_at(x_pt * s, y_pt * s)
@@ -289,7 +302,7 @@ impl DocView {
         let line = self.picker_line;
         let top = self.line_top_px(line).unwrap_or(g.page_top);
         let bottom = top + self.line_height_px(line).unwrap_or(0.0);
-        let at = at.place(top, bottom, g.text_bottom);
+        let at = at.place(top, bottom, g.text_bottom, g.width);
 
         let clip = 0.0..g.text_bottom;
         let pix = &mut self.frame.pixmap;
@@ -399,15 +412,35 @@ mod tests {
     #[test]
     fn placed_under_the_line_or_above_when_no_room() {
         // Room below: just under the line.
-        let g = grid().place(100.0, 120.0, 400.0);
+        let g = grid().place(100.0, 120.0, 400.0, 500.0);
         assert_eq!(g.y, 120.0);
         // No room below: just above the line.
-        let g = grid().place(100.0, 120.0, 150.0);
+        let g = grid().place(100.0, 120.0, 150.0, 500.0);
         assert_eq!(g.y, 100.0 - g.height());
         // No room either way: at the top of the frame.
-        let g = grid().place(10.0, 20.0, 50.0);
+        let g = grid().place(10.0, 20.0, 50.0, 500.0);
         assert_eq!(g.y, 0.0);
         // Across, it stays where it was put.
         assert_eq!(g.x, 10.0);
+    }
+
+    #[test]
+    fn placed_on_screen_when_its_line_is_scrolled_off() {
+        // The line far above the top: at the top.
+        let g = grid().place(-300.0, -280.0, 400.0, 500.0);
+        assert_eq!(g.y, 0.0);
+        // The line below the text area: its bottom on the text's bottom.
+        let g = grid().place(500.0, 520.0, 400.0, 500.0);
+        assert_eq!(g.y, 400.0 - g.height());
+    }
+
+    #[test]
+    fn placed_inside_a_narrow_frame() {
+        // 44 wide at x 10 in a 40 px frame: from the left edge.
+        let g = grid().place(100.0, 120.0, 400.0, 40.0);
+        assert_eq!(g.x, 0.0);
+        // In a 50 px frame: moved left to end at the right edge.
+        let g = grid().place(100.0, 120.0, 400.0, 50.0);
+        assert_eq!(g.x, 6.0);
     }
 }

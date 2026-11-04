@@ -35,9 +35,11 @@ impl Redraw {
 }
 
 /// A scroll of the view that leaves the cursor where it is (reader view's
-/// keys).
+/// keys, and the wheel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scroll {
+    /// This many points down (up when negative): the wheel and trackpad.
+    Points(i32),
     /// This many source lines down (up when negative).
     Lines(i32),
     /// This many heights of the text area down (up when negative).

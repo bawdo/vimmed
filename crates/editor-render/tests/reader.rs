@@ -41,7 +41,7 @@ fn primary_shift() -> Mods {
 /// The source line at the top of the text area, `dy` points below it.
 fn line_at(v: &DocView, t: &Tokens, dy: f32) -> usize {
     let y = t.px(TokenId::SpacePageTop) + dy;
-    v.hit_test(W_PT / 2.0, y).expect("a painted line").line
+    v.hit_test(W_PT / 2.0, y).expect("a painted line").pos.line
 }
 
 /// A view whose layout records the text of every line it lays out.
@@ -140,7 +140,7 @@ fn reader_keys_scroll_the_view() {
     press(&mut ed, &mut v, Key::Char('G'));
     // The last line sits just above the status line.
     let y = Geom::new(&t, 1.0).text_bottom() as f32 - 2.0;
-    assert_eq!(v.hit_test(W_PT / 2.0, y).unwrap().line, 119);
+    assert_eq!(v.hit_test(W_PT / 2.0, y).unwrap().pos.line, 119);
     press(&mut ed, &mut v, Key::Char('g'));
     press(&mut ed, &mut v, Key::Char('g'));
     assert_eq!(line_at(&v, &t, 1.0), 0);
@@ -193,7 +193,7 @@ fn counted_g_brings_that_line_to_the_top() {
         press(&mut ed, &mut v, Key::Char(c));
     }
     let bottom = Geom::new(&t, 1.0).text_bottom() as f32 - 2.0;
-    assert_eq!(v.hit_test(W_PT / 2.0, bottom).unwrap().line, 119);
+    assert_eq!(v.hit_test(W_PT / 2.0, bottom).unwrap().pos.line, 119);
     assert!(line_at(&v, &t, 1.0) < 117);
 }
 

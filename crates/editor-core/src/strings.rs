@@ -181,9 +181,34 @@ pub const NO_SUCH_FILE: &str = "no such file: ";
 /// Asked before a link goes to the system handler when it is not a web or
 /// mail link and not a markdown file: `target` is exactly what `o` hands
 /// the system handler (a local path with its symlinks resolved, or a URL
-/// as given). `c` or Esc cancels.
+/// as given), but with control characters and bidi format characters
+/// shown escaped (`shown_safely`), so a crafted target cannot make the
+/// question misread. `c` or Esc cancels.
 pub fn open_link_prompt(target: &str) -> String {
-    format!("open {target}? [o]pen [c]ancel")
+    format!("open {}? [o]pen [c]ancel", shown_safely(target))
+}
+
+/// True for the characters that reorder the text around them: the bidi
+/// marks, embeddings, overrides and isolates.
+fn is_bidi_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// `text` with every control character and bidi format character written
+/// as a `\u{...}` escape, for showing text a document supplied.
+pub fn shown_safely(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() || is_bidi_format(c) {
+            out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The status-line prompt Primary+L opens for a link's URL or path.

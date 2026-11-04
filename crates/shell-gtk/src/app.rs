@@ -22,7 +22,7 @@ use std::time::Duration;
 use editor_core::editor::{Config, Editor, OpenRequest};
 use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
-use editor_core::input::{Input, SignalKind};
+use editor_core::input::{Input, MouseEvent, MouseKind, SignalKind};
 use editor_core::platform::Platform;
 use editor_core::strings;
 use editor_core::tokens::TokenId;
@@ -354,6 +354,38 @@ fn connect(
     });
     window.add_controller(focus);
 
+    // The mouse, on the canvas in its own points: a press (or the second
+    // of a double-click), a drag from it and the release, the pointer's
+    // moves (for the table picker's hover) and the wheel.
+    let click = gtk::GestureClick::new();
+    click.connect_pressed(|g, n_press, x, y| {
+        on_mouse(input::press_kind(n_press), x, y, g.current_event_state());
+    });
+    canvas.add_controller(click);
+    let drag = gtk::GestureDrag::new();
+    drag.connect_drag_update(|g, dx, dy| {
+        if let Some((x, y)) = g.start_point() {
+            on_mouse(MouseKind::Drag, x + dx, y + dy, g.current_event_state());
+        }
+    });
+    drag.connect_drag_end(|g, dx, dy| {
+        if let Some((x, y)) = g.start_point() {
+            on_mouse(MouseKind::Up, x + dx, y + dy, g.current_event_state());
+        }
+    });
+    canvas.add_controller(drag);
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_motion(|c, x, y| {
+        on_mouse(MouseKind::Move, x, y, c.current_event_state());
+    });
+    canvas.add_controller(motion);
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    scroll.connect_scroll(|c, _dx, dy| {
+        on_scroll(dy, c.unit() == gdk::ScrollUnit::Wheel);
+        glib::Propagation::Stop
+    });
+    canvas.add_controller(scroll);
+
     window.connect_close_request(|_| {
         request_close();
         glib::Propagation::Stop
@@ -510,6 +542,51 @@ fn on_ime(inp: Input) {
     let handler_ns = marks::now_ns();
     let event_ms = KEY_MS.with(Cell::get);
     handle(inp, KeyTimes::new(event_ms, handler_ns));
+}
+
+/// A mouse button event or a move at `x, y` (canvas points), hit-tested
+/// against what was painted and handed to the editor. A move goes only
+/// while the table picker shows: nothing else hovers. Mouse input is not
+/// timed as keys are.
+fn on_mouse(kind: MouseKind, x: f64, y: f64, state: gdk::ModifierType) {
+    let mods = input::mods_from_state(state.bits());
+    let close = with_state(|st| {
+        if kind == MouseKind::Move && st.editor.table_picker().is_none() {
+            return None;
+        }
+        let hit = st.doc.hit_test(x as f32, y as f32);
+        let fx = st
+            .editor
+            .handle(Input::Mouse(MouseEvent { kind, hit, mods }));
+        apply_changed(st, fx)
+    });
+    if let Some(Some(code)) = close {
+        finish(code);
+    }
+}
+
+/// The wheel (`wheel`, in notches) or a smooth scroll (in points), down
+/// the document when positive.
+fn on_scroll(dy: f64, wheel: bool) {
+    let close = with_state(|st| {
+        let page_pt = st.canvas.height() as f32;
+        let dy_pt = input::scroll_pt(dy, wheel, page_pt);
+        let fx = st.editor.handle(Input::Scroll { dy_pt });
+        apply_changed(st, fx)
+    });
+    if let Some(Some(code)) = close {
+        finish(code);
+    }
+}
+
+/// `apply` and a draw, unless the effects ask nothing.
+fn apply_changed(st: &mut State, fx: Effects) -> Option<i32> {
+    if fx == Effects::default() {
+        return None;
+    }
+    let close = apply(st, fx);
+    st.canvas.queue_draw();
+    close
 }
 
 /// One input to the editor, painted, queued for drawing and timed.

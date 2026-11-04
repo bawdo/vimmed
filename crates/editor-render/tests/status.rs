@@ -387,3 +387,41 @@ fn normal_mode_caret_is_a_block_and_insert_a_bar() {
         "the caret's line repaints when its shape changes"
     );
 }
+
+#[test]
+fn a_long_prompt_keeps_its_start_and_end_on_one_row() {
+    let t = Tokens::defaults(Theme::Light);
+    let (mut v, probe) = probed(&t);
+    let mut src = Fake::new(&["alpha"], t.clone());
+    let deep = "deep/".repeat(60);
+    let question = format!("open /Users/someone/{deep}report.pdf? [o]pen [c]ancel");
+    src.left = StatusLeft::Prompt(question.clone());
+    src.showcmd = "2d".into();
+    v.paint_all(&src);
+    let drawn = status_drawn(&probe, &t);
+    let shown = drawn
+        .iter()
+        .find(|d| d.text.starts_with("open "))
+        .unwrap_or_else(|| panic!("no prompt in {:?}", texts(&drawn)));
+    // The scheme or path head, and the file name with the answers.
+    assert!(shown.text.starts_with("open /Users/some"), "{}", shown.text);
+    assert!(
+        shown.text.ends_with("report.pdf? [o]pen [c]ancel"),
+        "{}",
+        shown.text
+    );
+    assert!(shown.text.contains('\u{2026}'), "{}", shown.text);
+    // It fits in the frame beside the right side (`2d` and `1:1`, with
+    // padding).
+    let right = ("2d".len() + "1:1".len()) as f32 * ADVANCE;
+    assert!(
+        shown.text.len() as f32 * ADVANCE <= W_PT - right,
+        "{}",
+        shown.text
+    );
+    // A short prompt shows whole.
+    src.left = StatusLeft::Prompt("open ftp://a? [o]pen [c]ancel".into());
+    v.paint_lines(&src, 0..0);
+    let drawn = status_drawn(&probe, &t);
+    assert!(texts(&drawn).contains(&"open ftp://a? [o]pen [c]ancel"));
+}
