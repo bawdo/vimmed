@@ -39,17 +39,21 @@ fn has_scheme(target: &str) -> bool {
     false
 }
 
-/// Decodes `%XX` escapes (like moon_edit's `Uri.decodeFull` in
-/// `link_scanner_service.dart`). Malformed escapes are kept literally, and a
+/// Decodes `%XX` escapes (moon_edit uses `Uri.decodeFull`, but only for image
+/// references in `link_scanner_service.dart`; applying it to links is our choice). Malformed escapes are kept literally, and a
 /// result that is not valid UTF-8 falls back to the undecoded input.
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
                 out.push(b);
                 i += 3;
                 continue;
@@ -61,17 +65,21 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// Collapses `.` and `..` lexically (moon_edit does the same with `p.normalize`).
+/// Collapses `.` and `..` lexically, ignoring symlinks (the same as moon_edit's
+/// `p.normalize`). A `..` pops only a normal component; otherwise it is kept
+/// (relative paths) or dropped at the root (absolute paths).
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() && !path.is_absolute() {
-                    out.push("..");
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
                 }
-            }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
             other => out.push(other.as_os_str()),
         }
     }
@@ -84,6 +92,12 @@ fn is_markdown(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
+/// True for a target that points at the current file: empty, or starting
+/// with `#`. Callers filter these out before `classify`.
+pub fn is_self_fragment(target: &str) -> bool {
+    target.is_empty() || target.starts_with('#')
+}
+
 /// Classifies `target`, resolving relative paths against `file_dir`.
 ///
 /// Rules:
@@ -92,9 +106,15 @@ fn is_markdown(path: &Path) -> bool {
 /// - `~` is not expanded: `~/x` is a relative path named `~`.
 /// - An absolute path is used as is. A relative one joins onto `file_dir`.
 /// - The `.md` / `.markdown` check is case-insensitive.
-/// - A bare `#frag` (empty path) refers to the current file, which this
-///   function cannot know. It returns `Missing("")`; the caller should treat a
-///   target starting with `#` as a no-op before calling.
+/// - A self-fragment (see `is_self_fragment`: empty, or a bare `#frag`)
+///   refers to the current file, which this function cannot know. Callers must
+///   filter it out first; if they do not, it returns `Missing("")`, which must
+///   never be shown as "no such file".
+/// - The case-insensitive extension check and the percent-decoding are
+///   deliberate divergences from moon_edit, not parity: its `.md` checks
+///   (app_state.dart, file_operations_service.dart) are case-sensitive, and it
+///   uses `Uri.decodeFull` only for image references.
+/// - Only a regular file is `Markdown`; a directory named `x.md` is `Local`.
 pub fn classify(target: &str, file_dir: &Path) -> LinkTarget {
     if has_scheme(target) {
         return LinkTarget::External(target.to_string());
@@ -112,7 +132,7 @@ pub fn classify(target: &str, file_dir: &Path) -> LinkTarget {
     };
     if !resolved.exists() {
         LinkTarget::Missing(resolved)
-    } else if is_markdown(&resolved) {
+    } else if resolved.is_file() && is_markdown(&resolved) {
         LinkTarget::Markdown(resolved)
     } else {
         LinkTarget::Local(resolved)
@@ -254,5 +274,59 @@ mod tests {
             classify("C:\\x.md", &d.0),
             LinkTarget::External("C:\\x.md".into())
         );
+    }
+
+    #[test]
+    fn leading_parent_dirs_survive_a_relative_base() {
+        assert_eq!(normalize(Path::new("../../x")), PathBuf::from("../../x"));
+        assert_eq!(normalize(Path::new("a/../../x")), PathBuf::from("../x"));
+        assert_eq!(normalize(Path::new("a/./b/../c")), PathBuf::from("a/c"));
+        assert_eq!(normalize(Path::new("/../x")), PathBuf::from("/x"));
+        assert!(matches!(
+            classify("../../nope.md", Path::new("rel/base")),
+            LinkTarget::Missing(p) if p.as_path() == Path::new("nope.md")
+        ));
+        assert!(matches!(
+            classify("../../../nope.md", Path::new("rel/base")),
+            LinkTarget::Missing(p) if p.as_path() == Path::new("../nope.md")
+        ));
+    }
+
+    #[test]
+    fn self_fragment_detection() {
+        assert!(is_self_fragment(""));
+        assert!(is_self_fragment("#x"));
+        assert!(!is_self_fragment("a#x"));
+        assert!(!is_self_fragment("a.md"));
+    }
+
+    #[test]
+    fn empty_target_is_missing_empty() {
+        let d = Dir::new("empty");
+        assert_eq!(classify("", &d.0), LinkTarget::Missing(PathBuf::new()));
+    }
+
+    #[test]
+    fn percent_decode_needs_two_hex_digits() {
+        assert_eq!(percent_decode("%+f"), "%+f");
+        assert_eq!(percent_decode("a%2"), "a%2");
+        assert_eq!(percent_decode("%20"), " ");
+        // %FF alone is not valid UTF-8: keep the input as written.
+        assert_eq!(percent_decode("a%FFb"), "a%FFb");
+    }
+
+    #[test]
+    fn encoded_hash_is_part_of_the_name() {
+        let d = Dir::new("hash");
+        let md = d.file("a#b.md");
+        assert_eq!(classify("a%23b.md", &d.0), LinkTarget::Markdown(md));
+    }
+
+    #[test]
+    fn directory_named_like_markdown_is_local() {
+        let d = Dir::new("dirmd");
+        let sub = d.0.join("x.md");
+        fs::create_dir_all(&sub).unwrap();
+        assert_eq!(classify("x.md", &d.0), LinkTarget::Local(sub));
     }
 }
