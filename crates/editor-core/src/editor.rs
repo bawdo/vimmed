@@ -47,7 +47,7 @@ use std::io::ErrorKind;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use crate::buffer::{Buffer, Pos};
+use crate::buffer::{Buffer, Pos, ShiftMark};
 use crate::effects::{Effects, Redraw};
 use crate::file::{RegisterStore, StateDir};
 use crate::grapheme;
@@ -65,7 +65,9 @@ use crate::strings;
 use crate::substitute::ConfirmSession;
 use crate::tokens::{Theme, Tokens};
 use crate::undo::History;
-use crate::view_model::{CaretShape, MsgKind, Selection, StatusLeft, StatusModel, ViewSource};
+use crate::view_model::{
+    CaretShape, LineShifts, MsgKind, Selection, StatusLeft, StatusModel, ViewSource,
+};
 use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator, Touched};
 use crate::vim::register::{Register, Registers};
 use crate::vim::repeat::Change;
@@ -1559,6 +1561,12 @@ impl ViewSource for Editor {
                 CaretShape::Block
             }
         }
+    }
+    fn line_shifts_since(&self, since: Option<ShiftMark>) -> Option<LineShifts> {
+        Some(LineShifts {
+            mark: self.buf.shift_mark(),
+            shifts: since.and_then(|m| self.buf.shifts_since(m)),
+        })
     }
 }
 

@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use crate::buffer::{Buffer, Pos};
+use crate::buffer::{Buffer, LineShift, Pos, ShiftMark};
 use crate::grapheme;
 use crate::markdown::LineDisplay;
 use crate::tokens::{Theme, Tokens};
@@ -163,6 +163,25 @@ pub trait ViewSource {
     fn current_match(&self) -> Option<(usize, Range<usize>)>;
     /// How the caret is drawn.
     fn caret_shape(&self) -> CaretShape;
+    /// The line shifts since `since` (with `None`, only the current mark),
+    /// so the renderer can move its per-line state with the lines. `None`
+    /// when the source does not report shifts: the renderer then resizes
+    /// at the end, as it always has.
+    fn line_shifts_since(&self, since: Option<ShiftMark>) -> Option<LineShifts> {
+        let _ = since;
+        None
+    }
+}
+
+/// What `ViewSource::line_shifts_since` reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineShifts {
+    /// Where the source's edit history is now.
+    pub mark: ShiftMark,
+    /// The shifts since the mark asked about, oldest first. `None` when
+    /// they are unknown: no mark, a mark from another buffer, or one older
+    /// than the buffer's log.
+    pub shifts: Option<Vec<LineShift>>,
 }
 
 #[cfg(test)]
