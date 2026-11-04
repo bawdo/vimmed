@@ -112,12 +112,11 @@ define_class!(
             app::on_ime(Input::Preedit { text, cursor });
         }
 
+        /// Accept the composition as typed (an input source switch, focus
+        /// loss). After `insertText:` there is none left, so nothing.
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
-            app::on_ime(Input::Preedit {
-                text: String::new(),
-                cursor: 0,
-            });
+            app::on_unmark();
         }
 
         #[unsafe(method(selectedRange))]

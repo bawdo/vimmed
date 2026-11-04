@@ -266,6 +266,9 @@ pub fn run(args: WindowArgs) -> i32 {
     let bench = state.bench.is_some();
     STATE.with(|s| *s.borrow_mut() = Some(state));
     connect(&window, &canvas, &keys, &im);
+    // An editor that opens taking text (vim off, bench mode) feeds the
+    // input method from the first key.
+    with_state(sync_ime);
     window.present();
     if bench {
         schedule_bench_check();

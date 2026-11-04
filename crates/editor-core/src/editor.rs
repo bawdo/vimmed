@@ -371,6 +371,7 @@ impl Editor {
                     time_ns: 0,
                 }))
             }),
+            // TODO(Task 33b): committed text answers a Prompt.
             _ => Effects::default(),
         }
     }
@@ -1538,7 +1539,8 @@ impl ViewSource for Editor {
             };
             match typed {
                 Some((prefix, text)) => {
-                    // A composition shows after what is typed.
+                    // A composition shows after what is typed. TODO(Task 33b):
+                    // and after a Prompt's answer.
                     let (pre, at) = self.preedit().unwrap_or_default();
                     StatusLeft::Input {
                         prefix,

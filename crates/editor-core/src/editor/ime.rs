@@ -11,6 +11,7 @@
 //! or until the input method or a mode change clears it.
 
 use crate::effects::{Effects, Redraw};
+use crate::input::Input;
 use crate::status::Mode;
 
 use super::Editor;
@@ -31,6 +32,8 @@ impl Editor {
         if self.reader {
             return false;
         }
+        // TODO(Task 33b): Prompt takes text once the first prompt is built;
+        // until then nothing enters it.
         !self.cfg.vim
             || matches!(
                 self.mode,
@@ -63,6 +66,21 @@ impl Editor {
         }
         self.preedit = next;
         self.preedit_redraw()
+    }
+
+    /// Accepts the composition as if it had been typed: `Input::Text` with
+    /// its text (newlines normalised, the same mode guard). AppKit ends a
+    /// composition this way (`unmarkText` on an input source switch or
+    /// focus loss). Nothing without a composition; outside an input mode a
+    /// stray one is dropped, never typed.
+    pub fn commit_preedit(&mut self) -> Effects {
+        let Some((text, _)) = self.preedit.clone() else {
+            return Effects::default();
+        };
+        if !self.ime_active() {
+            return self.clear_preedit();
+        }
+        self.handle(Input::Text(text))
     }
 
     /// Drops the preedit, repainting where it showed.
@@ -120,6 +138,56 @@ mod tests {
             text: text.into(),
             cursor,
         }
+    }
+
+    #[test]
+    fn commit_preedit_types_the_composition() {
+        let mut e = ed("ab");
+        keys(&mut e, "li");
+        e.handle(preedit("にほ", 3));
+        let fx = e.commit_preedit();
+        assert_eq!(e.text(), "aにほb");
+        assert_eq!(e.preedit(), None);
+        assert_eq!(e.cursor(), pos(0, 7));
+        assert!(e.dirty());
+        assert_eq!(fx.dirty, Some(true));
+        assert!(matches!(fx.redraw, Redraw::Lines(r) if r.contains(&0)));
+        // Already committed: a second call does nothing.
+        assert_eq!(e.commit_preedit(), crate::effects::Effects::default());
+        assert_eq!(e.text(), "aにほb");
+    }
+
+    #[test]
+    fn commit_preedit_normalises_carriage_returns() {
+        let mut e = ed("");
+        keys(&mut e, "i");
+        e.handle(preedit("a\r\nb\rc", 1));
+        e.commit_preedit();
+        assert_eq!(e.text(), "a\nb\nc");
+    }
+
+    #[test]
+    fn commit_preedit_on_the_command_line_appends_to_it() {
+        let mut e = ed("abc");
+        keys(&mut e, ":s");
+        e.handle(preedit("ü", 2));
+        e.commit_preedit();
+        assert_eq!(e.cmdline(), "sü");
+        assert_eq!(e.preedit(), None);
+        assert_eq!(e.text(), "abc");
+    }
+
+    #[test]
+    fn commit_preedit_without_one_or_outside_an_input_mode_types_nothing() {
+        let mut e = ed("abc");
+        assert_eq!(e.commit_preedit(), crate::effects::Effects::default());
+        // A stray composition in Normal (it cannot get there through
+        // `handle`) is dropped, not run as keys.
+        e.preedit = Some(("x".into(), 1));
+        e.commit_preedit();
+        assert_eq!(e.text(), "abc");
+        assert_eq!(e.preedit(), None);
+        assert_eq!(e.mode(), Mode::Normal);
     }
 
     #[test]

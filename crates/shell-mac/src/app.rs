@@ -22,6 +22,7 @@ use editor_render::damage::Damage;
 use editor_render::fonts::FontSet;
 use editor_render::layout_cosmic::CosmicLayout;
 use editor_render::view::DocView;
+use editor_render::view::RectPt;
 use marks::bench::{BenchPlan, Progress};
 use marks::names;
 use objc2::rc::Retained;
@@ -29,8 +30,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSTextInputContext, NSView,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString, NSUserDefaults};
@@ -88,6 +89,14 @@ thread_local! {
     /// The key-down `interpretKeyEvents:` is handling, for its timing and
     /// for `doCommandBySelector:`.
     static IME_KEY: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
+    /// What `sync_ime` asked of the input context (true: the caret moved,
+    /// false: discard the composition), made once the state is released,
+    /// since AppKit may call straight back into the view.
+    static IME_CALL: RefCell<Option<(Retained<NSTextInputContext>, bool)>> =
+        const { RefCell::new(None) };
+    /// The caret on screen as of the last input, for a
+    /// `firstRectForCharacterRange:` that arrives while the state is busy.
+    static CARET_SCREEN: Cell<Option<NSRect>> = const { Cell::new(None) };
 }
 
 /// Runs `f` on the state unless it is missing or already borrowed (an
@@ -371,16 +380,28 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
 fn sync_ime(st: &mut State) {
     let active = st.editor.ime_active();
     let composing = st.editor.preedit().is_some();
+    if active {
+        let rect = screen_rect(&st.view, st.doc.caret_rect());
+        CARET_SCREEN.with(|c| c.set(Some(rect)));
+    }
     if (composing || (st.ime_active && !active))
         && let Some(ctx) = st.view.inputContext()
     {
-        if composing {
+        IME_CALL.with(|c| *c.borrow_mut() = Some((ctx, composing)));
+    }
+    st.ime_active = active;
+}
+
+/// Makes the input context call `sync_ime` asked for. Call it once the
+/// state is no longer borrowed.
+fn flush_ime() {
+    if let Some((ctx, moved)) = IME_CALL.with(|c| c.borrow_mut().take()) {
+        if moved {
             ctx.invalidateCharacterCoordinates();
         } else {
             ctx.discardMarkedText();
         }
     }
-    st.ime_active = active;
 }
 
 /// Copies new damage into the back surface and wakes the display link.
@@ -428,6 +449,15 @@ pub fn on_ime_command() {
     }
 }
 
+/// `unmarkText`: the composition is committed as typed.
+pub fn on_unmark() {
+    let handler_s = now_s();
+    let event_s = IME_KEY.with(|k| k.borrow().as_ref().map(|e| e.timestamp()));
+    let kind = input_kind(&Input::Text(String::new()));
+    let event_s = event_s.unwrap_or(handler_s);
+    run_input(kind, event_s, handler_s, |e| e.commit_preedit());
+}
+
 /// The composition's length in UTF-16 units, while there is one.
 pub fn marked_utf16_len() -> Option<usize> {
     with_state(|st| st.editor.preedit().map(|(t, _)| t.encode_utf16().count())).flatten()
@@ -437,7 +467,17 @@ pub fn marked_utf16_len() -> Option<usize> {
 /// caret in the document (the command line, a search), the bottom left of
 /// the view, by the status bar.
 pub fn caret_screen_rect(view: &NSView) -> NSRect {
-    let caret = with_state(|st| st.doc.caret_rect()).flatten();
+    match with_state(|st| st.doc.caret_rect()) {
+        Some(caret) => screen_rect(view, caret),
+        // The state is busy (AppKit called back while handling an input).
+        None => CARET_SCREEN
+            .with(Cell::get)
+            .unwrap_or_else(|| screen_rect(view, None)),
+    }
+}
+
+/// `caret` (view points) on screen, or the view's bottom left without one.
+fn screen_rect(view: &NSView, caret: Option<RectPt>) -> NSRect {
     let rect = match caret {
         Some(r) => NSRect::new(
             NSPoint::new(f64::from(r.x), f64::from(r.y)),
@@ -462,9 +502,19 @@ pub fn on_key(event: &NSEvent) {
 
 /// One input to the editor, painted, staged and timed.
 fn handle(inp: Input, event_s: f64, handler_s: f64) {
-    let input = input_kind(&inp);
+    run_input(input_kind(&inp), event_s, handler_s, |e| e.handle(inp));
+}
+
+/// Runs `f` on the editor as input of kind `input`, then paints, stages and
+/// times it.
+fn run_input(
+    input: &'static str,
+    event_s: f64,
+    handler_s: f64,
+    f: impl FnOnce(&mut Editor) -> Effects,
+) {
     let close = with_state(|st| {
-        let fx = st.editor.handle(inp);
+        let fx = f(&mut st.editor);
         let redraw = redraw_kind(&fx.redraw);
         let close = apply(st, fx);
         st.keys.push(KeyTimes {
@@ -478,6 +528,7 @@ fn handle(inp: Input, event_s: f64, handler_s: f64) {
         st.link.resume();
         close
     });
+    flush_ime();
     if let Some(Some(code)) = close {
         finish(code);
     }
@@ -574,6 +625,7 @@ pub fn on_wake() {
         }
         close
     });
+    flush_ime();
     if let Some(Some(code)) = close {
         finish(code);
     }
@@ -618,6 +670,7 @@ pub fn request_close() {
         let fx = st.editor.handle(Input::CloseRequested);
         apply(st, fx)
     });
+    flush_ime();
     if let Some(Some(code)) = close {
         finish(code);
     }

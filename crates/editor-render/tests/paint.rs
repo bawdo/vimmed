@@ -3,8 +3,9 @@ mod common;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use common::{Counting, Fake, Geom, H_PT, W_PT, cosmic, view};
+use common::{Counting, Fake, Geom, H_PT, W_PT, cosmic, editor, press, view};
 use editor_core::buffer::Pos;
+use editor_core::input::{Input, Key};
 use editor_core::tokens::{Theme, TokenId, Tokens};
 use editor_render::damage::Damage;
 use editor_render::frame::{Frame, copy_rows_bgra};
@@ -231,6 +232,67 @@ fn preedit_paints_underlined_at_the_caret() {
     v.paint_lines(&src, 0..1);
     assert_eq!(green(&v), 0);
     assert_eq!(v.caret_rect().unwrap().x, plain.x);
+}
+
+#[test]
+fn preedit_paints_underlined_at_the_caret_in_a_table_row() {
+    // The real editor typing into a data cell of a rendered table. The
+    // cursor's row shows raw (its source, not the grid), so the composition
+    // goes into that line like any other.
+    let dir = std::env::temp_dir().join(format!("preedit-table-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = "Intro\n| a | x |\n|---|---|\n| ccc | xx |\n| e | x |\n\nafter";
+    let mut ed = editor(&dir, text);
+    let t = Tokens::defaults(Theme::Light);
+    let mut v = view(&t, 2.0);
+    v.paint_all(&ed);
+    for k in [
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Char('l'),
+        Key::Char('l'),
+    ] {
+        press(&mut ed, &mut v, k);
+    }
+    press(&mut ed, &mut v, Key::Char('i'));
+    let plain = v.caret_rect().expect("a caret in the table row");
+    // The composition's colour, counted across the caret's row. The caret
+    // (`color.caret`) may share it, so count against the row before.
+    let want = t.color(TokenId::ColorPreeditUnderline);
+    let tinted = |v: &DocView| {
+        let f = v.frame();
+        let (y0, y1) = (
+            (plain.y * 2.0) as u32,
+            ((plain.y + plain.h) * 2.0).ceil() as u32,
+        );
+        (y0..y1)
+            .flat_map(|y| (0..f.width_px).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = f.pixmap.pixel(x, y).unwrap();
+                p.red().abs_diff(want.r) < 8
+                    && p.green().abs_diff(want.g) < 8
+                    && p.blue().abs_diff(want.b) < 8
+            })
+            .count()
+    };
+    let before = tinted(&v);
+    let fx = ed.handle(Input::Preedit {
+        text: "xyz".into(),
+        cursor: 3,
+    });
+    match fx.redraw {
+        editor_core::effects::Redraw::Lines(r) => v.paint_lines(&ed, r),
+        other => panic!("the composition repaints its line, not {other:?}"),
+    }
+    assert!(
+        tinted(&v) > before + 50,
+        "the composition paints in its colour"
+    );
+    let spans = v.styled_spans(3).unwrap();
+    assert!(spans.iter().any(|sp| sp.underline && sp.color == want));
+    assert!(v.caret_rect().unwrap().x > plain.x, "the caret follows it");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
