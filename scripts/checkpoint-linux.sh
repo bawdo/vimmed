@@ -80,7 +80,8 @@ if command -v sysprof-cli >/dev/null 2>&1; then
 else
     echo "sysprof-cli not found; where it is installed, run this and attach the .syscap file:"
 fi
-echo "  sysprof-cli --force$out/startup.syscap -- target/release/window target/fixture/test.md"
+echo "(the sysprof-cli flags below are unverified: check them against sysprof-cli --help)"
+printf '  sysprof-cli --force "%s/startup.syscap" -- target/release/window target/fixture/test.md\n' "$out"
 
 echo
 echo "Done. Paste back the contents of these directories (each has an env.txt):"

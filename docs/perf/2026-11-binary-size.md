@@ -10,7 +10,8 @@ CSS, Bash, HCL, Markdown block and inline).
 - Profile: `release` (the workspace default), macOS arm64.
 - Tool: `cargo bloat --release -p window --crates`, then `ls -l` on
   `target/release/window`.
-- At the base commit the `window` crate is an empty `fn main() {}` and does not
+- Historical (Task 28 time; see the Checkpoint 1 re-measure below for the real
+  binary): at that commit the `window` crate is an empty `fn main() {}` and does not
   depend on `editor-render`, so a plain build measures nothing useful. For both
   measurements a throwaway edit (not committed) made `window` depend on
   `editor-render` and create a `Highlighter`, request one Rust block and poll
@@ -109,8 +110,32 @@ at Checkpoint 1.
 | swash | 42.7 KiB |
 | png | 31.1 KiB |
 
-The real binary is about the size of the "Rust grammar only" harness build, not
-the 13.0 MiB "all twelve grammars" build. No shell or window code creates a
-`Highlighter` yet, so the linker drops the tree-sitter runtime and every grammar.
-The 13 MiB figure should be expected once highlighting is wired into the view
-path. Re-measure at that point.
+All figures here are macOS arm64 only; Linux sizes are not measured.
+
+The real binary (3.0 MB) is far below the 13.0 MiB "all twelve grammars"
+harness build. No shell or window code creates a `Highlighter` yet, so the
+linker drops the tree-sitter runtime and every grammar, the Rust grammar
+included. Its size is coincidentally close to the "Rust grammar only" harness
+figure, which did link that grammar, so do not read the two as the same content.
+Expect the 13 MiB figure once highlighting is wired into the view path.
+Re-measure at that point.
+
+Evidence that the grammars are absent. The shipped release profile sets
+`strip = true`, so `nm` on it shows only 178 symbols and proves nothing. The
+check below used an unstripped build of the same sha (identical code,
+`CARGO_PROFILE_RELEASE_STRIP=false cargo build --release -p window
+--target-dir <dir>`, 3,587,128 bytes, 3,080 symbols):
+
+```
+$ nm <dir>/release/window | grep -ci tree_sitter
+2
+$ nm <dir>/release/window | grep -i "tree_sitter\|highlight\|Highlighter"
+__RINvNtCs..._4core3ptr9drop_glueNtNtCs..._5alloc6string6StringECs..._11tree_sitter
+__RNvXs1i_NtCs..._4core3fmtRjNtB6_7Display3fmtCs..._11tree_sitter
+```
+
+The two hits are core/alloc generics (`drop_glue<String>` and `Display for &T`)
+instantiated inside the tree_sitter crate and merged by the linker; they are not
+tree-sitter code. There is no `tree_sitter_rust` (or any other grammar) symbol,
+no tree-sitter parser symbol, and no `Highlighter` symbol. On the shipped
+(stripped) binary `nm target/release/window | grep -c tree_sitter` prints 0.
