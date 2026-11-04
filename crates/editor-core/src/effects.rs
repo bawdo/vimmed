@@ -56,7 +56,7 @@ pub enum Scroll {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Effects {
     pub redraw: Redraw,
-    /// A new window title.
+    /// A new window title. Nothing emits one yet: v0.9 has no rename.
     pub title: Option<String>,
     /// The dirty state, when it changed.
     pub dirty: Option<bool>,

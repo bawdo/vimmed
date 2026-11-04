@@ -810,7 +810,14 @@ mod tests {
 
     #[test]
     fn without_vim_the_editor_stays_insert_only() {
-        let mut e = build("ab", Config { vim: false }, false);
+        let mut e = build(
+            "ab",
+            Config {
+                vim: false,
+                ..Config::default()
+            },
+            false,
+        );
         assert_eq!(e.mode(), Mode::Insert);
         keys(&mut e, "j<Esc>");
         assert_eq!(e.text(), "jab");

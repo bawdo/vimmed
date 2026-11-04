@@ -395,7 +395,10 @@ mod tests {
         };
         let mut e = Editor::open_with_state(
             req,
-            Config { vim: false },
+            Config {
+                vim: false,
+                ..Config::default()
+            },
             Platform::Mac,
             Box::new(FakeHost::default()),
             Some(&f.state()),

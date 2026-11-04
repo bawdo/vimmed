@@ -519,7 +519,14 @@ mod tests {
         // With vim off, Insert holds no open undo group between keys, so
         // the reload cannot merge into the typing before it.
         let (_dir, path) = doc("hello\n");
-        let (mut e, _state) = open_with(&path, false, Config { vim: false });
+        let (mut e, _state) = open_with(
+            &path,
+            false,
+            Config {
+                vim: false,
+                ..Config::default()
+            },
+        );
         assert_eq!(e.mode(), Mode::Insert);
         keys(&mut e, "ab<D-s>");
         assert_eq!(e.message(), Some(strings::WRITTEN));

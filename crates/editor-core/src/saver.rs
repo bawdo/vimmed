@@ -23,6 +23,12 @@ pub trait Saver {
     fn stat(&self) -> Option<DiskStat> {
         None
     }
+    /// True when every write is refused whatever the text (a file that
+    /// was not valid UTF-8 or could not be read, or no file at all), so
+    /// autosave need not try.
+    fn refuses_writes(&self) -> bool {
+        false
+    }
 }
 
 /// The file at `path`, and the version of it the document was read from.
@@ -98,6 +104,9 @@ impl Saver for FileSaver {
     fn stat(&self) -> Option<DiskStat> {
         self.stat
     }
+    fn refuses_writes(&self) -> bool {
+        self.not_utf8 || self.unreadable.is_some()
+    }
 }
 
 /// No file behind the editor: writes and reloads fail, saying so.
@@ -111,6 +120,9 @@ impl Saver for Unwired {
         Loaded::Error(io::Error::other(strings::NO_FILE_ACCESS))
     }
     fn close(&mut self, _code: i32) {}
+    fn refuses_writes(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

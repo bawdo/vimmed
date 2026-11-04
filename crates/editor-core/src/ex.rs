@@ -647,13 +647,15 @@ mod tests {
     }
 
     #[test]
-    fn e_bang_on_a_clean_buffer_reports_clean() {
+    fn e_bang_on_a_clean_buffer_reports_nothing() {
         let (mut e, files) = ed_with_files("hello world");
         assert!(!e.dirty());
         files.set_disk("changed on disk");
         let fx = colon(&mut e, "e!");
         assert_eq!(e.text(), "changed on disk");
-        assert_eq!(fx.dirty, Some(false));
+        // Clean before and after: no change of the dirty state to report,
+        // and the edit that replaced the text never says dirty.
+        assert_eq!(fx.dirty, None);
         assert!(!e.dirty());
     }
 
