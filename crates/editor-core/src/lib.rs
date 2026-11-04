@@ -7,6 +7,7 @@ pub mod grapheme;
 pub mod host;
 pub mod input;
 pub mod links;
+pub mod lists;
 pub mod markdown;
 pub mod platform;
 pub mod saver;
