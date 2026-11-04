@@ -178,6 +178,14 @@ pub fn confirm_replace(replacement: &str) -> String {
 /// Status message prefix when a link target does not exist; the path follows.
 pub const NO_SUCH_FILE: &str = "no such file: ";
 
+/// Asked before a link goes to the system handler when it is not a web or
+/// mail link and not a markdown file: `target` is exactly what `o` hands
+/// the system handler (a local path with its symlinks resolved, or a URL
+/// as given). `c` or Esc cancels.
+pub fn open_link_prompt(target: &str) -> String {
+    format!("open {target}? [o]pen [c]ancel")
+}
+
 /// The status-line prompt Primary+L opens for a link's URL or path.
 pub const LINK_PROMPT: &str = "link: ";
 

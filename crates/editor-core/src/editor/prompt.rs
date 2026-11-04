@@ -3,9 +3,11 @@
 //! closed with unsaved changes, the already-open prompt (`locking`)
 //! and the recovery prompt (`recovering`) at open, or, with vim off,
 //! `file changed on disk: [o]verwrite [r]eload [c]ancel` when Primary+S
-//! would write over a file changed on disk (`nonvim_keys`). Esc is the
-//! close and changed-on-disk prompts' cancel; the prompts at open have no cancel, so Esc does
-//! nothing there. Any other key waits for an
+//! would write over a file changed on disk (`nonvim_keys`), or
+//! `open <target>? [o]pen [c]ancel` before a link that is not a web or
+//! mail link and not a markdown file goes to the system handler (`link`).
+//! Esc is the close, changed-on-disk and open-link prompts' cancel; the
+//! prompts at open have no cancel, so Esc does nothing there. Any other key waits for an
 //! answer. The input method is off while a prompt asks, so the answers
 //! arrive as plain keys; committed text of one char answers like the key,
 //! and longer text is no answer.
@@ -34,15 +36,21 @@ pub(super) enum Ask {
     /// found the file changed on disk: `o` is `:w!` (then the close goes
     /// ahead), `r` is `:e!` (the window stays open).
     ChangedOnDisk { closing: bool },
+    /// A link that is not a web or mail link and not a markdown file is
+    /// about to go to the system handler (`link`): `o` opens it, `c`
+    /// cancels. The target is `Editor::opening`.
+    OpenLink,
 }
 
 impl Ask {
-    fn question(self) -> String {
+    /// The question, with `opening` the open-link prompt's target.
+    fn question(self, opening: Option<&str>) -> String {
         match self {
             Ask::Close => strings::UNSAVED_CHANGES_PROMPT.to_owned(),
             Ask::AlreadyOpen { pid } => strings::already_open(pid),
             Ask::Recovery => strings::RECOVERY_PROMPT.to_owned(),
             Ask::ChangedOnDisk { .. } => strings::CHANGED_ON_DISK_PROMPT.to_owned(),
+            Ask::OpenLink => strings::open_link_prompt(opening.unwrap_or_default()),
         }
     }
 
@@ -50,7 +58,7 @@ impl Ask {
     /// they cannot be dismissed into editing without a choice.
     fn esc(self) -> Option<char> {
         match self {
-            Ask::Close | Ask::ChangedOnDisk { .. } => Some('c'),
+            Ask::Close | Ask::ChangedOnDisk { .. } | Ask::OpenLink => Some('c'),
             Ask::AlreadyOpen { .. } | Ask::Recovery => None,
         }
     }
@@ -64,8 +72,8 @@ pub(super) struct Prompt {
 }
 
 impl Prompt {
-    pub(super) fn question(&self) -> String {
-        self.ask.question()
+    pub(super) fn question(&self, opening: Option<&str>) -> String {
+        self.ask.question(opening)
     }
 }
 
@@ -144,7 +152,15 @@ impl Editor {
                 let fx = self.end_prompt(p);
                 fx.merge(self.close(0))
             }
-            (Ask::Close | Ask::ChangedOnDisk { .. }, 'c') => self.end_prompt(p),
+            (Ask::Close | Ask::ChangedOnDisk { .. } | Ask::OpenLink, 'c') => self.end_prompt(p),
+            (Ask::OpenLink, 'o') => {
+                let target = self.opening.take();
+                let fx = self.end_prompt(p);
+                if let Some(target) = target {
+                    self.host.open_external(&target);
+                }
+                fx
+            }
             (Ask::ChangedOnDisk { closing }, 'o') => {
                 let fx = self.end_prompt(p);
                 match self.write_step(true) {
@@ -196,6 +212,7 @@ impl Editor {
     /// The prompt is answered: back to the mode it was asked from.
     fn end_prompt(&mut self, p: Prompt) -> Effects {
         self.asking = None;
+        self.opening = None;
         self.mode = p.ret;
         Effects {
             redraw: Redraw::Status,

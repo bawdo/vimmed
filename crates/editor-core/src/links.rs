@@ -86,7 +86,9 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-fn is_markdown(path: &Path) -> bool {
+/// True when `path` ends in `.md` or `.markdown` (either case). It looks
+/// at the name only, not at the file.
+pub(crate) fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
