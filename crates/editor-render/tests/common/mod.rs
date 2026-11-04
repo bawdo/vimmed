@@ -5,14 +5,20 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use editor_core::buffer::{Buffer, Pos};
+use editor_core::editor::{Config, Editor, OpenRequest};
+use editor_core::effects::Redraw;
+use editor_core::host::{Host, Waker, WindowRequest};
+use editor_core::input::{Input, Key, KeyEvent, Mods};
 use editor_core::markdown::{
     Blocks, LineDisplay, LineKind, Prefix, Reveal, SpanBase, code_bg, line_display,
     ordered_display, parse_line,
 };
+use editor_core::platform::Platform;
 use editor_core::tokens::{Theme, TokenId, Tokens};
 use editor_core::view_model::{CaretShape, StatusLeft};
 use editor_render::fonts::{FontPaths, FontSet};
@@ -307,4 +313,60 @@ pub fn column(t: &Tokens, scale: f32) -> (f32, f32) {
 pub fn line_top(v: &DocView, t: &Tokens, scale: f32, i: usize) -> f32 {
     let page_top = (t.px(TokenId::SpacePageTop) * scale).round();
     page_top + (0..i).map(|j| v.line_height_px(j).unwrap()).sum::<f32>()
+}
+
+/// A host that does nothing.
+pub struct NoHost;
+
+impl Host for NoHost {
+    fn clipboard_get(&mut self) -> Option<String> {
+        None
+    }
+    fn clipboard_set(&mut self, _: &str) {}
+    fn open_external(&mut self, _: &str) {}
+    fn spawn_window(&mut self, _: WindowRequest) {}
+    fn now_ns(&self) -> u64 {
+        0
+    }
+    fn waker(&self) -> Waker {
+        Arc::new(|| {})
+    }
+}
+
+/// An editor (vim keys, Normal mode) over `text`, saved as `doc.md` in `dir`.
+pub fn editor(dir: &Path, text: &str) -> Editor {
+    let path = dir.join("doc.md");
+    std::fs::write(&path, text).unwrap();
+    let req = OpenRequest {
+        path,
+        view: false,
+        display_name: None,
+    };
+    Editor::open_with_state(
+        req,
+        Config::default(),
+        Platform::Mac,
+        Box::new(NoHost),
+        None,
+    )
+}
+
+/// Sends `k` to the editor and paints what it asks for, as a shell does.
+pub fn press(ed: &mut Editor, v: &mut DocView, k: Key) {
+    let fx = ed.handle(Input::Key(KeyEvent {
+        key: k,
+        mods: Mods::default(),
+        time_ns: 0,
+    }));
+    let mut redraw = fx.redraw;
+    if fx.scroll_to_cursor && v.scroll_to_cursor(ed.cursor()) {
+        redraw = Redraw::All;
+    }
+    match redraw {
+        Redraw::None => {}
+        Redraw::All => v.paint_all(ed),
+        Redraw::Lines(r) => v.paint_lines(ed, r),
+        Redraw::Status => v.paint_lines(ed, 0..0),
+    }
+    v.take_damage();
 }

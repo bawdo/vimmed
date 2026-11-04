@@ -10,7 +10,9 @@
 //! Only on-screen lines are shaped. A line not shaped yet counts as
 //! `font.size * line.height.body` tall. An unchanged line keeps its layout
 //! across frames, so a full repaint after a few keystrokes reshapes nothing
-//! (see `layout_cosmic::RUN_CACHE_KEEP_AGES`).
+//! (see `layout_cosmic::RUN_CACHE_KEEP_AGES`). When an edit adds or removes
+//! lines, the slots move with their lines (from the source's line shifts),
+//! so the lines below an edit keep their layouts and resampled images.
 //!
 //! Blocks: code blocks sit on a `color.code.bg` box with `radius.code`
 //! corners, their text `space.code.pad` in, the language label top right on
@@ -34,7 +36,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use editor_core::buffer::Pos;
+use editor_core::buffer::{LineShift, Pos, ShiftMark};
 use editor_core::grapheme;
 use editor_core::host::Waker;
 use editor_core::markdown::{
@@ -299,6 +301,9 @@ pub struct DocView {
     tables: Vec<TableGeom>,
     /// Counts paints, so per-frame caches know when they are stale.
     frame_no: u64,
+    /// Where the source's line shifts stood at the last sync (`None` before
+    /// the first, or when the source reports none).
+    shift_mark: Option<ShiftMark>,
 }
 
 impl DocView {
@@ -325,6 +330,7 @@ impl DocView {
             code: CodeTracks::new(),
             tables: Vec::new(),
             frame_no: 0,
+            shift_mark: None,
         };
         v.clear_frame();
         v
@@ -408,7 +414,7 @@ impl DocView {
     pub fn paint_lines(&mut self, src: &dyn ViewSource, lines: Range<usize>) {
         self.begin_frame();
         let near_table: Vec<usize> = lines.clone().filter(|&i| self.was_near_table(i)).collect();
-        let count_changed = self.sync(src);
+        let moved = self.sync(src);
         let count = self.lines.len();
         let first_edit = lines.start;
         let mut todo: Vec<usize> = lines.collect();
@@ -431,7 +437,9 @@ impl DocView {
         todo.dedup();
 
         let g = self.geo();
-        let mut from = count_changed.then_some(first_edit.min(count));
+        // Slots that moved are repainted from the edit (or the first moved
+        // slot, if that is above it) to the bottom.
+        let mut from = moved.map(|m| first_edit.min(m).min(count));
         for i in todo {
             if from.is_some_and(|f| i >= f) {
                 break;
@@ -535,6 +543,12 @@ impl DocView {
             .is_some_and(|m| m.scaled.is_some())
     }
 
+    /// Resamples asked of the image worker and not landed yet (for tests and
+    /// diagnostics).
+    pub fn resamples_queued(&self) -> usize {
+        self.images.as_ref().map_or(0, Images::resamples_queued)
+    }
+
     /// The styled spans line `i` was last laid out with, while it is shaped
     /// (for tests and diagnostics).
     pub fn styled_spans(&self, i: usize) -> Option<&[StyledSpan]> {
@@ -590,7 +604,7 @@ impl DocView {
             return false;
         }
         self.begin_frame();
-        if self.sync(src) {
+        if self.sync(src).is_some() {
             // The source changed shape without a paint: paint all of it.
             self.paint_all(src);
             return true;
@@ -805,22 +819,71 @@ impl DocView {
         })
     }
 
-    /// Takes the source's tokens and line count. Returns true when the line
-    /// count changed.
-    fn sync(&mut self, src: &dyn ViewSource) -> bool {
+    /// Takes the source's tokens and line count. When the source reports
+    /// the line shifts since the last sync, the slots move with their lines
+    /// (`splice`); otherwise they are cut or added at the end.
+    ///
+    /// Returns `None` when the line count is unchanged and no slot moved.
+    /// Otherwise it returns the first line whose slot may no longer be its
+    /// own: the first slot a splice moved, or, with no shifts to go by, the
+    /// new line count (sync cannot tell, so the caller's edit range decides).
+    fn sync(&mut self, src: &dyn ViewSource) -> Option<usize> {
         if *src.tokens() != self.tokens {
             // Table geometry bakes cell colours, fonts and widths in.
             self.tables.clear();
             self.tokens = src.tokens().clone();
         }
         let n = src.line_count();
+        let report = src.line_shifts_since(self.shift_mark);
+        self.shift_mark = report.as_ref().map(|r| r.mark);
+        let shifts = report.and_then(|r| r.shifts);
+        if let Some(moved) = shifts.and_then(|s| self.splice(&s, n)) {
+            return moved;
+        }
         if n == self.lines.len() {
-            return false;
+            return None;
         }
         let est = self.estimate();
         self.lines.truncate(n);
         self.lines.resize_with(n, || LineSlot::estimated(est));
-        true
+        Some(n)
+    }
+
+    /// Applies `shifts` in order so every slot outside an edit stays with
+    /// its line. Of the slots an edit replaced, the first ones (as many as
+    /// the lines it left) stay, since they hold the edited lines, which are
+    /// laid out again; the rest are removed, or fresh estimated slots are
+    /// added after them. Returns the first slot that moved (`None` inside
+    /// when none did), or `None`, changing nothing, when the shifts do not
+    /// fit the slots or do not end at `n` lines.
+    fn splice(&mut self, shifts: &[LineShift], n: usize) -> Option<Option<usize>> {
+        let mut len = self.lines.len();
+        for s in shifts {
+            if s.at + s.removed > len {
+                return None;
+            }
+            len = len - s.removed + s.inserted;
+        }
+        if len != n {
+            return None;
+        }
+        let est = self.estimate();
+        let mut first: Option<usize> = None;
+        for s in shifts {
+            let kept = s.removed.min(s.inserted);
+            let at = s.at + kept;
+            if s.removed == s.inserted {
+                continue;
+            }
+            if s.removed > kept {
+                self.lines.drain(at..s.at + s.removed);
+            } else {
+                let fresh = (kept..s.inserted).map(|_| LineSlot::estimated(est));
+                self.lines.splice(at..at, fresh);
+            }
+            first = Some(first.map_or(at, |f| f.min(at)));
+        }
+        Some(first)
     }
 
     /// Fills the frame with the page and status backgrounds and damages it.
