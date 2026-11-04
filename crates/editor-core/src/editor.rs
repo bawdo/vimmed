@@ -437,8 +437,13 @@ impl Editor {
         let line = self.cursor.line;
         let mut fx = self.dispatch(input);
         // A reload the file's change waits for, once the input left the
-        // document clean and in a mode that can take it (`disk`).
-        fx = fx.merge(self.take_waiting_reload());
+        // document clean and in a mode that can take it (`disk`); never
+        // after the input closed the window. A clean `:w` refused as
+        // changed on disk ends here too: nothing was lost, the reload
+        // takes the file and its message replaces the refusal.
+        if fx.close.is_none() {
+            fx = fx.merge(self.take_waiting_reload());
+        }
         fx = fx.merge(self.drop_stale_preedit(line));
         let warnings = [
             (self.registers.take_reset(), strings::NAMED_REGISTERS_RESET),

@@ -44,11 +44,14 @@ impl Editor {
         self.spawn_watcher();
     }
 
-    /// Stops watching the file, joining the watch's thread. `close` does
-    /// this; dropping the editor does too.
+    /// Stops watching the file, without waiting for the watch's thread
+    /// (it ends at its next wait), and forgets what it found, so no
+    /// waiting reload runs after. `close` does this after the lock record
+    /// goes; dropping the editor stops the watch too.
     pub fn stop_watching(&mut self) {
         self.watch_wanted = false;
         self.watcher = None;
+        self.disk = None;
     }
 
     /// The watch on the file, while there is one.
@@ -163,15 +166,18 @@ impl Editor {
 
     /// Reloads as `:e!` does, keeping the cursor's line (clamped), and
     /// says `reloaded from disk` for a `changed` file, or for one back
-    /// whose text was not the document's. A failed reload says why and is
-    /// not tried again for this change.
+    /// whose text was not the document's. Visual is left only when the
+    /// text was replaced (its anchor was in the old text). A failed reload
+    /// says why and is not tried again for this change.
     fn quiet_reload(&mut self, changed: bool) -> Effects {
         self.disk = None;
-        self.leave_visual();
-        let before = (!changed).then(|| self.buf.to_text());
+        let before = self.buf.to_text();
         let (read, fx) = self.reload_step();
-        let new_text = before.is_none_or(|t| t != self.buf.to_text());
-        if read && new_text {
+        let replaced = read && before != self.buf.to_text();
+        if replaced {
+            self.leave_visual();
+        }
+        if read && (changed || replaced) {
             self.say(strings::RELOADED_FROM_DISK.to_owned());
         }
         fx
@@ -198,6 +204,10 @@ mod tests {
     /// clock at 1000, and the temporary state directory its lock record
     /// goes in.
     fn open_as(path: &Path, view: bool) -> (Editor, tempfile::TempDir) {
+        open_with(path, view, Config::default())
+    }
+
+    fn open_with(path: &Path, view: bool, cfg: Config) -> (Editor, tempfile::TempDir) {
         let host = FakeHost::default();
         host.state().now = 1_000;
         let req = OpenRequest {
@@ -207,13 +217,7 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let state = StateDir::at(tmp.path().join("state"));
-        let e = Editor::open_with_state(
-            req,
-            Config::default(),
-            Platform::Mac,
-            Box::new(host),
-            Some(&state),
-        );
+        let e = Editor::open_with_state(req, cfg, Platform::Mac, Box::new(host), Some(&state));
         (e, tmp)
     }
 
@@ -442,9 +446,11 @@ mod tests {
         }
         assert_eq!(e.text(), "changed elsewhere\n");
         assert_eq!(e.message(), Some(strings::RELOADED_FROM_DISK));
-        // Closing stops the watch.
+        // Closing stops the watch, whose thread then ends by itself.
+        let probe = e.watcher().unwrap().probe();
         colon(&mut e, "q");
         assert!(e.watcher().is_none());
+        probe.wait_ended();
     }
 
     #[test]
@@ -457,5 +463,70 @@ mod tests {
         keys(&mut e, "ihello<Esc>");
         colon(&mut e, "w");
         assert!(e.watcher().is_some());
+        let probe = e.watcher().unwrap().probe();
+        e.stop_watching();
+        probe.wait_ended();
+    }
+
+    #[test]
+    fn back_with_the_same_text_keeps_visual() {
+        let (_dir, path) = doc("hello\nworld\n");
+        let (mut e, _state) = open(&path);
+        keys(&mut e, "vj");
+        e.disk_event(DiskEvent::ReadOnly);
+        e.disk_event(DiskEvent::Back);
+        assert_eq!(e.mode(), Mode::Visual);
+        // Back with other text leaves Visual: its anchor was in the old.
+        e.disk_event(DiskEvent::ReadOnly);
+        fs::write(&path, "other\n").unwrap();
+        e.disk_event(DiskEvent::Back);
+        assert_eq!(e.text(), "other\n");
+        assert_eq!(e.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn closing_drops_a_waiting_reload() {
+        let (_dir, path) = doc("hello\n");
+        let (mut e, _state) = open(&path);
+        keys(&mut e, ":");
+        fs::write(&path, "changed elsewhere\n").unwrap();
+        e.disk_event(DiskEvent::Changed);
+        let fx = keys(&mut e, "q<CR>");
+        assert_eq!(fx.close, Some(0));
+        assert_eq!(e.text(), "hello\n");
+    }
+
+    #[test]
+    fn w_typed_while_a_reload_waits_ends_reloaded() {
+        // The document is clean, so the refused `:w` lost nothing: the
+        // reload that waited for the command line then takes the file,
+        // and its message replaces the refusal.
+        let (_dir, path) = doc("hello\n");
+        let (mut e, _state) = open(&path);
+        keys(&mut e, ":");
+        fs::write(&path, "changed elsewhere\n").unwrap();
+        e.disk_event(DiskEvent::Changed);
+        keys(&mut e, "w<CR>");
+        assert_eq!(e.text(), "changed elsewhere\n");
+        assert_eq!(e.message(), Some(strings::RELOADED_FROM_DISK));
+        assert!(!e.dirty());
+        assert!(e.status().warnings.is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "changed elsewhere\n");
+    }
+
+    #[test]
+    fn vim_off_insert_reload_is_its_own_undo_step() {
+        // With vim off, Insert holds no open undo group between keys, so
+        // the reload cannot merge into the typing before it.
+        let (_dir, path) = doc("hello\n");
+        let (mut e, _state) = open_with(&path, false, Config { vim: false });
+        assert_eq!(e.mode(), Mode::Insert);
+        keys(&mut e, "ab<D-s>");
+        assert_eq!(e.message(), Some(strings::WRITTEN));
+        fs::write(&path, "other\n").unwrap();
+        e.disk_event(DiskEvent::Changed);
+        assert_eq!(e.text(), "other\n");
+        e.undo(false, 1);
+        assert_eq!(e.text(), "abhello\n");
     }
 }

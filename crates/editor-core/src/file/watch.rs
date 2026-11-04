@@ -135,10 +135,44 @@ struct Ctl {
     generation: u64,
     /// `check_now` or `rebase` asked for a look before the next second.
     check: bool,
+    /// `rebase` asked for the state to be reported afresh. Only a rebase
+    /// does: a look `check_now` asks for keeps what was reported, so a
+    /// warning that cleared still says `Back`.
+    forget: bool,
     /// The watcher was dropped: the thread ends.
     stop: bool,
     /// How many looks the thread has finished.
     checks: u64,
+    /// The thread has returned.
+    ended: bool,
+}
+
+/// Marks the thread ended when it returns, however it returns.
+struct Ended<'a>(&'a Shared);
+
+impl Drop for Ended<'_> {
+    fn drop(&mut self) {
+        self.0.lock().ended = true;
+    }
+}
+
+/// A test's view of whether a watcher's thread has ended, which outlives
+/// the watcher.
+#[cfg(test)]
+pub(crate) struct Probe(Arc<Shared>);
+
+#[cfg(test)]
+impl Probe {
+    /// Waits (bounded) for the thread to end; panics if it does not.
+    pub(crate) fn wait_ended(&self) {
+        for _ in 0..1000 {
+            if self.0.lock().ended {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the watch thread never ended");
+    }
 }
 
 struct Shared {
@@ -152,7 +186,8 @@ impl Shared {
     }
 }
 
-/// The watch on one file. Dropping it stops the thread and waits for it.
+/// The watch on one file. Dropping it stops the thread without waiting
+/// for it; `join` waits.
 pub struct Watcher {
     shared: Arc<Shared>,
     events: Receiver<(u64, DiskEvent)>,
@@ -171,8 +206,10 @@ impl Watcher {
                 stat,
                 generation: 0,
                 check: true,
+                forget: false,
                 stop: false,
                 checks: 0,
+                ended: false,
             }),
             cv: Condvar::new(),
         });
@@ -212,11 +249,13 @@ impl Watcher {
         ctl.stat = stat;
         ctl.generation = self.generation;
         ctl.check = true;
+        ctl.forget = true;
         self.shared.cv.notify_all();
     }
 
-    /// Looks at the file now rather than at the next second, and reports
-    /// its state afresh (the window came to the front).
+    /// Looks at the file now rather than at the next second (the window
+    /// came to the front). What changed since the last report is reported
+    /// as usual, `Back` included.
     pub fn check_now(&self) {
         self.shared.lock().check = true;
         self.shared.cv.notify_all();
@@ -226,21 +265,43 @@ impl Watcher {
     pub fn checks(&self) -> u64 {
         self.shared.lock().checks
     }
-}
 
-impl Drop for Watcher {
-    fn drop(&mut self) {
-        self.shared.lock().stop = true;
-        self.shared.cv.notify_all();
+    /// Stops the thread and waits for it to end (tests, so none is left
+    /// running). Dropping the watcher stops it without waiting.
+    pub fn join(mut self) {
+        self.stop();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+
+    /// Tells the thread to end at its next wait.
+    fn stop(&self) {
+        self.shared.lock().stop = true;
+        self.shared.cv.notify_all();
+    }
+
+    /// A view of whether the thread has ended.
+    #[cfg(test)]
+    pub(crate) fn probe(&self) -> Probe {
+        Probe(Arc::clone(&self.shared))
+    }
+}
+
+/// Stops the thread and lets it go without waiting: closing a window never
+/// blocks on a stat (a dead network mount). The thread holds only the
+/// path and the shared state, and ends at its next wait.
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        self.stop();
+        drop(self.thread.take());
     }
 }
 
 /// The thread: looks at `path` at once, then every `INTERVAL` or when
 /// asked, and sends each new state with the generation it was found at.
 fn watch(path: &Path, shared: &Shared, tx: &Sender<(u64, DiskEvent)>, waker: &Waker) {
+    let _ended = Ended(shared);
     let mut tracker = Tracker::default();
     loop {
         let (stat, generation) = {
@@ -260,7 +321,8 @@ fn watch(path: &Path, shared: &Shared, tx: &Sender<(u64, DiskEvent)>, waker: &Wa
             if ctl.stop {
                 return;
             }
-            if std::mem::take(&mut ctl.check) {
+            ctl.check = false;
+            if std::mem::take(&mut ctl.forget) {
                 tracker.forget();
             }
             (ctl.stat, ctl.generation)
@@ -400,7 +462,85 @@ mod tests {
         let seen = w.checks();
         wait_checks(&w, seen);
         assert_eq!(w.poll(), None);
-        // Dropping the watcher stops and joins its thread.
-        drop(w);
+        w.join();
+    }
+
+    /// A waker that signals `rx` on each call.
+    fn signal_waker() -> (Waker, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let waker: Waker = Arc::new(move || {
+            let _ = tx.lock().unwrap().send(());
+        });
+        (waker, rx)
+    }
+
+    /// Looks at once and takes the event that look reports.
+    fn look(w: &mut Watcher, rx: &mpsc::Receiver<()>) -> Option<DiskEvent> {
+        w.check_now();
+        rx.recv_timeout(Duration::from_secs(5)).ok()?;
+        w.poll()
+    }
+
+    #[test]
+    fn check_now_keeps_the_back_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "hello").unwrap();
+        let stat = DiskStat::of(&fs::metadata(&path).unwrap());
+        let (waker, rx) = signal_waker();
+        let mut w = Watcher::spawn(path.clone(), stat, waker);
+        wait_checks(&w, 0);
+        assert_eq!(w.poll(), None);
+        // Moved away and back: the same version returns.
+        let away = dir.path().join("away.md");
+        fs::rename(&path, &away).unwrap();
+        assert_eq!(look(&mut w, &rx), Some(DiskEvent::Gone));
+        fs::rename(&away, &path).unwrap();
+        assert_eq!(look(&mut w, &rx), Some(DiskEvent::Back));
+        if root() {
+            eprintln!("check_now_keeps_the_back_transition: running as root; mode part skipped");
+        } else {
+            // A mode change leaves the version alone.
+            chmod(&path, 0o444);
+            assert_eq!(look(&mut w, &rx), Some(DiskEvent::ReadOnly));
+            chmod(&path, 0o644);
+            assert_eq!(look(&mut w, &rx), Some(DiskEvent::Back));
+        }
+        w.join();
+    }
+
+    #[test]
+    fn drop_does_not_wait_for_the_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "hello").unwrap();
+        // A waker that holds the thread until released, as a stat on a
+        // dead network mount would.
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let entered_tx = std::sync::Mutex::new(entered_tx);
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let waker: Waker = Arc::new(move || {
+            let _ = entered_tx.lock().unwrap().send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        });
+        // A stat that is not the file's: the first look reports a change.
+        let w = Watcher::spawn(path, DiskStat::default(), waker);
+        let probe = w.probe();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(w);
+            let _ = done_tx.send(());
+        });
+        let dropped = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        release_tx.send(()).unwrap();
+        assert!(dropped, "dropping the watcher waited for its thread");
+        // Released, the thread ends by itself.
+        probe.wait_ended();
     }
 }

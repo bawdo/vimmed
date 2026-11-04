@@ -215,12 +215,13 @@ impl Editor {
         }))
     }
 
-    /// Closes the window, exiting with `code`, tells the `Saver`, stops
-    /// the file watch and lets the lock record go (`locking`).
+    /// Closes the window, exiting with `code`, tells the `Saver`, lets
+    /// the lock record go (`locking`), then stops the file watch, which
+    /// never waits on its thread (`disk`).
     pub fn close(&mut self, code: i32) -> Effects {
         self.saver.close(code);
-        self.stop_watching();
         self.release_lock();
+        self.stop_watching();
         Effects {
             close: Some(code),
             ..Effects::default()
