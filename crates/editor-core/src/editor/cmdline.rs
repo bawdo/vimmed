@@ -227,10 +227,13 @@ impl Editor {
         }))
     }
 
-    /// Closes the window, exiting with `code`, tells the `Saver`, lets
-    /// the lock record go (`locking`), then stops the file watch, which
-    /// never waits on its thread (`disk`).
+    /// Closes the window, exiting with `code`: drops a waiting autosave
+    /// (`autosave`), tells the `Saver`, lets the lock record go
+    /// (`locking`), then stops the file watch, which never waits on its
+    /// thread (`disk`).
     pub fn close(&mut self, code: i32) -> Effects {
+        // A wake already queued must never write what `:q!` discarded.
+        self.autosave_due = None;
         self.saver.close(code);
         self.release_lock();
         self.stop_watching();

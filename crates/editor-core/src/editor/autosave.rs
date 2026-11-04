@@ -11,10 +11,12 @@
 //! An autosave is held, saying nothing, while the document cannot or
 //! should not be written: reader view, read-only from the already-open
 //! prompt, a file that was not valid UTF-8 or could not be read, an
-//! unnamed buffer, a prompt asking, a `:s///c` session (one undo step)
-//! and a vim Insert session (also one undo step, and one `.` change: a
-//! save point inside it would split the step). Once the hold lifts, the
-//! write falls due again, at once if its time has passed.
+//! unnamed buffer, a warning from the file watch (a file gone, changed,
+//! read-only or unreadable on disk: writing over or back to it is `:w`'s
+//! choice, never autosave's), a prompt asking, a `:s///c` session (one
+//! undo step) and a vim Insert session (also one undo step, and one `.`
+//! change: a save point inside it would split the step). Once the hold
+//! lifts, the write falls due again, at once if its time has passed.
 
 use crate::buffer::ShiftMark;
 use crate::effects::Effects;
@@ -100,8 +102,10 @@ impl Editor {
     }
 
     /// True while autosave must not write (see the module's notes).
+    /// Closing drops the waiting write instead (`close`).
     fn autosave_held(&self) -> bool {
         self.refuses_edits()
+            || self.disk.is_some()
             || self.saver.refuses_writes()
             || self.path.as_os_str().is_empty()
             || self.asking.is_some()
@@ -139,13 +143,18 @@ mod tests {
     /// An autosaving editor on `text` for `path`, whose file (a
     /// `FakeFiles`) holds `text`, with a handle on its host's clock.
     fn autosaving_at(path: &str, text: &str) -> (Editor, FakeHost, FakeFiles) {
+        built_at(path, text, autosave_on())
+    }
+
+    /// `autosaving_at` with the settings `cfg`.
+    fn built_at(path: &str, text: &str, cfg: Config) -> (Editor, FakeHost, FakeFiles) {
         let host = FakeHost::default();
         host.state().now = START;
         let mut e = Editor::build(
             req(path),
             text,
             None,
-            autosave_on(),
+            cfg,
             Platform::Mac,
             Box::new(host.clone()),
             false,
@@ -249,9 +258,7 @@ mod tests {
     #[test]
     fn autosave_off_by_default() {
         assert!(!Config::default().autosave);
-        let host = FakeHost::default();
-        host.state().now = START;
-        let (mut e, files) = ed_with_files("hello");
+        let (mut e, host, files) = built_at("notes.md", "hello", Config::default());
         let fx = keys(&mut e, "x");
         assert_eq!(fx.wake_at, None);
         tick(&mut e, &host, START + 10 * AUTOSAVE_IDLE_NS);
@@ -439,5 +446,60 @@ mod tests {
             assert_eq!(error(&e), None, "{}", path.display());
         }
         assert_eq!(fs::read(&latin1).unwrap(), b"caf\xe9\n");
+    }
+
+    #[test]
+    fn autosave_never_writes_back_a_deleted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "hello\n").unwrap();
+        let (mut e, host, _state) = open_autosaving(&path);
+        keys(&mut e, "x");
+        fs::remove_file(&path).unwrap();
+        e.disk_event(DiskEvent::Gone);
+        let fx = tick(&mut e, &host, START + AUTOSAVE_IDLE_NS);
+        assert!(!path.exists());
+        assert_eq!(e.status().warnings, [strings::NO_LONGER_ON_DISK]);
+        assert_eq!(error(&e), None);
+        assert_eq!(fx.wake_at, None);
+        // Another change waits too.
+        let now = START + 2 * AUTOSAVE_IDLE_NS;
+        host.state().now = now;
+        keys(&mut e, "x");
+        tick(&mut e, &host, now + 5 * AUTOSAVE_IDLE_NS);
+        assert!(!path.exists());
+        assert_eq!(e.status().warnings, [strings::NO_LONGER_ON_DISK]);
+        // Writing it back is `:w`'s choice.
+        keys(&mut e, ":w<CR>");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "llo\n");
+        assert!(e.status().warnings.is_empty());
+    }
+
+    #[test]
+    fn autosave_holds_silently_while_the_disk_warns() {
+        for ev in [
+            DiskEvent::Gone,
+            DiskEvent::Changed,
+            DiskEvent::ReadOnly,
+            DiskEvent::Unreadable,
+        ] {
+            let (mut e, host, files) = autosaving("hello");
+            keys(&mut e, "x");
+            e.disk = Some(ev);
+            tick(&mut e, &host, START + 5 * AUTOSAVE_IDLE_NS);
+            assert_eq!(writes(&files), 0, "{ev:?}");
+            assert_eq!(e.message(), None, "{ev:?}");
+        }
+    }
+
+    #[test]
+    fn closing_drops_the_waiting_autosave() {
+        let (mut e, host, files) = autosaving("hello");
+        keys(&mut e, "x");
+        assert_eq!(keys(&mut e, ":q!<CR>").close, Some(0));
+        // A wake already queued still arrives after the close.
+        tick(&mut e, &host, START + 5 * AUTOSAVE_IDLE_NS);
+        assert_eq!(writes(&files), 0);
+        assert_eq!(files.disk(), "hello");
     }
 }
