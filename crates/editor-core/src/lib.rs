@@ -4,6 +4,7 @@ pub mod effects;
 pub mod ex;
 pub mod file;
 pub mod grapheme;
+pub mod help;
 pub mod host;
 pub mod input;
 pub mod links;

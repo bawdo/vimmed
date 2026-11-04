@@ -34,6 +34,20 @@ impl Redraw {
     }
 }
 
+/// A scroll of the view that leaves the cursor where it is (reader view's
+/// keys).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scroll {
+    /// This many source lines down (up when negative).
+    Lines(i32),
+    /// This many heights of the text area down (up when negative).
+    Pages(i32),
+    /// To the document's start.
+    Top,
+    /// To the document's end.
+    Bottom,
+}
+
 /// The result of `Editor::handle`. Every field left at its default asks
 /// nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,6 +63,8 @@ pub struct Effects {
     pub scroll_to_cursor: bool,
     /// Reader mode, when it changed.
     pub reader: Option<bool>,
+    /// Scroll the view, leaving the cursor where it is.
+    pub scroll: Option<Scroll>,
     /// Wake me at this time (`marks::now_ns` clock): the shell arms a timer
     /// that feeds `Input::Tick` then, so a timed message can go.
     pub wake_at: Option<u64>,
@@ -66,6 +82,7 @@ impl Effects {
             close: other.close.or(self.close),
             scroll_to_cursor: self.scroll_to_cursor || other.scroll_to_cursor,
             reader: other.reader.or(self.reader),
+            scroll: other.scroll.or(self.scroll),
             wake_at: match (self.wake_at, other.wake_at) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
@@ -108,6 +125,7 @@ mod tests {
     fn effects_merge_keeps_the_later_values() {
         let a = Effects {
             redraw: Redraw::Lines(1..2),
+            scroll: Some(Scroll::Lines(2)),
             title: Some("a".into()),
             dirty: Some(true),
             scroll_to_cursor: true,
@@ -119,6 +137,7 @@ mod tests {
             title: Some("b".into()),
             close: Some(0),
             reader: Some(false),
+            scroll: Some(Scroll::Top),
             wake_at: Some(4),
             ..Effects::default()
         };
@@ -131,6 +150,7 @@ mod tests {
                 close: Some(0),
                 scroll_to_cursor: true,
                 reader: Some(false),
+                scroll: Some(Scroll::Top),
                 wake_at: Some(4),
             }
         );

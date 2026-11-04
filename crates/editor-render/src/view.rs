@@ -32,11 +32,16 @@
 //!
 //! Fonts: a line that shaped a glyph as `.notdef` is laid out again when lazy
 //! fallback lands a face for it (`poll_fonts`).
+//!
+//! Reader view: no caret and no status bar, so the text runs to the bottom
+//! of the frame; `scroll_by` scrolls without the cursor. The help overlay
+//! (`overlay`) covers the text area while the source shows it.
 
 use std::ops::Range;
 use std::path::Path;
 
 use editor_core::buffer::{LineShift, Pos, ShiftMark};
+use editor_core::effects::Scroll;
 use editor_core::grapheme;
 use editor_core::host::Waker;
 use editor_core::markdown::{
@@ -274,9 +279,9 @@ impl LineSlot {
 pub(crate) struct Geo {
     pub(crate) width: f32,
     pub(crate) height: f32,
-    col_x: f32,
-    col_w: f32,
-    page_top: f32,
+    pub(crate) col_x: f32,
+    pub(crate) col_w: f32,
+    pub(crate) page_top: f32,
     /// The first row of the status bar.
     pub(crate) text_bottom: f32,
 }
@@ -310,6 +315,13 @@ pub struct DocView {
     /// Where the source's line shifts stood at the last sync (`None` before
     /// the first, or when the source reports none).
     shift_mark: Option<ShiftMark>,
+    /// Reader view as last painted: no status bar, so the text runs to the
+    /// bottom of the frame.
+    reader: bool,
+    /// The help overlay's first row as last painted (`overlay`).
+    pub(crate) help: Option<usize>,
+    /// The help overlay's layouts, kept while their text and spans hold.
+    pub(crate) help_cache: Vec<Cached>,
 }
 
 impl DocView {
@@ -337,6 +349,9 @@ impl DocView {
             tables: Vec::new(),
             frame_no: 0,
             shift_mark: None,
+            reader: false,
+            help: None,
+            help_cache: Vec::new(),
         };
         v.clear_frame();
         v
@@ -385,6 +400,8 @@ impl DocView {
     pub fn paint_all(&mut self, src: &dyn ViewSource) {
         self.begin_frame();
         self.sync(src);
+        self.reader = src.reader();
+        self.help = src.help();
         let g = self.geo();
         self.caret = None;
         self.cursor_drawn = None;
@@ -402,6 +419,7 @@ impl DocView {
         // Only the tables on screen keep their geometry.
         let f = self.frame_no;
         self.tables.retain(|t| t.frame == f);
+        self.paint_help();
         self.last_status = None;
         self.paint_status(src);
         self.damage.add(0..self.frame.height_px);
@@ -417,7 +435,15 @@ impl DocView {
     ///
     /// An edit in or next to a rendered table repaints the whole table: its
     /// column widths come from every row, so any row can move them all.
+    ///
+    /// Reader view or the help overlay coming or going repaints it all
+    /// (`paint_all`); while the overlay shows, it is painted again over
+    /// whatever lines were.
     pub fn paint_lines(&mut self, src: &dyn ViewSource, lines: Range<usize>) {
+        if src.reader() != self.reader || src.help() != self.help {
+            self.paint_all(src);
+            return;
+        }
         self.begin_frame();
         let near_table: Vec<usize> = lines.clone().filter(|&i| self.was_near_table(i)).collect();
         let moved = self.sync(src);
@@ -466,6 +492,7 @@ impl DocView {
         if let Some(f) = from {
             self.repaint_to_bottom(src, f);
         }
+        self.paint_help();
         self.paint_status(src);
         self.layout.end_frame();
     }
@@ -519,6 +546,54 @@ impl DocView {
         let s = s.round();
         let moved = s != self.scroll;
         self.scroll = s;
+        moved
+    }
+
+    /// Scrolls the view without the cursor (reader view's keys): by whole
+    /// lines from the one at the top of the text area (a line partly
+    /// scrolled off counts as the top one, so the first line up shows it
+    /// whole), by text-area heights, or to either end. The scroll stays
+    /// between the top and where the last line's bottom meets the bottom
+    /// of the text area. Lines not shaped yet count at their estimated
+    /// heights. Returns true when it moved: call `paint_all` next.
+    pub fn scroll_by(&mut self, s: Scroll) -> bool {
+        let g = self.geo();
+        let heights: Vec<f32> = self.lines.iter().map(|l| l.height).collect();
+        let total: f32 = heights.iter().sum();
+        let max = (g.page_top + total - g.text_bottom).max(0.0).round();
+        // The offset of each line's top from the first line's.
+        let starts: Vec<f32> = heights
+            .iter()
+            .scan(0.0, |acc, h| {
+                let at = *acc;
+                *acc += h;
+                Some(at)
+            })
+            .collect();
+        let want = match s {
+            Scroll::Top => 0.0,
+            Scroll::Bottom => max,
+            Scroll::Pages(n) => self.scroll + n as f32 * (g.text_bottom - g.page_top).max(1.0),
+            Scroll::Lines(n) => {
+                let Some(last) = starts.len().checked_sub(1) else {
+                    return false;
+                };
+                // The line at the top: the last one starting at or above it.
+                let top = starts
+                    .partition_point(|&y| y <= self.scroll)
+                    .saturating_sub(1);
+                let partly = starts[top] < self.scroll;
+                let to = if n < 0 && partly {
+                    top as i64 + i64::from(n) + 1
+                } else {
+                    top as i64 + i64::from(n)
+                };
+                starts[to.clamp(0, last as i64) as usize]
+            }
+        };
+        let to = want.clamp(0.0, max).round();
+        let moved = to != self.scroll;
+        self.scroll = to;
         moved
     }
 
@@ -654,6 +729,12 @@ impl DocView {
             self.last_status = None;
             self.paint_status(src);
         }
+        // So does the help overlay, which also goes back over any line
+        // painted under it.
+        if self.help_cache.iter().any(|c| c.laid.missing_glyphs) {
+            self.help_cache.clear();
+        }
+        self.paint_help();
         self.layout.end_frame();
         true
     }
@@ -682,6 +763,9 @@ impl DocView {
     pub fn poll_async(&mut self) -> bool {
         let images = self.poll_images();
         let code = self.poll_highlight();
+        if images || code {
+            self.paint_help();
+        }
         images || code
     }
 
@@ -795,7 +879,11 @@ impl DocView {
             .min(width - 2.0 * side)
             .max(1.0)
             .round();
-        let status = (t.px(TokenId::SizeStatusHeight) * s).round().min(height);
+        let status = if self.reader {
+            0.0
+        } else {
+            (t.px(TokenId::SizeStatusHeight) * s).round().min(height)
+        };
         Geo {
             width,
             height,

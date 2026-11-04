@@ -12,6 +12,7 @@ pub mod highlight;
 pub mod images;
 pub mod layout;
 pub mod layout_cosmic;
+mod overlay;
 pub mod paint;
 mod status_paint;
 mod table_paint;
