@@ -982,9 +982,15 @@ mod tests {
         assert_eq!(e.mode(), Mode::Normal);
         assert_eq!(e.cursor(), pos(0, 1));
         assert_eq!(e.message(), Some("E486: Pattern not found: zzz"));
-        // The message does not time out (Task 26 fades it).
-        e.handle(Input::Tick { now_ns: u64::MAX });
+        // It fades after six seconds, as every message does.
+        e.handle(Input::Tick {
+            now_ns: crate::status::MESSAGE_FOR_NS - 1,
+        });
         assert_eq!(e.message(), Some("E486: Pattern not found: zzz"));
+        e.handle(Input::Tick {
+            now_ns: crate::status::MESSAGE_FOR_NS,
+        });
+        assert_eq!(e.message(), None);
         // vim: the failed pattern is still the one `n` looks for.
         keys(&mut e, "n");
         assert_eq!(e.cursor(), pos(0, 1));

@@ -14,6 +14,7 @@ use editor_core::markdown::{
     ordered_display, parse_line,
 };
 use editor_core::tokens::{Theme, TokenId, Tokens};
+use editor_core::view_model::{CaretShape, StatusLeft};
 use editor_render::fonts::{FontPaths, FontSet};
 use editor_render::layout::{GlyphMask, LaidLine, RowGeom, StyledSpan, TextLayout};
 use editor_render::layout_cosmic::CosmicLayout;
@@ -54,8 +55,15 @@ pub struct Fake {
     pub reader: bool,
     pub selection: Option<Selection>,
     pub matches: Vec<Vec<Range<usize>>>,
+    /// The current match: its line and source byte range.
+    pub current: Option<(usize, Range<usize>)>,
     /// The file name the status bar shows.
     pub file: String,
+    /// What the status bar shows on its left.
+    pub left: StatusLeft,
+    pub warnings: Vec<&'static str>,
+    pub showcmd: String,
+    pub caret: CaretShape,
 }
 
 impl Fake {
@@ -74,7 +82,12 @@ impl Fake {
             reader: false,
             selection: None,
             matches,
+            current: None,
             file: "notes.md".to_string(),
+            left: StatusLeft::Mode("INSERT"),
+            warnings: Vec::new(),
+            showcmd: String::new(),
+            caret: CaretShape::Bar,
         }
     }
 
@@ -157,9 +170,11 @@ impl ViewSource for Fake {
     }
     fn status(&self) -> StatusModel {
         StatusModel {
-            mode: "INSERT",
+            left: self.left.clone(),
             file: self.file.clone(),
             dirty: self.dirty,
+            warnings: self.warnings.clone(),
+            showcmd: self.showcmd.clone(),
             position: format!("{}:{}", self.cursor.line + 1, self.cursor.col + 1),
         }
     }
@@ -177,6 +192,16 @@ impl ViewSource for Fake {
     }
     fn matches(&self, i: usize) -> &[Range<usize>] {
         &self.matches[i]
+    }
+    fn current_match(&self) -> Option<(usize, Range<usize>)> {
+        self.current.clone()
+    }
+    fn caret_shape(&self) -> CaretShape {
+        if self.reader {
+            CaretShape::Hidden
+        } else {
+            self.caret
+        }
     }
 }
 

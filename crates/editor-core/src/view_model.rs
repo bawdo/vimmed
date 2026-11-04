@@ -9,17 +9,74 @@ use crate::grapheme;
 use crate::markdown::LineDisplay;
 use crate::tokens::{Theme, Tokens};
 
-/// The status bar's content. Task 26 extends it.
+/// How a status message reads: as information, a warning or an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsgKind {
+    Info,
+    Warning,
+    Error,
+}
+
+impl MsgKind {
+    /// The kind of `text`: an Error in vim's error form (`E` and a digit,
+    /// as in `E486: Pattern not found`), else Info. A word that merely
+    /// starts with `E` is no error.
+    pub fn of(text: &str) -> MsgKind {
+        let mut chars = text.chars();
+        match (chars.next(), chars.next()) {
+            (Some('E'), Some(d)) if d.is_ascii_digit() => MsgKind::Error,
+            _ => MsgKind::Info,
+        }
+    }
+}
+
+/// What the status bar shows on its left. The editor picks one: a
+/// message, then a prompt, then the line being typed, then the mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusLeft {
+    /// The mode name, for example `INSERT`.
+    Mode(&'static str),
+    /// A line being typed in the status bar: `:` commands, `/` and `?`
+    /// searches. `cursor` is a byte offset into `text`.
+    Input {
+        prefix: char,
+        text: String,
+        cursor: usize,
+    },
+    /// A question waiting for an answer, as `:s///c` asks.
+    Prompt(String),
+    Message {
+        text: String,
+        kind: MsgKind,
+    },
+}
+
+/// The status bar's content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusModel {
-    /// The mode name, for example `INSERT`.
-    pub mode: &'static str,
+    pub left: StatusLeft,
     /// The file name as shown.
     pub file: String,
     /// True when there are changes not saved.
     pub dirty: bool,
-    /// The cursor position as shown, for example `12:4`.
+    /// Warnings about the file on disk, shown after the file name.
+    pub warnings: Vec<&'static str>,
+    /// The pending count and keys, for example `2d`.
+    pub showcmd: String,
+    /// The cursor position as shown, `line:col`: the line from 1 and the
+    /// col the grapheme display column from 1.
     pub position: String,
+}
+
+/// How the document's caret is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaretShape {
+    /// A bar `size.caret` wide before the cursor (Insert).
+    Bar,
+    /// A block over the grapheme under the cursor (Normal, Visual).
+    Block,
+    /// None, while the caret is in the status bar (or in reader mode).
+    Hidden,
 }
 
 /// A selection between two source positions. Task 22 adds behaviour.
@@ -41,46 +98,46 @@ impl Selection {
         }
     }
 
-    /// The source byte range selected on `line`, or `None` when the line is
-    /// outside the selection. `line_len` is the line's length in bytes.
-    pub fn on_line(&self, line: usize, line_len: usize) -> Option<Range<usize>> {
+    /// The source byte range selected on `line`, whose text is `text`, or
+    /// `None` when the line is outside the selection. Linewise, the line is
+    /// whole. Charwise, the selection takes the whole grapheme under its
+    /// end (as Visual mode does), and its ends snap to grapheme boundaries;
+    /// an empty line gives an empty range.
+    pub fn on_line(&self, line: usize, text: &str) -> Option<Range<usize>> {
         let (start, end) = self.ordered();
         if line < start.line || line > end.line {
             return None;
         }
+        let len = text.len();
         if self.linewise {
-            return Some(0..line_len);
+            return Some(0..len);
         }
-        let from = if line == start.line { start.col } else { 0 };
-        let to = if line == end.line { end.col } else { line_len };
-        let (from, to) = (from.min(line_len), to.min(line_len));
-        (from < to).then_some(from..to)
+        let from = if line == start.line {
+            grapheme::floor(text, start.col)
+        } else {
+            0
+        };
+        let to = if line == end.line {
+            grapheme::next(text, grapheme::floor(text, end.col))
+        } else {
+            len
+        };
+        Some(from..to.max(from))
     }
-}
 
-impl Selection {
     /// The source byte range selected on each line, for paint, in line
-    /// order. Every line from the start to the end is listed, an empty one
-    /// with an empty range. Linewise, each line is whole. Charwise, the
-    /// selection takes the whole grapheme under its end (as Visual mode
-    /// does), and its ends snap to grapheme boundaries.
+    /// order: `on_line` for every line from the start to the end (clamped
+    /// to the buffer).
     pub fn ranges(&self, buf: &Buffer) -> Vec<(usize, Range<usize>)> {
         let (start, end) = self.ordered();
         let (start, end) = (buf.clamp(start), buf.clamp(end));
+        let sel = Selection {
+            anchor: start,
+            head: end,
+            linewise: self.linewise,
+        };
         (start.line..=end.line)
-            .map(|i| {
-                let len = buf.line(i).len();
-                if self.linewise {
-                    return (i, 0..len);
-                }
-                let from = if i == start.line { start.col } else { 0 };
-                let to = if i == end.line {
-                    grapheme::next(buf.line(i), end.col)
-                } else {
-                    len
-                };
-                (i, from..to.max(from))
-            })
+            .filter_map(|i| sel.on_line(i, buf.line(i)).map(|r| (i, r)))
             .collect()
     }
 }
@@ -101,6 +158,11 @@ pub trait ViewSource {
     fn selection(&self) -> Option<Selection>;
     /// Search match ranges on line `i`, as source byte ranges.
     fn matches(&self, i: usize) -> &[Range<usize>];
+    /// The match the cursor is on (the search's, or the one `:s///c` asks
+    /// about), as a line and its source byte range.
+    fn current_match(&self) -> Option<(usize, Range<usize>)>;
+    /// How the caret is drawn.
+    fn caret_shape(&self) -> CaretShape;
 }
 
 #[cfg(test)]
@@ -118,11 +180,13 @@ mod tests {
             head: pos(1, 4),
             linewise: false,
         };
-        assert_eq!(s.on_line(0, 10), None);
-        assert_eq!(s.on_line(1, 10), Some(4..10));
-        assert_eq!(s.on_line(2, 10), Some(0..10));
-        assert_eq!(s.on_line(3, 10), Some(0..2));
-        assert_eq!(s.on_line(4, 10), None);
+        let text = "0123456789";
+        assert_eq!(s.on_line(0, text), None);
+        assert_eq!(s.on_line(1, text), Some(4..10));
+        assert_eq!(s.on_line(2, text), Some(0..10));
+        // The end takes the grapheme under it.
+        assert_eq!(s.on_line(3, text), Some(0..3));
+        assert_eq!(s.on_line(4, text), None);
     }
 
     #[test]
@@ -132,16 +196,26 @@ mod tests {
             head: pos(1, 4),
             linewise: true,
         };
-        assert_eq!(s.on_line(1, 7), Some(0..7));
+        assert_eq!(s.on_line(1, "abcdefg"), Some(0..7));
     }
 
     #[test]
-    fn empty_selection_selects_nothing() {
+    fn a_fresh_selection_selects_the_grapheme_under_it() {
         let s = Selection {
-            anchor: pos(1, 4),
-            head: pos(1, 4),
+            anchor: pos(1, 1),
+            head: pos(1, 1),
             linewise: false,
         };
-        assert_eq!(s.on_line(1, 7), None);
+        assert_eq!(s.on_line(1, "ae\u{301}x"), Some(1..4));
+        assert_eq!(s.on_line(1, ""), Some(0..0));
+    }
+
+    #[test]
+    fn only_vim_error_forms_are_errors() {
+        assert_eq!(MsgKind::of("E486: Pattern not found: x"), MsgKind::Error);
+        assert_eq!(MsgKind::of("E37: No write"), MsgKind::Error);
+        assert_eq!(MsgKind::of("Esc pressed"), MsgKind::Info);
+        assert_eq!(MsgKind::of("E"), MsgKind::Info);
+        assert_eq!(MsgKind::of("3 substitutions on 1 line"), MsgKind::Info);
     }
 }

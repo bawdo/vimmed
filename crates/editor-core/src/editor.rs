@@ -20,8 +20,15 @@
 //! highlights, which follow every edit (`crate::search`).
 //!
 //! The command line (`:`), what it runs and `:s///c`'s Confirm mode live
-//! in `cmdline`. `:w` and `:e!` reach the file through `FileCalls`, a
-//! stand-in until Task 26's `Saver`.
+//! in `cmdline`. `:w`, `:e!` and closing reach the file through a
+//! `Saver` (`crate::saver`).
+//!
+//! The status bar: `ViewSource::status` picks what its left side shows (a
+//! message, then a prompt, then the line being typed, then the mode).
+//! Messages fade after `status::MESSAGE_FOR_NS` (asked for with
+//! `Effects::wake_at`, so the shell ticks then) and Esc clears one.
+//! `handle` repaints the status bar whenever its model changed, and the
+//! current match's lines whenever it moved, so no path has to ask.
 //!
 //! Undo groups: each Normal- or Visual-mode command is one undo step, a
 //! paste is one, each `:s` is one (a whole Confirm session included), and
@@ -50,13 +57,14 @@ use crate::markdown::{
     line_display, ordered_display, parse_line,
 };
 use crate::platform::Platform;
+use crate::saver::{Saver, Unwired};
 use crate::search::{self, Hit, Search};
 use crate::status::{self, Mode};
 use crate::strings;
 use crate::substitute::ConfirmSession;
 use crate::tokens::{Theme, Tokens};
 use crate::undo::History;
-use crate::view_model::{Selection, StatusModel, ViewSource};
+use crate::view_model::{CaretShape, MsgKind, Selection, StatusLeft, StatusModel, ViewSource};
 use crate::vim::operator::{self, EditCtx, OpOutcome, OpRange, Operator, Touched};
 use crate::vim::register::{Register, Registers};
 use crate::vim::repeat::Change;
@@ -83,27 +91,6 @@ impl Default for Config {
     fn default() -> Config {
         Config { vim: true }
     }
-}
-
-/// Where `:w` and `:e!` reach the file: `Editor::write` and
-/// `Editor::reload` call through here. A stand-in seam until Task 26 puts
-/// those calls on the `Saver` trait (Task 31 writes for real). Until then
-/// the editor holds `Unwired`, and tests a double that records the calls.
-pub trait FileCalls {
-    /// Writes the document; `force` is `:w!`. True when it was written.
-    fn write(&mut self, force: bool) -> bool;
-    /// Reloads the document from disk, dropping the changes.
-    fn reload(&mut self);
-}
-
-/// No file behind the editor yet: nothing is written or reloaded.
-struct Unwired;
-
-impl FileCalls for Unwired {
-    fn write(&mut self, _force: bool) -> bool {
-        false
-    }
-    fn reload(&mut self) {}
 }
 
 /// A search being typed, and what to go back to when it ends.
@@ -176,13 +163,17 @@ pub struct Editor {
     dirty: bool,
     reader: bool,
     title: String,
-    message: Option<String>,
-    /// When a timed message goes (`marks::now_ns` clock).
+    message: Option<(String, MsgKind)>,
+    /// When the message goes (`marks::now_ns` clock); `None` keeps it until
+    /// it is replaced or cleared.
     message_until: Option<u64>,
+    /// Warnings about the file on disk, for the status bar.
+    /// TODO(Tasks 31 and 32): read-only and changed-on-disk warnings.
+    warnings: Vec<&'static str>,
     cfg: Config,
     platform: Platform,
     host: Box<dyn Host>,
-    files: Box<dyn FileCalls>,
+    saver: Box<dyn Saver>,
 }
 
 impl Editor {
@@ -249,22 +240,47 @@ impl Editor {
             dirty: false,
             reader: req.view,
             title,
-            message: message.map(str::to_owned),
+            // Said before any input, it stays until replaced or cleared.
+            message: message.map(|m| (m.to_owned(), MsgKind::Warning)),
             message_until: None,
+            warnings: Vec::new(),
             cfg,
             platform,
             host,
-            files: Box::new(Unwired),
+            saver: Box::new(Unwired),
         }
     }
 
-    /// Puts a test double behind `:w` and `:e!`.
-    #[cfg(test)]
-    pub(crate) fn set_files(&mut self, files: Box<dyn FileCalls>) {
-        self.files = files;
+    /// Puts the file behind `:w`, `:e!` and closing.
+    pub fn set_saver(&mut self, saver: Box<dyn Saver>) {
+        self.saver = saver;
     }
 
     pub fn handle(&mut self, input: Input) -> Effects {
+        let status = self.status();
+        let current = self.current_match().map(|(line, _)| line);
+        let until = self.message_until;
+        let mut fx = self.dispatch(input);
+        if fx.redraw == Redraw::None && self.status() != status {
+            fx.redraw = Redraw::Status;
+        }
+        let now = self.current_match().map(|(line, _)| line);
+        if now != current {
+            let n = self.buf.line_count();
+            for line in [current, now].into_iter().flatten().filter(|&l| l < n) {
+                fx.redraw = std::mem::take(&mut fx.redraw).merge(Redraw::Lines(line..line + 1));
+            }
+        }
+        if self.message_until != until {
+            fx = fx.merge(Effects {
+                wake_at: self.message_until,
+                ..Effects::default()
+            });
+        }
+        fx
+    }
+
+    fn dispatch(&mut self, input: Input) -> Effects {
         match input {
             Input::Key(k) => self.key(k),
             // Committed text types only in Insert. In Normal and Visual it
@@ -286,15 +302,9 @@ impl Editor {
             }
             Input::Text(_) => Effects::default(),
             // TODO(later tasks): ask before closing with unsaved changes.
-            Input::CloseRequested => Effects {
-                close: Some(0),
-                ..Effects::default()
-            },
+            Input::CloseRequested => self.close(0),
             // TODO(Task 34): write the recovery copy before closing.
-            Input::Signal(s) => Effects {
-                close: Some(s.exit_code()),
-                ..Effects::default()
-            },
+            Input::Signal(s) => self.close(s.exit_code()),
             Input::Preedit { .. }
             | Input::Mouse(_)
             | Input::Scroll { .. }
@@ -309,16 +319,28 @@ impl Editor {
         &self.title
     }
 
-    /// A message for the status bar, if there is one. Task 26 shows it.
+    /// The status bar's message, if there is one.
     pub fn message(&self) -> Option<&str> {
-        self.message.as_deref()
+        self.message.as_ref().map(|(text, _)| text.as_str())
     }
 
-    /// Shows `text` in the status bar, for `for_ns` nanoseconds or (with
-    /// `None`) until something replaces it.
-    fn say(&mut self, text: String, for_ns: Option<u64>) {
-        self.message = Some(text);
-        self.message_until = for_ns.map(|ns| self.host.now_ns().saturating_add(ns));
+    /// Shows `text` in the status bar until it fades, as an Error when it
+    /// is in vim's error form (`MsgKind::of`).
+    fn say(&mut self, text: String) {
+        let kind = MsgKind::of(&text);
+        self.say_as(text, kind, status::MESSAGE_FOR_NS);
+    }
+
+    /// Shows `text` as `kind` for `for_ns` nanoseconds.
+    fn say_as(&mut self, text: String, kind: MsgKind, for_ns: u64) {
+        self.message = Some((text, kind));
+        self.message_until = Some(self.host.now_ns().saturating_add(for_ns));
+    }
+
+    /// Clears the status bar's message.
+    fn unsay(&mut self) {
+        self.message = None;
+        self.message_until = None;
     }
 
     /// The main loop woke: a timed message whose time is up goes.
@@ -326,8 +348,7 @@ impl Editor {
         if self.message_until.is_none_or(|until| now_ns < until) {
             return Effects::default();
         }
-        self.message = None;
-        self.message_until = None;
+        self.unsay();
         Effects {
             redraw: Redraw::Status,
             ..Effects::default()
@@ -433,6 +454,10 @@ impl Editor {
         } else {
             k
         };
+        // Esc clears a message, and goes on to do what it does.
+        if k.key == Key::Esc {
+            self.unsay();
+        }
         let redo = self.cfg.vim
             && self.mode == Mode::Normal
             && k.key == Key::Char('r')
@@ -583,6 +608,7 @@ impl Editor {
                     None => String::new(),
                 };
                 self.leave_visual();
+                self.unsay();
                 self.mode = Mode::Command;
                 status
             }
@@ -689,6 +715,7 @@ impl Editor {
             goal: self.goal,
         });
         self.mode = Mode::Search;
+        self.unsay();
         Effects {
             redraw: if self.search.is_some() {
                 Redraw::All
@@ -806,7 +833,7 @@ impl Editor {
                 }
                 if confirm && !search.query.is_empty() {
                     // vim: the pattern is the last search all the same.
-                    self.say(strings::pattern_not_found(&search.query), None);
+                    self.say(strings::pattern_not_found(&search.query));
                     search.refresh(&self.buf);
                     self.search = Some(search);
                 }
@@ -850,7 +877,7 @@ impl Editor {
             None => {
                 let text = strings::pattern_not_found(&last.query);
                 self.vim.discard();
-                self.say(text, None);
+                self.say(text);
                 Effects::default()
             }
         }
@@ -861,13 +888,13 @@ impl Editor {
     /// wrapped. An operator with nothing between does nothing.
     fn go_to_match(&mut self, op: Option<Operator>, hit: &Hit) -> Effects {
         if hit.wrapped {
-            self.say(
+            self.say_as(
                 strings::SEARCH_WRAPPED.to_owned(),
-                Some(search::WRAPPED_FOR_NS),
+                MsgKind::Info,
+                search::WRAPPED_FOR_NS,
             );
         } else {
-            self.message = None;
-            self.message_until = None;
+            self.unsay();
         }
         let status = Effects {
             redraw: Redraw::Status,
@@ -1401,10 +1428,36 @@ impl ViewSource for Editor {
         self.cursor
     }
     fn status(&self) -> StatusModel {
+        let left = if let Some((text, kind)) = &self.message {
+            StatusLeft::Message {
+                text: text.clone(),
+                kind: *kind,
+            }
+        } else if let Some(p) = self.prompt() {
+            StatusLeft::Prompt(p)
+        } else {
+            let typed = match (self.mode, &self.searching) {
+                (Mode::Command, _) => Some((':', &self.cmdline)),
+                (Mode::Search, Some(s)) => {
+                    Some((if s.search.forward { '/' } else { '?' }, &s.search.query))
+                }
+                _ => None,
+            };
+            match typed {
+                Some((prefix, text)) => StatusLeft::Input {
+                    prefix,
+                    text: text.clone(),
+                    cursor: text.len(),
+                },
+                None => StatusLeft::Mode(self.mode.name()),
+            }
+        };
         StatusModel {
-            mode: self.mode.name(),
+            left,
             file: self.title.clone(),
             dirty: self.dirty,
+            warnings: self.warnings.clone(),
+            showcmd: self.showcmd(),
             position: status::position(&self.buf, self.cursor),
         }
     }
@@ -1423,6 +1476,24 @@ impl ViewSource for Editor {
     }
     fn matches(&self, i: usize) -> &[Range<usize>] {
         self.search().map_or(&[], |s| s.matches_on(&self.buf, i))
+    }
+    /// While `:s///c` asks, the match it asks about (which can be one the
+    /// smartcase highlights do not show), else the search's.
+    fn current_match(&self) -> Option<(usize, Range<usize>)> {
+        match &self.confirm {
+            Some(session) => session.current(),
+            None => self.search()?.current(),
+        }
+    }
+    fn caret_shape(&self) -> CaretShape {
+        match self.mode {
+            _ if self.reader => CaretShape::Hidden,
+            Mode::Insert => CaretShape::Bar,
+            Mode::Search | Mode::Command => CaretShape::Hidden,
+            Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::Confirm | Mode::Prompt => {
+                CaretShape::Block
+            }
+        }
     }
 }
 
@@ -1649,7 +1720,7 @@ mod tests {
         let e = build(text, Config::default(), true);
         assert_eq!(e.mode(), Mode::Insert);
         assert_eq!(e.cursor(), Pos { line: 5, col: 7 });
-        assert_eq!(e.status().mode, "INSERT");
+        assert_eq!(e.status().left, StatusLeft::Mode("INSERT"));
     }
 
     #[test]
@@ -1718,7 +1789,7 @@ mod tests {
         let mut e = ed("e\u{301}x");
         at(&mut e, 0, 3);
         let s = e.status();
-        assert_eq!(s.mode, "INSERT");
+        assert_eq!(s.left, StatusLeft::Mode("INSERT"));
         assert_eq!(s.file, "notes.md");
         assert!(!s.dirty);
         assert_eq!(s.position, "1:2");

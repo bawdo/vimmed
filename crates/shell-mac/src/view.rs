@@ -50,6 +50,11 @@ define_class!(
         fn bench_check(&self, _sender: Option<&AnyObject>) {
             app::on_bench_check();
         }
+
+        #[unsafe(method(wake:))]
+        fn wake(&self, _sender: Option<&AnyObject>) {
+            app::on_wake();
+        }
     }
 );
 
@@ -85,6 +90,16 @@ impl DocumentView {
         // SAFETY: the view implements `benchCheck:`, which takes an object.
         let _: () = unsafe {
             msg_send![self, performSelector: sel!(benchCheck:), withObject: none, afterDelay: delay_s]
+        };
+    }
+
+    /// Calls `wake:` (an `Input::Tick` for the editor) after `delay_s`
+    /// seconds.
+    pub fn schedule_wake(&self, delay_s: f64) {
+        let none: Option<&AnyObject> = None;
+        // SAFETY: the view implements `wake:`, which takes an object.
+        let _: () = unsafe {
+            msg_send![self, performSelector: sel!(wake:), withObject: none, afterDelay: delay_s]
         };
     }
 }

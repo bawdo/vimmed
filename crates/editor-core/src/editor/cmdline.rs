@@ -1,17 +1,18 @@
 //! The command line (`:`) and what it runs: typing it, `crate::ex`
-//! parsing it on Enter, `:w`, `:q` and `:e!` through the file seam, and
+//! parsing it on Enter, `:w`, `:q` and `:e!` through the `Saver`, and
 //! `:s` (with `crate::substitute` finding the replacements), including the
 //! Confirm mode `:s///c` asks in.
 
-use crate::buffer::Pos;
+use crate::buffer::{Buffer, Pos};
 use crate::effects::{Effects, Redraw};
 use crate::ex::{self, ExCmd, Sub};
 use crate::grapheme;
 use crate::input::{Key, KeyEvent};
 use crate::search::{Hit, Search};
-use crate::status::Mode;
+use crate::status::{self, Mode};
 use crate::strings;
 use crate::substitute::{self, Answer, ConfirmSession};
+use crate::view_model::MsgKind;
 use crate::vim;
 use crate::vim::operator::OpOutcome;
 
@@ -43,7 +44,7 @@ impl Editor {
                 let fx = match ex::parse(&input) {
                     Ok(cmd) => self.ex(cmd),
                     Err(text) => {
-                        self.say(text, None);
+                        self.say(text);
                         Effects::default()
                     }
                 };
@@ -81,7 +82,7 @@ impl Editor {
         match cmd {
             ExCmd::Write { force } => self.write_step(force).1,
             ExCmd::Quit { force } if !force && self.dirty => {
-                self.say(strings::NO_WRITE_SINCE_CHANGE.to_owned(), None);
+                self.say(strings::NO_WRITE_SINCE_CHANGE.to_owned());
                 Effects::default()
             }
             ExCmd::Quit { .. } => self.close(0),
@@ -91,10 +92,7 @@ impl Editor {
                 (false, fx) => fx,
             },
             ExCmd::CQuit => self.close(1),
-            ExCmd::ReloadForce => {
-                self.reload();
-                Effects::default()
-            }
+            ExCmd::ReloadForce => self.reload(),
             // TODO(Task 40): `:help` shows the help overlay.
             // TODO(Task 37): `:table` inserts a table or opens the picker.
             ExCmd::Help | ExCmd::Table(_) => Effects::default(),
@@ -102,23 +100,71 @@ impl Editor {
         }
     }
 
-    /// Writes the document through the file seam: true when it was
-    /// written, which leaves the buffer clean.
+    /// Writes the document through the `Saver`: true when it was written,
+    /// which leaves the buffer clean. A failed write says why, as an Error.
     pub fn write(&mut self, force: bool) -> bool {
-        let written = self.files.write(force);
-        if written {
-            self.dirty = false;
+        match self.saver.write(&self.buf.to_text(), force) {
+            Ok(()) => {
+                self.dirty = false;
+                true
+            }
+            Err(e) => {
+                let text = strings::write_failed(&e.to_string());
+                self.say_as(text, MsgKind::Error, status::MESSAGE_FOR_NS);
+                false
+            }
         }
-        written
     }
 
-    /// Reloads the document from disk, through the file seam.
-    pub fn reload(&mut self) {
-        self.files.reload();
+    /// Reloads the document from disk through the `Saver`, dropping the
+    /// changes, as one undo step. A failed reload says why, as an Error,
+    /// and changes nothing.
+    /// TODO(Task 31): take the file's line endings and BOM from disk too.
+    pub fn reload(&mut self) -> Effects {
+        let fresh = match self.saver.reload() {
+            Ok(text) => Buffer::from_text(&text),
+            Err(e) => {
+                let text = strings::reload_failed(&e.to_string());
+                self.say_as(text, MsgKind::Error, status::MESSAGE_FOR_NS);
+                return Effects::default();
+            }
+        };
+        let lines = (0..fresh.line_count()).map(|i| fresh.line(i));
+        let text = lines.collect::<Vec<_>>().join("\n");
+        let same = (0..self.buf.line_count())
+            .map(|i| self.buf.line(i))
+            .eq((0..fresh.line_count()).map(|i| fresh.line(i)));
+        let was_dirty = self.dirty;
+        let fx = if same {
+            Effects::default()
+        } else {
+            let cursor = self.cursor;
+            let last = self.buf.line_count() - 1;
+            let end = Pos {
+                line: last,
+                col: self.buf.line(last).len(),
+            };
+            let fx = self.run(|ctx| {
+                ctx.replace(Pos::default()..end, &text);
+                OpOutcome {
+                    cursor,
+                    insert: false,
+                }
+            });
+            self.cursor = vim::rest(&self.buf, self.cursor);
+            fx
+        };
+        self.dirty = false;
+        fx.merge(Effects {
+            redraw: Redraw::All,
+            dirty: was_dirty.then_some(false),
+            ..Effects::default()
+        })
     }
 
-    /// Closes the window, exiting with `code`.
+    /// Closes the window, exiting with `code`, and tells the `Saver`.
     pub fn close(&mut self, code: i32) -> Effects {
+        self.saver.close(code);
         Effects {
             close: Some(code),
             ..Effects::default()
@@ -145,7 +191,7 @@ impl Editor {
             match self.search.as_ref().filter(|s| !s.query.is_empty()) {
                 Some(s) => sub.pattern.clone_from(&s.query),
                 None => {
-                    self.say(strings::NO_PREVIOUS_PATTERN.to_owned(), None);
+                    self.say(strings::NO_PREVIOUS_PATTERN.to_owned());
                     return Effects::default();
                 }
             }
@@ -158,7 +204,7 @@ impl Editor {
         let lines = match substitute::lines(sub.range, self.cursor.line, visual, n) {
             Ok(lines) => lines,
             Err(text) => {
-                self.say(text, None);
+                self.say(text);
                 return Effects::default();
             }
         };
@@ -192,10 +238,10 @@ impl Editor {
     fn count_matches(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
         let r = substitute::run(&self.buf, sub, lines);
         if r.count == 0 {
-            self.say(strings::pattern_not_found(&sub.pattern), None);
+            self.say(strings::pattern_not_found(&sub.pattern));
             return Effects::default();
         }
-        self.say(strings::matches(r.count, r.lines), None);
+        self.say(strings::matches(r.count, r.lines));
         let line = self.cursor.line;
         self.move_across(Pos {
             line,
@@ -209,7 +255,7 @@ impl Editor {
     fn substitute_all(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
         let r = substitute::run(&self.buf, sub, lines);
         let (Some(first), Some(last)) = (r.edits.first(), r.edits.last()) else {
-            self.say(strings::pattern_not_found(&sub.pattern), None);
+            self.say(strings::pattern_not_found(&sub.pattern));
             return Effects::default();
         };
         let (first, last) = (first.range.start.line, last.range.start.line);
@@ -229,7 +275,7 @@ impl Editor {
                 insert: false,
             }
         });
-        self.say(strings::substitutions(r.count, r.lines), None);
+        self.say(strings::substitutions(r.count, r.lines));
         fx
     }
 
@@ -239,11 +285,10 @@ impl Editor {
     fn start_confirm(&mut self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Effects {
         let session = substitute::confirm_session(&self.buf, sub, lines);
         if session.done() {
-            self.say(strings::pattern_not_found(&sub.pattern), None);
+            self.say(strings::pattern_not_found(&sub.pattern));
             return Effects::default();
         }
-        self.message = None;
-        self.message_until = None;
+        self.unsay();
         self.history.begin();
         self.confirm = Some(session);
         self.mode = Mode::Confirm;
@@ -326,7 +371,7 @@ impl Editor {
         }
         if session.count() > 0 {
             let text = strings::substitutions(session.count(), session.lines());
-            self.say(text, None);
+            self.say(text);
         }
         let to = vim::rest(&self.buf, session.end_cursor(&self.buf));
         self.move_across(to).merge(Effects {
