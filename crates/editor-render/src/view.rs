@@ -318,6 +318,9 @@ pub struct DocView {
     /// Reader view as last painted: no status bar, so the text runs to the
     /// bottom of the frame.
     reader: bool,
+    /// Set when the geometry changed outside a paint (`set_reader`), so
+    /// the next `paint_lines` paints all.
+    needs_all: bool,
     /// The help overlay's first row as last painted (`overlay`).
     pub(crate) help: Option<usize>,
     /// The help overlay's layouts, kept while their text and spans hold.
@@ -350,6 +353,7 @@ impl DocView {
             frame_no: 0,
             shift_mark: None,
             reader: false,
+            needs_all: false,
             help: None,
             help_cache: Vec::new(),
         };
@@ -401,6 +405,7 @@ impl DocView {
         self.begin_frame();
         self.sync(src);
         self.reader = src.reader();
+        self.needs_all = false;
         self.help = src.help();
         let g = self.geo();
         self.caret = None;
@@ -440,7 +445,7 @@ impl DocView {
     /// (`paint_all`); while the overlay shows, it is painted again over
     /// whatever lines were.
     pub fn paint_lines(&mut self, src: &dyn ViewSource, lines: Range<usize>) {
-        if src.reader() != self.reader || src.help() != self.help {
+        if self.needs_all || src.reader() != self.reader || src.help() != self.help {
             self.paint_all(src);
             return;
         }
@@ -549,6 +554,16 @@ impl DocView {
         moved
     }
 
+    /// Takes a reader view change (`Effects::reader`) before anything
+    /// measures against the text area, so `scroll_to_cursor` sees the
+    /// status bar coming back (or going). The next paint repaints all.
+    pub fn set_reader(&mut self, on: bool) {
+        if on != self.reader {
+            self.reader = on;
+            self.needs_all = true;
+        }
+    }
+
     /// Scrolls the view without the cursor (reader view's keys): by whole
     /// lines from the one at the top of the text area (a line partly
     /// scrolled off counts as the top one, so the first line up shows it
@@ -573,6 +588,10 @@ impl DocView {
         let want = match s {
             Scroll::Top => 0.0,
             Scroll::Bottom => max,
+            Scroll::Line(i) => match starts.len().checked_sub(1) {
+                Some(last) => starts[i.min(last)],
+                None => return false,
+            },
             Scroll::Pages(n) => self.scroll + n as f32 * (g.text_bottom - g.page_top).max(1.0),
             Scroll::Lines(n) => {
                 let Some(last) = starts.len().checked_sub(1) else {

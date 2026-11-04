@@ -393,9 +393,12 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     if let Some(t) = &fx.title {
         st.window.set_title(Some(t.as_str()));
     }
-    // A reader mode change (`fx.reader`) comes with a full repaint, which
-    // takes the new geometry. The dirty state shows in the title and
-    // status bar; GTK has no edited flag.
+    // A reader mode change takes the new geometry before the scroll below
+    // measures against it; a full repaint comes with it. The dirty state
+    // shows in the title and status bar; GTK has no edited flag.
+    if let Some(on) = fx.reader {
+        st.doc.set_reader(on);
+    }
     if let Some(at) = fx.wake_at {
         arm_wake(at);
     }

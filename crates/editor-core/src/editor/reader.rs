@@ -108,14 +108,27 @@ impl Editor {
     }
 
     /// A key in reader view outside Visual: the scrolling keys scroll,
-    /// with a count multiplying them. `None` passes the key on (to the
-    /// vim engine, which also takes the scrolling keys while an operator
-    /// or prefix waits). A `g` is held to see whether `gg` follows; if
-    /// not, it goes to the engine before the key does.
+    /// with a count multiplying them, and `[N]G` or `[N]gg` bring line N
+    /// to the top. `None` passes any other key on to the vim engine. A
+    /// scrolling key while an operator, register or other prefix waits
+    /// does nothing and drops what waited, since the engine would only
+    /// move the hidden cursor. A `g` is held (with any count left
+    /// waiting in the engine) to see whether `gg` follows; if not, it goes
+    /// to the engine before the key does.
     pub(super) fn reader_key(&mut self, k: KeyEvent) -> Option<Effects> {
+        let pending = self.vim.showcmd();
+        // A count alone (`3`), and nothing else, may come before a scroll.
+        let count: Option<i32> = if pending.is_empty() {
+            None
+        } else {
+            pending.parse().ok()
+        };
+        let counted = (pending.is_empty() || count.is_some()) && !self.vim.register_waiting();
+        // Line N at the top; the view clamps it to the document's end.
+        let to_line = |n: i32| Scroll::Line(usize::try_from(n.max(1) - 1).unwrap_or(0));
         if std::mem::take(&mut self.reader_g) {
             if k.key == Key::Char('g') {
-                return Some(self.reader_scroll(Scroll::Top));
+                return Some(self.reader_scroll(count.map_or(Scroll::Top, to_line)));
             }
             let mut fx = Effects::default();
             if self.cfg.vim {
@@ -125,26 +138,33 @@ impl Editor {
                     ..k
                 });
             }
+            // Re-entrant: with the held `g` cleared above, `key` runs this
+            // key the normal way, back through here only if it scrolls.
+            // It cannot hold another `g` on the strength of this one, so
+            // this recurses at most once.
             return Some(fx.merge(self.key(k)));
         }
-        let pending = self.vim.showcmd();
-        let count: i32 = if pending.is_empty() {
-            1
-        } else {
-            pending.parse().ok()?
-        };
+        let n = count.unwrap_or(1);
         let scroll = match k.key {
-            Key::Char('j') | Key::Down => Scroll::Lines(count),
-            Key::Char('k') | Key::Up => Scroll::Lines(-count),
-            Key::PageDown => Scroll::Pages(count),
-            Key::PageUp => Scroll::Pages(-count),
-            Key::Char('G') if pending.is_empty() => Scroll::Bottom,
-            Key::Char('g') if pending.is_empty() => {
+            Key::Char('j') | Key::Down => Scroll::Lines(n),
+            Key::Char('k') | Key::Up => Scroll::Lines(-n),
+            Key::PageDown => Scroll::Pages(n),
+            Key::PageUp => Scroll::Pages(-n),
+            Key::Char('G') => count.map_or(Scroll::Bottom, to_line),
+            Key::Char('g') if counted => {
                 self.reader_g = true;
                 return Some(Effects::default());
             }
+            Key::Char('g') => Scroll::Top,
             _ => return None,
         };
+        if !counted {
+            self.vim.cancel();
+            return Some(Effects {
+                redraw: Redraw::Status,
+                ..Effects::default()
+            });
+        }
         Some(self.reader_scroll(scroll))
     }
 
@@ -311,6 +331,89 @@ mod tests {
         keys(&mut e, "vjy");
         assert_eq!(e.register(None).unwrap().text, "a\nb");
         assert_eq!(e.text(), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn reader_ignores_search_keys() {
+        let mut e = build_reader("foo\nbar foo\nbaz");
+        for k in ["/", "?", "n", "N"] {
+            let fx = keys(&mut e, k);
+            assert_eq!(e.mode(), Mode::Normal, "{k} opened a line");
+            assert_eq!(fx.scroll, None);
+            // The next key scrolls, not types into a hidden query.
+            assert_eq!(keys(&mut e, "j").scroll, Some(Scroll::Lines(1)));
+            assert_eq!(e.mode(), Mode::Normal);
+        }
+        assert_eq!(e.cursor(), pos(0, 0));
+        // An operator waiting for a search is dropped too.
+        keys(&mut e, "y/bar<CR>");
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.register(None), None);
+        // So is Visual's.
+        keys(&mut e, "v/");
+        assert_eq!(e.mode(), Mode::Visual);
+        keys(&mut e, "<Esc>");
+        // The toggle still works.
+        assert_eq!(toggle(&mut e).reader, Some(false));
+    }
+
+    #[test]
+    fn reader_zz_refuses_when_dirty() {
+        let (mut e, files) = ed_with_files("abc");
+        keys(&mut e, "x");
+        assert!(e.dirty());
+        toggle(&mut e);
+        let fx = keys(&mut e, "ZZ");
+        assert_eq!(fx.close, None);
+        assert!(files.calls().is_empty(), "wrote: {:?}", files.calls());
+        assert_eq!(e.message(), Some(crate::strings::READ_ONLY_ZQ));
+        assert!(e.dirty());
+        // ZQ still discards and closes.
+        assert_eq!(keys(&mut e, "ZQ").close, Some(0));
+    }
+
+    #[test]
+    fn reader_zz_closes_when_clean() {
+        let (mut e, files) = ed_with_files("abc");
+        toggle(&mut e);
+        assert_eq!(keys(&mut e, "ZZ").close, Some(0));
+        assert!(
+            !files
+                .calls()
+                .iter()
+                .any(|c| matches!(c, crate::testkit::FileCall::Write { .. }))
+        );
+    }
+
+    #[test]
+    fn counted_g_scrolls_that_line_to_the_top() {
+        let mut e = build_reader("a\nb\nc\nd\ne");
+        assert_eq!(keys(&mut e, "3G").scroll, Some(Scroll::Line(2)));
+        assert_eq!(keys(&mut e, "4gg").scroll, Some(Scroll::Line(3)));
+        // Line 0 is line 1, and a count past the end is the end's to clamp.
+        assert_eq!(keys(&mut e, "0G").scroll, Some(Scroll::Bottom));
+        assert_eq!(keys(&mut e, "1gg").scroll, Some(Scroll::Line(0)));
+        assert_eq!(keys(&mut e, "99G").scroll, Some(Scroll::Line(98)));
+        assert_eq!(e.cursor(), pos(0, 0));
+        assert_eq!(e.showcmd(), "");
+    }
+
+    #[test]
+    fn scroll_keys_after_an_operator_or_register_do_nothing() {
+        let mut e = build_reader("a\nb\nc\nd");
+        for seq in ["yj", "\"aj", "\"a3k", "dG", "yG", "\"<Down>", "cj"] {
+            let fx = keys(&mut e, seq);
+            assert_eq!(fx.scroll, None, "{seq} scrolled");
+            assert_eq!(e.cursor(), pos(0, 0), "{seq} moved the cursor");
+            assert_eq!(e.showcmd(), "", "{seq} left keys pending");
+        }
+        keys(&mut e, "c");
+        assert_eq!(e.handle(key(Key::PageDown)).scroll, None);
+        assert_eq!(e.showcmd(), "");
+        assert_eq!(e.register(None), None);
+        assert_eq!(e.register(Some('a')), None);
+        // Afterwards the keys scroll as ever.
+        assert_eq!(keys(&mut e, "j").scroll, Some(Scroll::Lines(1)));
     }
 
     #[test]

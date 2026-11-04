@@ -289,6 +289,12 @@ impl Vim {
         }
     }
 
+    /// True while a named register (`"a`) waits for its command; `showcmd`
+    /// does not show it.
+    pub fn register_waiting(&self) -> bool {
+        self.register.is_some()
+    }
+
     /// An Insert session going on after a pause (reader view toggled off
     /// in it): what is typed from here is a fresh insert, as after an
     /// arrow key.

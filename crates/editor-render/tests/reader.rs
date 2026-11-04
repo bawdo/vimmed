@@ -96,6 +96,52 @@ fn reader_keys_scroll_the_view() {
 }
 
 #[test]
+fn leaving_reader_keeps_the_caret_above_the_status_bar() {
+    let t = Tokens::defaults(Theme::Light);
+    let g = Geom::new(&t, 1.0);
+    let dir = scratch("leave");
+    let text: Vec<String> = (0..120).map(|i| format!("line {i}")).collect();
+    let mut ed = open_editor(&dir, &text.join("\n"), false);
+    let mut v = view(&t, 1.0);
+    v.paint_all(&ed);
+    // The cursor on the last line, at the bottom of the text area.
+    press(&mut ed, &mut v, Key::Char('G'));
+    press_with(&mut ed, &mut v, Key::Char('R'), primary_shift());
+    // Scrolled up a line in reader view, the cursor's line sits where the
+    // status bar will come back.
+    press(&mut ed, &mut v, Key::Char('k'));
+    press_with(&mut ed, &mut v, Key::Char('R'), primary_shift());
+    assert!(!ed.reader());
+    let caret = v.caret_rect().expect("a caret");
+    assert!(
+        caret.y + caret.h <= g.text_bottom() as f32,
+        "caret bottom {} below the text area's {}",
+        caret.y + caret.h,
+        g.text_bottom()
+    );
+}
+
+#[test]
+fn counted_g_brings_that_line_to_the_top() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = scratch("count_g");
+    let text: Vec<String> = (0..120).map(|i| format!("line {i}")).collect();
+    let mut ed = open_editor(&dir, &text.join("\n"), true);
+    let mut v = view(&t, 1.0);
+    v.paint_all(&ed);
+    for c in ['1', '0', 'G'] {
+        press(&mut ed, &mut v, Key::Char(c));
+    }
+    assert_eq!(line_at(&v, &t, 1.0), 9);
+    // Past what the end allows, the last line stays at the bottom.
+    for c in ['1', '1', '8', 'g', 'g'] {
+        press(&mut ed, &mut v, Key::Char(c));
+    }
+    assert_eq!(v.hit_test(W_PT / 2.0, H_PT - 2.0).unwrap().line, 119);
+    assert!(line_at(&v, &t, 1.0) < 117);
+}
+
+#[test]
 fn help_overlay_paints_in_overlay_colours() {
     let t = Tokens::defaults(Theme::Light);
     let g = Geom::new(&t, 1.0);

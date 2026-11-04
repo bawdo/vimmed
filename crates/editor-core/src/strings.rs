@@ -61,6 +61,9 @@ pub fn reload_failed(reason: &str) -> String {
 /// (the tests' editors).
 pub const NO_FILE_ACCESS: &str = "file access is not wired up yet";
 
+/// `ZZ` in reader view with unsaved changes: reader view never writes.
+pub const READ_ONLY_ZQ: &str = "read-only: ZQ to discard";
+
 /// A write that succeeded.
 pub const WRITTEN: &str = "written";
 

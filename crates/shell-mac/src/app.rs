@@ -360,8 +360,12 @@ fn apply(st: &mut State, fx: Effects) -> Option<i32> {
     if let Some(d) = fx.dirty {
         st.window.setDocumentEdited(d);
     }
-    // A reader mode change (`fx.reader`) comes with a full repaint, which
-    // takes the new geometry; the input method follows in `sync_ime`.
+    // A reader mode change takes the new geometry before the scroll below
+    // measures against it; a full repaint comes with it, and the input
+    // method follows in `sync_ime`.
+    if let Some(on) = fx.reader {
+        st.doc.set_reader(on);
+    }
     if let Some(at) = fx.wake_at {
         arm_wake(st, at);
     }

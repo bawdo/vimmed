@@ -381,6 +381,9 @@ pub fn press_with(ed: &mut Editor, v: &mut DocView, k: Key, mods: Mods) {
         time_ns: 0,
     }));
     let mut redraw = fx.redraw;
+    if let Some(on) = fx.reader {
+        v.set_reader(on);
+    }
     if fx.scroll_to_cursor && v.scroll_to_cursor(ed.cursor()) {
         redraw = Redraw::All;
     }

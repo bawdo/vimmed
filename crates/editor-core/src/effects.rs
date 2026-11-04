@@ -42,6 +42,9 @@ pub enum Scroll {
     Lines(i32),
     /// This many heights of the text area down (up when negative).
     Pages(i32),
+    /// Source line `n` (from 0) at the top, as near as the document's end
+    /// allows (`[N]G`, `[N]gg`).
+    Line(usize),
     /// To the document's start.
     Top,
     /// To the document's end.

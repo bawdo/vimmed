@@ -791,6 +791,16 @@ impl Editor {
         };
         match step {
             Step::Pending => status,
+            // Reader view never writes: with changes, `ZZ` refuses and
+            // says how to leave without them, as vim does read-only.
+            Step::Quit { write: true } if self.reader && self.dirty => {
+                self.say_as(
+                    strings::READ_ONLY_ZQ.to_owned(),
+                    MsgKind::Error,
+                    status::MESSAGE_FOR_NS,
+                );
+                status
+            }
             Step::Quit { write } => {
                 let cmd = if write {
                     ExCmd::Exit
@@ -831,6 +841,9 @@ impl Editor {
                 self.mode = Mode::Command;
                 status
             }
+            // Reader view refuses searching too (R57): its line would be
+            // typed in the hidden status bar.
+            Step::Search { .. } | Step::SearchNext { .. } if self.reader => status,
             Step::Search { forward, op, count } => self.start_search(forward, op, count),
             Step::SearchNext { reverse, op, count } => {
                 status.merge(self.search_next(reverse, op, count))

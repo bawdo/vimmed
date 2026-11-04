@@ -17,6 +17,12 @@ use crate::layout::StyledSpan;
 use crate::paint::{blend, fill, span_for};
 use crate::view::{Cached, DocView, lay};
 
+/// The least width a key's description wraps to, in multiples of
+/// `font.size`: in a window too narrow for the column, the description runs
+/// past the column's edge (clipped by the frame) rather than wrapping a
+/// word or two per row.
+const DESC_MIN_EMS: f32 = 10.0;
+
 impl DocView {
     /// Paints the help overlay over the text area while the source showed
     /// it at the last paint (`help`), and damages the text area. Without
@@ -82,7 +88,8 @@ impl DocView {
             keys.push(key);
         }
         let desc_x = left + key_w + pad;
-        let desc_w = (left + width - desc_x).max(1.0);
+        let desc_min = t.px(TokenId::FontSize) * s * DESC_MIN_EMS;
+        let desc_w = (left + width - desc_x).max(desc_min);
 
         // The rows that fit, from `first`: each piece and where it goes.
         let mut placed: Vec<(Cached, f32, f32)> = Vec::new();
