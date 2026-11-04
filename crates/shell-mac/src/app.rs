@@ -276,7 +276,8 @@ pub fn launch(delegate: &Delegate) {
     let layout = CosmicLayout::new(fonts, &tokens);
     let (w, h) = (size.0 as f32, size.1 as f32);
     let mut doc = DocView::new(Box::new(layout), &tokens, w, h, scale as f32);
-    doc.set_images(&base_dir, waker);
+    doc.set_images(&base_dir, waker.clone());
+    doc.set_highlighting(waker);
     doc.paint_all(&editor);
     marks::mark(names::FIRST_PAINT);
     let frame = doc.frame();
