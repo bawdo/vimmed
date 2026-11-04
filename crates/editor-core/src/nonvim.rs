@@ -607,6 +607,7 @@ mod tests {
             Config {
                 vim: false,
                 autosave: true,
+                ..Config::default()
             },
             Platform::Mac,
             Box::new(host.clone()),
@@ -1019,6 +1020,7 @@ mod tests {
             Config {
                 vim: false,
                 autosave,
+                ..Config::default()
             },
             Platform::Mac,
             Box::new(host.clone()),

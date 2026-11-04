@@ -16,8 +16,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent, NSTextInputClient,
-    NSView, NSWindow, NSWindowDelegate,
+    NSAppearanceCustomization, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSEvent, NSTextInputClient, NSView, NSWindow, NSWindowDelegate,
 };
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{
@@ -118,6 +118,14 @@ define_class!(
         #[unsafe(method(wake:))]
         fn wake(&self, _sender: Option<&AnyObject>) {
             app::on_wake();
+        }
+
+        /// The system switched light and dark (or the view moved to a
+        /// window that looks different): the editor follows it under the
+        /// system theme.
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn view_did_change_effective_appearance(&self) {
+            app::on_appearance(app::theme_of(&self.effectiveAppearance()));
         }
     }
 

@@ -16,7 +16,7 @@ use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
 use editor_core::input::{Input, MouseEvent, MouseKind, SignalKind};
 use editor_core::platform::Platform;
-use editor_core::tokens::TokenId;
+use editor_core::tokens::{Theme, TokenId, Tokens};
 use editor_core::view_model::ViewSource;
 use editor_render::damage::Damage;
 use editor_render::fonts::FontSet;
@@ -29,12 +29,13 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSScreen, NSTextInputContext, NSView,
-    NSWindow, NSWindowStyleMask,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType,
+    NSMenu, NSMenuItem, NSScreen, NSTextInputContext, NSView, NSWindow, NSWindowStyleMask,
 };
+use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString, NSUserDefaults};
+use objc2_foundation::{NSArray, NSDictionary, NSPoint, NSRect, NSSize, NSString, NSUserDefaults};
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::displaylink::Link;
@@ -190,7 +191,9 @@ pub fn run(args: WindowArgs) -> i32 {
         view: args.view,
         display_name: args.display_name,
     };
-    let editor = Editor::open(req, Config::default(), Platform::Mac, Box::new(host));
+    let (cfg, config_messages) = Config::load_from_env();
+    let mut editor = Editor::open(req, cfg, Platform::Mac, Box::new(host));
+    editor.say_config(&config_messages);
     let fonts = FontSet::with_lookup(Box::new(MacFonts::load()), cache_file(), waker.clone());
     marks::mark(names::FONTS_LOADED);
     PREPARED.with(|p| {
@@ -251,7 +254,7 @@ pub fn launch(delegate: &Delegate) {
     marks::mark(names::TOOLKIT_INIT);
     let mtm = MainThreadMarker::from(delegate);
     let Some(Prepared {
-        editor,
+        mut editor,
         fonts,
         base_dir,
         waker,
@@ -287,11 +290,13 @@ pub fn launch(delegate: &Delegate) {
     // SAFETY: we keep our own reference, so AppKit must not release it.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(editor.title()));
+    // The first frame paints in the system's light or dark; the view
+    // reports changes from then on (`on_appearance`). The whole frame is
+    // painted below, so the effects ask nothing more.
+    let appearance = NSApplication::sharedApplication(mtm).effectiveAppearance();
+    let _ = editor.handle(Input::Appearance(theme_of(&appearance)));
     let tokens = editor.tokens().clone();
-    let bg = tokens.color(TokenId::ColorBg);
-    let c = |v: u8| f64::from(v) / 255.0;
-    let bg = CGColor::new_srgb(c(bg.r), c(bg.g), c(bg.b), c(bg.a));
-    let (view, layer) = DocumentView::new(mtm, rect, &bg);
+    let (view, layer) = DocumentView::new(mtm, rect, &bg_color(&tokens));
     window.setContentView(Some(&view));
     window.center();
     marks::mark(names::WINDOW_CREATED);
@@ -736,6 +741,44 @@ pub fn on_wake() {
             stage(st);
         }
         close
+    });
+    flush_ime();
+    if let Some(Some(code)) = close {
+        finish(code);
+    }
+}
+
+/// `color.bg` as the layer's background, shown wherever no surface
+/// covers it (during a live resize).
+fn bg_color(tokens: &Tokens) -> CFRetained<CGColor> {
+    let bg = tokens.color(TokenId::ColorBg);
+    let c = |v: u8| f64::from(v) / 255.0;
+    CGColor::new_srgb(c(bg.r), c(bg.g), c(bg.b), c(bg.a))
+}
+
+/// The theme an appearance is: dark for any dark variant (high contrast
+/// included), else light.
+pub fn theme_of(appearance: &NSAppearance) -> Theme {
+    // SAFETY: reading framework constants.
+    let (aqua, dark) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
+    let names = NSArray::from_slice(&[aqua, dark]);
+    match appearance.bestMatchFromAppearancesWithNames(&names) {
+        Some(name) if name.isEqualToString(dark) => Theme::Dark,
+        _ => Theme::Light,
+    }
+}
+
+/// The view's appearance changed (`viewDidChangeEffectiveAppearance`):
+/// under the system theme, everything repaints in the new token set, and
+/// the layer's background follows.
+pub fn on_appearance(theme: Theme) {
+    let close = with_state(|st| {
+        let fx = st.editor.handle(Input::Appearance(theme));
+        if fx.redraw == Redraw::All {
+            st.layer
+                .setBackgroundColor(Some(&bg_color(st.editor.tokens())));
+        }
+        apply_changed(st, fx)
     });
     flush_ime();
     if let Some(Some(code)) = close {

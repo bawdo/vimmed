@@ -265,3 +265,24 @@ pub fn window_title(name: &str, dirty: bool) -> String {
         name.to_owned()
     }
 }
+
+/// The config file could not be read or is not valid TOML, so the defaults
+/// are used.
+pub fn config_error(reason: &str) -> String {
+    format!("config error: {reason}")
+}
+
+/// A key in the config file that names no setting (or, under `[tokens]`,
+/// no token). It is skipped.
+pub fn unknown_setting(key: &str) -> String {
+    format!("unknown setting: {key}")
+}
+
+/// A setting in the config file whose value is the wrong kind or out of
+/// range. It is skipped.
+pub fn bad_setting(key: &str, value: &str) -> String {
+    format!("bad value for {key}: {value}")
+}
+
+/// Joins the messages from opening into one status bar message.
+pub const MESSAGE_JOIN: &str = "; ";

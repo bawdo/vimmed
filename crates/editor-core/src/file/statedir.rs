@@ -43,6 +43,12 @@ impl StateDir {
         self.root.join("recovery")
     }
 
+    /// Where the last appearance the system reported is kept
+    /// (`config::cached_appearance`).
+    pub fn appearance(&self) -> PathBuf {
+        self.root.join("appearance")
+    }
+
     /// Where lock records go.
     pub fn locks(&self) -> PathBuf {
         self.root.join("locks")

@@ -93,6 +93,7 @@
 //! `grapheme::next` / `grapheme::prev` before it reaches `Buffer::replace`,
 //! so no edit splits a grapheme cluster.
 
+mod appearance;
 mod autosave;
 mod cmdline;
 mod disk;
@@ -111,6 +112,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use crate::buffer::{Buffer, Pos, ShiftMark};
+pub use crate::config::{Config, ThemePref};
 use crate::effects::{Effects, Redraw};
 use crate::ex::ExCmd;
 use crate::file::lock::Lock;
@@ -151,25 +153,6 @@ pub struct OpenRequest {
     pub view: bool,
     /// The name to show in place of the file name.
     pub display_name: Option<String>,
-}
-
-/// The editor's settings. A stub until Task 35.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Config {
-    /// Vim keybindings.
-    pub vim: bool,
-    /// Write the file after a short idle pause following each change
-    /// (`autosave`). Off by default.
-    pub autosave: bool,
-}
-
-impl Default for Config {
-    fn default() -> Config {
-        Config {
-            vim: true,
-            autosave: false,
-        }
-    }
 }
 
 /// A search being typed, and what to go back to when it ends.
@@ -219,7 +202,11 @@ fn first_bold(buf: &Buffer, blocks: &Blocks) -> Option<Pos> {
 pub struct Editor {
     buf: Buffer,
     blocks: Blocks,
+    /// The token set for `theme`, from the config (`appearance`).
     tokens: Tokens,
+    /// The theme painted: the config's, or the system's appearance under
+    /// `ThemePref::System`.
+    theme: Theme,
     cursor: Pos,
     /// The column Up and Down (and `j`, `k`) aim for while they repeat.
     /// `None` means the cursor's own display column.
@@ -287,6 +274,9 @@ pub struct Editor {
     /// Why the lock record could not be written, held back while the
     /// already-open prompt asks (`locking`).
     lock_warning: Option<String>,
+    /// What the config file's read found wrong, held back while a prompt
+    /// at open asks (`say_config`).
+    config_warning: Option<String>,
     /// The grid picker `:table` opens, while it shows (`table_keys`).
     picker: Option<TablePicker>,
     /// What the watch last found wrong with the file on disk (`disk`):
@@ -419,10 +409,13 @@ impl Editor {
         } else {
             Pos::default()
         };
+        // Light until the shell reports the system's appearance.
+        let theme = cfg.theme.fixed().unwrap_or(Theme::Light);
         Editor {
             buf,
             blocks,
-            tokens: Tokens::defaults(Theme::Light),
+            tokens: cfg.tokens(theme).0,
+            theme,
             cursor,
             goal: None,
             // Bench mode types straight away, so it starts in Insert.
@@ -462,6 +455,7 @@ impl Editor {
             lock: None,
             read_only_chosen: false,
             lock_warning: None,
+            config_warning: None,
             picker: None,
             disk: None,
             watcher: None,
@@ -603,7 +597,9 @@ impl Editor {
             Input::Scroll { dy_pt } => self.wheel(dy_pt),
             // Coming to the front looks at the file at once (`disk`).
             Input::Focus(true) => self.focus_in(),
-            Input::Focus(_) | Input::Appearance(_) => Effects::default(),
+            // The system's light or dark (`appearance`).
+            Input::Appearance(theme) => self.appearance(theme),
+            Input::Focus(_) => Effects::default(),
             Input::Tick { now_ns } => self.tick(now_ns),
         }
     }
@@ -2026,8 +2022,7 @@ impl ViewSource for Editor {
         &self.tokens
     }
     fn theme(&self) -> Theme {
-        // TODO(Task 35): follow the appearance and the config.
-        Theme::Light
+        self.theme
     }
     fn reader(&self) -> bool {
         self.reader

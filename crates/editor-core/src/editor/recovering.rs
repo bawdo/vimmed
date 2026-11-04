@@ -647,6 +647,24 @@ mod tests {
     }
 
     #[test]
+    fn the_config_warning_waits_for_the_recovery_prompt() {
+        let f = Fixture::new();
+        f.plant("from the copy");
+        let (mut e, _host) = open(&f);
+        e.say_config(&["unknown setting: wrap".into()]);
+        assert!(asks_recovery(&e));
+        assert_eq!(e.message(), None);
+        keys(&mut e, "d");
+        assert_eq!(
+            e.status().left,
+            StatusLeft::Message {
+                text: "unknown setting: wrap".into(),
+                kind: MsgKind::Warning,
+            }
+        );
+    }
+
+    #[test]
     fn stale_live_and_reader_copies_ask_nothing() {
         // Older than the file on disk.
         let f = Fixture::new();
