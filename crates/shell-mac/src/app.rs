@@ -37,7 +37,7 @@ use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::displaylink::Link;
 use crate::fonts_ct::{MacFonts, cache_file};
-use crate::glass::{KeyTimes, Tick, key_values};
+use crate::glass::{KeyTimes, Tick, input_kind, key_values, kind_value, redraw_kind};
 use crate::present::{IoSurface, Presenter};
 use crate::startup::{FirstFrame, fit_content};
 use crate::view::{Delegate, DocumentView};
@@ -374,13 +374,17 @@ pub fn on_key(event: &NSEvent) {
     let Some(inp) = input::from_event(event) else {
         return;
     };
+    let input = input_kind(&inp);
     let close = with_state(|st| {
         let fx = st.editor.handle(inp);
+        let redraw = redraw_kind(&fx.redraw);
         let close = apply(st, fx);
         st.keys.push(KeyTimes {
             event_s,
             handler_s,
             staged_s: now_s(),
+            input,
+            redraw,
         });
         // A key that changed nothing still counts once the next tick runs.
         st.link.resume();
@@ -421,6 +425,8 @@ pub fn on_tick() {
                 for (name, v) in key_values(&k, &t) {
                     marks::value(name, v);
                 }
+                let (name, v) = kind_value(&k);
+                marks::value(&name, v);
                 st.progress.keys_done += 1;
             }
             st.progress.last_key_ns = Some(now_ns);

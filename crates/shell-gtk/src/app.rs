@@ -375,8 +375,10 @@ fn on_key(
     let Some(inp) = input::map(key.into_glib(), key.to_unicode(), mods, k.start_ns) else {
         return glib::Propagation::Proceed;
     };
+    k.input = timing::input_kind(&inp);
     let close = with_state(|st| {
         let fx = st.editor.handle(inp);
+        k.redraw = timing::redraw_kind(&fx.redraw);
         let close = apply(st, fx);
         // Straight to the frame clock: no idle or timeout hop. A key that
         // changed nothing is still drawn once, so its timings close.
@@ -413,6 +415,9 @@ fn on_after_paint(clock: &gdk::FrameClock) {
         for k in drawn {
             for (name, v) in timing::key_values(&k, now) {
                 marks::value(name, v);
+            }
+            if let Some((name, v)) = timing::kind_value(&k) {
+                marks::value(&name, v);
             }
             st.glass.push((frame, Glass::Key(k.start_ns), 0));
             st.progress.keys_done += 1;

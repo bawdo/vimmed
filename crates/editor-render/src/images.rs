@@ -8,11 +8,20 @@
 //!
 //! Only local paths are loaded, relative to the document's directory. A source
 //! with a scheme is `Remote`: nothing is fetched and no job is queued.
+//!
+//! Resampling a decoded image to its box in device pixels (tens of
+//! milliseconds for a large image) runs on the same worker. `scaled` asks for
+//! a box, keyed by (source, width, height): a request already in flight is not
+//! queued again, and the result comes back through `poll` and the waker. A
+//! result nobody claims before the next `poll` is dropped, so a box that
+//! changed or scrolled away leaves nothing behind. The last `SCALED_KEEP`
+//! claimed copies are kept, so an image scrolled back into view is a plain
+//! copy again.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use editor_core::host::Waker;
 use editor_core::tokens::{Theme, TokenId, Tokens};
@@ -20,9 +29,16 @@ use image::ImageReader;
 use image::imageops::FilterType;
 use tiny_skia::Pixmap;
 
+use crate::paint::draw_scaled;
+
 /// Decoded pixels are kept at no more than this multiple of the display size
 /// in points, enough for a 2x display.
 const DECODE_OVERSAMPLE: f32 = 2.0;
+
+/// How many resampled copies `Images` keeps for reuse, most recently used
+/// first. Each is box-sized (a full-column image at scale 2 is about 4 MB),
+/// so this bounds what is kept beyond the copies on-screen lines hold.
+pub const SCALED_KEEP: usize = 4;
 
 /// Where an image is in its life.
 #[derive(Clone)]
@@ -45,20 +61,60 @@ pub struct ImageSlot {
     pub state: ImageState,
 }
 
+/// A decoded image resampled to a box in device pixels.
+#[derive(Clone)]
+pub struct Scaled {
+    pub pixmap: Arc<Pixmap>,
+    /// Every pixel has full alpha, so a redraw is a plain row copy.
+    pub opaque: bool,
+}
+
+/// A resampled copy: the source and the box in pixels.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ScaleKey {
+    src: String,
+    w: u32,
+    h: u32,
+}
+
+impl ScaleKey {
+    fn new(src: &str, w: u32, h: u32) -> ScaleKey {
+        ScaleKey {
+            src: src.to_owned(),
+            w,
+            h,
+        }
+    }
+}
+
 struct Entry {
     natural: (u32, u32),
     state: ImageState,
 }
 
-struct Job {
-    src: String,
-    path: PathBuf,
-    target: (u32, u32),
+enum Job {
+    Decode {
+        src: String,
+        path: PathBuf,
+        target: (u32, u32),
+    },
+    Scale {
+        key: ScaleKey,
+        from: Arc<Pixmap>,
+    },
 }
 
-struct Done {
-    src: String,
-    pixmap: Option<Pixmap>,
+enum Done {
+    Decoded {
+        src: String,
+        pixmap: Option<Pixmap>,
+    },
+    /// `None` when the box could not be made, or a later request for the
+    /// same source replaced it before it started.
+    Scaled {
+        key: ScaleKey,
+        scaled: Option<Scaled>,
+    },
 }
 
 struct Worker {
@@ -75,6 +131,12 @@ pub struct Images {
     /// The source each line last reserved.
     lines: HashMap<usize, String>,
     pending: usize,
+    /// Boxes asked for and not landed yet.
+    scaling: HashSet<ScaleKey>,
+    /// Boxes from the latest `poll`, waiting to be claimed through `scaled`.
+    landed: Vec<(ScaleKey, Scaled)>,
+    /// Claimed boxes, most recently used first, at most `SCALED_KEEP`.
+    kept: Vec<(ScaleKey, Scaled)>,
     /// Started on the first job, so a document without local images spawns nothing.
     worker: Option<Worker>,
 }
@@ -91,14 +153,14 @@ fn is_remote(src: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
 }
 
-fn decode(job: &Job) -> Option<Pixmap> {
-    let img = ImageReader::open(&job.path)
+fn decode(path: &Path, target: (u32, u32)) -> Option<Pixmap> {
+    let img = ImageReader::open(path)
         .ok()?
         .with_guessed_format()
         .ok()?
         .decode()
         .ok()?;
-    let (tw, th) = job.target;
+    let (tw, th) = target;
     let img = if img.width() > tw || img.height() > th {
         img.resize_exact(tw, th, FilterType::Triangle)
     } else {
@@ -117,8 +179,56 @@ fn decode(job: &Job) -> Option<Pixmap> {
     Pixmap::from_vec(data, size)
 }
 
+/// `from` resampled to the `w` by `h` box. Runs on the worker.
+fn resample(from: &Pixmap, w: u32, h: u32) -> Option<Scaled> {
+    let mut boxed = Pixmap::new(w, h)?;
+    let (wf, hf) = (w as f32, h as f32);
+    draw_scaled(&mut boxed, 0.0, 0.0, wf, hf, from, &(0.0..hf));
+    let opaque = boxed.data().as_chunks::<4>().0.iter().all(|p| p[3] == 255);
+    Some(Scaled {
+        pixmap: Arc::new(boxed),
+        opaque,
+    })
+}
+
+/// Runs one batch of jobs in order, calling the waker after each result.
+/// A resample is skipped (sent back as `None`) when a later job in the batch
+/// resamples the same source: only the newest box for a source is wanted.
+/// False once the receiving side has gone.
+fn run_batch(batch: Vec<Job>, done: &Sender<Done>, waker: &Waker) -> bool {
+    let newest: HashMap<String, usize> = batch
+        .iter()
+        .enumerate()
+        .filter_map(|(k, j)| match j {
+            Job::Scale { key, .. } => Some((key.src.clone(), k)),
+            Job::Decode { .. } => None,
+        })
+        .collect();
+    for (k, job) in batch.into_iter().enumerate() {
+        let out = match job {
+            Job::Decode { src, path, target } => Done::Decoded {
+                src,
+                pixmap: decode(&path, target),
+            },
+            Job::Scale { key, from } => {
+                let wanted = newest.get(&key.src) == Some(&k);
+                Done::Scaled {
+                    scaled: wanted.then(|| resample(&from, key.w, key.h)).flatten(),
+                    key,
+                }
+            }
+        };
+        if done.send(out).is_err() {
+            return false;
+        }
+        waker();
+    }
+    true
+}
+
 impl Images {
-    /// Images relative to `base_dir`; `waker` is called after each decode.
+    /// Images relative to `base_dir`; `waker` is called after each decode
+    /// and each resample.
     pub fn new(base_dir: &Path, waker: Waker) -> Images {
         let t = Tokens::defaults(Theme::Light);
         Images {
@@ -129,6 +239,9 @@ impl Images {
             entries: HashMap::new(),
             lines: HashMap::new(),
             pending: 0,
+            scaling: HashSet::new(),
+            landed: Vec::new(),
+            kept: Vec::new(),
             worker: None,
         }
     }
@@ -162,31 +275,118 @@ impl Images {
         })
     }
 
-    /// Takes finished decodes. Returns the source lines whose image changed
-    /// state. Never blocks.
+    /// Takes finished decodes and resamples. Returns the source lines whose
+    /// image changed state or has a resampled box waiting in `scaled`.
+    /// Boxes landed by the previous call and never claimed are dropped
+    /// first. Never blocks.
     pub fn poll(&mut self) -> Vec<usize> {
-        let mut changed = Vec::new();
+        self.landed.clear();
         let Some(w) = &self.worker else {
-            return changed;
+            return Vec::new();
         };
-        while let Ok(done) = w.done.try_recv() {
-            self.pending = self.pending.saturating_sub(1);
-            let Some(e) = self.entries.get_mut(&done.src) else {
-                continue;
-            };
-            e.state = match done.pixmap {
-                Some(p) => ImageState::Ready(Arc::new(p)),
-                None => ImageState::Missing,
-            };
-            changed.extend(
-                self.lines
-                    .iter()
-                    .filter(|(_, s)| **s == done.src)
-                    .map(|(l, _)| *l),
-            );
+        let mut changed_src: HashSet<String> = HashSet::new();
+        let mut lost = false;
+        loop {
+            match w.done.try_recv() {
+                Ok(Done::Decoded { src, pixmap }) => {
+                    self.pending = self.pending.saturating_sub(1);
+                    let Some(e) = self.entries.get_mut(&src) else {
+                        continue;
+                    };
+                    e.state = match pixmap {
+                        Some(p) => ImageState::Ready(Arc::new(p)),
+                        None => ImageState::Missing,
+                    };
+                    changed_src.insert(src);
+                }
+                Ok(Done::Scaled { key, scaled }) => {
+                    self.scaling.remove(&key);
+                    if let Some(sc) = scaled {
+                        changed_src.insert(key.src.clone());
+                        self.landed.push((key, sc));
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    lost = true;
+                    break;
+                }
+            }
         }
+        if lost {
+            // The worker is gone (it panicked), so nothing in flight will
+            // land: pending decodes become missing, and the next job starts
+            // a new worker.
+            self.worker = None;
+            self.pending = 0;
+            self.scaling.clear();
+            for (src, e) in &mut self.entries {
+                if matches!(e.state, ImageState::Pending) {
+                    e.state = ImageState::Missing;
+                    changed_src.insert(src.clone());
+                }
+            }
+        }
+        let mut changed: Vec<usize> = self
+            .lines
+            .iter()
+            .filter(|(_, s)| changed_src.contains(*s))
+            .map(|(l, _)| *l)
+            .collect();
         changed.sort_unstable();
         changed
+    }
+
+    /// The image `src` resampled to `w` by `h` pixels, when a copy is ready.
+    /// Otherwise, once `src` is decoded, asks the worker for it (once per
+    /// box) and returns `None`; a later `poll` reports the lines showing
+    /// `src`. Never resamples on the caller's thread.
+    pub fn scaled(&mut self, src: &str, w: u32, h: u32) -> Option<Scaled> {
+        let key = ScaleKey::new(src, w, h);
+        let found = match self.kept.iter().position(|(k, _)| *k == key) {
+            Some(i) => Some(self.kept.remove(i)),
+            None => self
+                .landed
+                .iter()
+                .position(|(k, _)| *k == key)
+                .map(|i| self.landed.swap_remove(i)),
+        };
+        if let Some((key, sc)) = found {
+            self.kept.insert(0, (key, sc.clone()));
+            self.kept.truncate(SCALED_KEEP);
+            return Some(sc);
+        }
+        let from = match self.entries.get(src).map(|e| &e.state) {
+            Some(ImageState::Ready(px)) => px.clone(),
+            _ => return None,
+        };
+        if w > 0 && h > 0 && !self.scaling.contains(&key) {
+            let job = Job::Scale {
+                key: key.clone(),
+                from,
+            };
+            if self.queue(job) {
+                self.scaling.insert(key);
+            }
+        }
+        None
+    }
+
+    /// True while a copy of `src` at `w` by `h` is kept or waiting to be
+    /// claimed (for tests and diagnostics).
+    pub fn holds_scaled(&self, src: &str, w: u32, h: u32) -> bool {
+        let key = ScaleKey::new(src, w, h);
+        self.kept.iter().chain(&self.landed).any(|(k, _)| *k == key)
+    }
+
+    /// The resampled copies kept for reuse, at most `SCALED_KEEP`.
+    pub fn scaled_held(&self) -> usize {
+        self.kept.len()
+    }
+
+    /// Resamples asked for and not landed yet.
+    pub fn resamples_queued(&self) -> usize {
+        self.scaling.len()
     }
 
     /// Decodes queued or running.
@@ -234,41 +434,43 @@ impl Images {
             ((w_pt * DECODE_OVERSAMPLE).ceil() as u32).max(1),
             ((h_pt * DECODE_OVERSAMPLE).ceil() as u32).max(1),
         );
-        self.queue(Job {
+        let queued = self.queue(Job::Decode {
             src: src.to_owned(),
             path,
             target,
         });
+        if queued {
+            self.pending += 1;
+        }
         Entry {
             natural,
-            state: ImageState::Pending,
+            // With no worker to decode it, it would stay pending forever.
+            state: if queued {
+                ImageState::Pending
+            } else {
+                ImageState::Missing
+            },
         }
     }
 
-    fn queue(&mut self, job: Job) {
+    /// Sends `job` to the worker, starting it on the first job. False when
+    /// the worker has gone.
+    fn queue(&mut self, job: Job) -> bool {
         let worker = self.worker.get_or_insert_with(|| {
             let (jobs, job_rx) = channel::<Job>();
             let (done_tx, done) = channel::<Done>();
             let waker = self.waker.clone();
             std::thread::spawn(move || {
-                while let Ok(job) = job_rx.recv() {
-                    let pixmap = decode(&job);
-                    if done_tx
-                        .send(Done {
-                            src: job.src,
-                            pixmap,
-                        })
-                        .is_err()
-                    {
+                while let Ok(first) = job_rx.recv() {
+                    let mut batch = vec![first];
+                    batch.extend(job_rx.try_iter());
+                    if !run_batch(batch, &done_tx, &waker) {
                         break;
                     }
-                    waker();
                 }
             });
             Worker { jobs, done }
         });
-        if worker.jobs.send(job).is_ok() {
-            self.pending += 1;
-        }
+        worker.jobs.send(job).is_ok()
     }
 }

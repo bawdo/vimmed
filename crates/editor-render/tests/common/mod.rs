@@ -103,6 +103,13 @@ impl Fake {
         self.rebuild();
     }
 
+    /// Removes line `i`, as a join of it onto the line above does.
+    pub fn remove_line(&mut self, i: usize) {
+        self.lines.remove(i);
+        self.matches.remove(i);
+        self.rebuild();
+    }
+
     fn rebuild(&mut self) {
         self.buf = Buffer::from_text(&self.lines.join("\n"));
         self.blocks = Blocks::new(&self.buf);

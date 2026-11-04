@@ -59,6 +59,18 @@ pub fn blit(p: &mut Pixmap, x: i32, y: i32, src: &Pixmap, opaque: bool, clip: &R
     }
 }
 
+thread_local! {
+    /// `draw_scaled` calls made on this thread.
+    static RESAMPLES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times `draw_scaled` has run on the calling thread. A resample
+/// is tens of milliseconds for a large image, so the UI thread must never
+/// add to this (tests and diagnostics read it).
+pub fn resamples_on_this_thread() -> u64 {
+    RESAMPLES.with(|n| n.get())
+}
+
 /// Draws `src` scaled to the `w` by `h` pixel box at `x, y`, only inside the
 /// rows `clip`. The source is premultiplied, so transparency blends correctly.
 pub fn draw_scaled(
@@ -70,6 +82,7 @@ pub fn draw_scaled(
     src: &Pixmap,
     clip: &Range<f32>,
 ) {
+    RESAMPLES.with(|n| n.set(n.get() + 1));
     let (y0, y1) = (y.max(clip.start), (y + h).min(clip.end));
     let (x0, x1) = (x.max(0.0), (x + w).min(p.width() as f32));
     if y1 <= y0 || x1 <= x0 || src.width() == 0 || src.height() == 0 {

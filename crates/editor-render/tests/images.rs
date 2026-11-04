@@ -5,10 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use common::{Fake, W_PT, view};
+use common::{Fake, H_PT, W_PT, view};
+use editor_core::buffer::Pos;
 use editor_core::host::Waker;
 use editor_core::tokens::{Theme, TokenId, Tokens};
-use editor_render::images::{ImageState, Images};
+use editor_render::images::{ImageState, Images, SCALED_KEEP, Scaled};
+use editor_render::paint::resamples_on_this_thread;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -222,7 +224,10 @@ fn scrolled_off_images_release_their_pixmaps_and_keep_heights() {
 
     assert!(v.scroll_to_cursor(editor_core::buffer::Pos { line: 0, col: 0 }));
     v.paint_all(&src);
-    assert!(v.has_scaled_image(1), "back on screen it is resampled");
+    assert!(
+        v.has_scaled_image(1),
+        "back on screen it has its copy again"
+    );
     let top = (t.px(TokenId::SpacePageTop) * 2.0).round() + v.line_height_px(0).unwrap();
     let px = pixel(&v, W_PT as usize, (top + height / 2.0) as usize);
     assert!(px[0] > 150 && px[1] < 80, "painted again, got {px:?}");
@@ -280,4 +285,229 @@ fn missing_shows_placeholder() {
     let inked = (left..left + 120)
         .any(|xx| (y - 1..y - 1 + h0).any(|yy| pixel(&v, xx, yy)[..3] != [ph.r, ph.g, ph.b]));
     assert!(inked, "the 'image not found' label is drawn");
+}
+
+/// An `Images` with `img1.png` (1200x700) reserved and decoded.
+fn decoded(dir: &TempDir) -> Images {
+    write_png(dir.path(), "img1.png", 1200, 700);
+    let (w, _) = waker();
+    let mut images = Images::new(dir.path(), w);
+    images.reserve(0, "img1.png");
+    until("the image to decode", || {
+        images.poll();
+        matches!(
+            images.slot_of("img1.png").map(|s| s.state),
+            Some(ImageState::Ready(_))
+        )
+    });
+    images
+}
+
+/// Polls until `images` hands over `src` at `w` by `h` pixels.
+fn claim(images: &mut Images, src: &str, w: u32, h: u32) -> Scaled {
+    let mut got = None;
+    until("the resample to land", || {
+        images.poll();
+        got = images.scaled(src, w, h);
+        got.is_some()
+    });
+    got.unwrap()
+}
+
+#[test]
+fn pending_resample_keeps_the_alt_label() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    write_png(dir.path(), "img1.png", 1200, 700);
+    let (w, _) = waker();
+    let src = Fake::new(&["alpha", "![a picture](img1.png)", "omega"], t.clone());
+    let mut v = view(&t, 2.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    until("the image to land", || v.poll_async());
+
+    // Decoded, but the new box has no copy yet: paint as a pending decode
+    // does, the placeholder with the alt text on it.
+    v.resize(W_PT, H_PT, 1.0);
+    v.paint_all(&src);
+    assert!(!v.has_scaled_image(1));
+    let ph = t.color(TokenId::ColorImagePlaceholder);
+    let top = t.px(TokenId::SpacePageTop).round() as usize + v.line_height_px(0).unwrap() as usize;
+    let left = (W_PT / 2.0 - t.px(TokenId::SpaceColumn) / 2.0) as usize;
+    let label_rows = top..top + t.px(TokenId::FontSize) as usize * 2;
+    let inked = |v: &editor_render::view::DocView, colour: [u8; 3]| {
+        (left..left + 120).any(|x| label_rows.clone().any(|y| pixel(v, x, y)[..3] != colour))
+    };
+    assert!(
+        inked(&v, [ph.r, ph.g, ph.b]),
+        "the alt label is drawn on the placeholder"
+    );
+
+    until("the new box to land", || v.poll_async());
+    v.paint_all(&src);
+    assert!(v.has_scaled_image(1));
+    let img = pixel(&v, left + 2, top + 2);
+    assert!(img[0] > 150 && img[1] < 80, "the image, got {img:?}");
+    assert!(
+        !inked(&v, [img[0], img[1], img[2]]),
+        "no label over the landed image"
+    );
+}
+
+#[test]
+fn image_resample_not_on_ui_thread() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    write_png(dir.path(), "img1.png", 1200, 700);
+    let (w, _) = waker();
+    let src = Fake::new(&["alpha", "![pic](img1.png)", "omega"], t.clone());
+    let resampled = resamples_on_this_thread();
+    let mut v = view(&t, 2.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    until("the image to land", || v.poll_async());
+    assert!(v.has_scaled_image(1), "the scaled copy arrived");
+
+    // A new scale is a new box: the relayout must not resample.
+    v.resize(W_PT, H_PT, 1.0);
+    v.paint_all(&src);
+    v.take_damage();
+    assert!(
+        !v.has_scaled_image(1),
+        "no scaled copy straight after relayout"
+    );
+    let height = v.line_height_px(1).unwrap();
+    let col = t.px(TokenId::SpaceColumn);
+    assert_eq!(height, (700.0 * col / 1200.0).ceil(), "final box height");
+    let top = t.px(TokenId::SpacePageTop).round() + v.line_height_px(0).unwrap();
+    let mid = (top + height / 2.0) as usize;
+    let ph = t.color(TokenId::ColorImagePlaceholder);
+    assert_eq!(
+        pixel(&v, W_PT as usize / 2, mid)[..3],
+        [ph.r, ph.g, ph.b],
+        "the placeholder is painted while the copy is pending"
+    );
+
+    let mut damage = Vec::new();
+    until("the new box to land", || {
+        if v.poll_async() {
+            damage = v.take_damage().0;
+            true
+        } else {
+            false
+        }
+    });
+    assert!(v.has_scaled_image(1), "the scaled copy exists once polled");
+    assert_eq!(v.line_height_px(1), Some(height), "the height never moved");
+    assert_eq!(
+        damage,
+        vec![top as u32..(top + height) as u32],
+        "the image line repainted"
+    );
+    let px = pixel(&v, W_PT as usize / 2, mid);
+    assert!(
+        px[0] > 150 && px[1] < 80,
+        "decoded pixels painted, got {px:?}"
+    );
+    assert_eq!(
+        resamples_on_this_thread(),
+        resampled,
+        "nothing was resampled on this thread"
+    );
+}
+
+#[test]
+fn stale_resample_result_dropped() {
+    let dir = TempDir::new();
+    let mut images = decoded(&dir);
+    assert!(
+        images.scaled("img1.png", 600, 350).is_none(),
+        "box A asked for"
+    );
+    assert!(
+        images.scaled("img1.png", 300, 175).is_none(),
+        "box B asked for"
+    );
+    let b = claim(&mut images, "img1.png", 300, 175);
+    assert_eq!((b.pixmap.width(), b.pixmap.height()), (300, 175));
+    // A landed no later than B. Nobody claimed it, so the next poll drops it.
+    images.poll();
+    assert!(
+        !images.holds_scaled("img1.png", 600, 350),
+        "box A discarded"
+    );
+    assert!(images.holds_scaled("img1.png", 300, 175), "box B kept");
+    assert_eq!(images.resamples_queued(), 0, "nothing left in flight");
+}
+
+#[test]
+fn duplicate_resample_requests_coalesce() {
+    let dir = TempDir::new();
+    let mut images = decoded(&dir);
+    assert!(images.scaled("img1.png", 300, 175).is_none());
+    assert!(images.scaled("img1.png", 300, 175).is_none());
+    assert_eq!(images.resamples_queued(), 1, "one job for one key");
+    claim(&mut images, "img1.png", 300, 175);
+    assert_eq!(images.resamples_queued(), 0);
+}
+
+#[test]
+fn scaled_cache_is_bounded() {
+    let dir = TempDir::new();
+    let mut images = decoded(&dir);
+    let sizes: Vec<(u32, u32)> = (0..SCALED_KEEP as u32 + 2)
+        .map(|k| (100 + k * 10, 60 + k * 6))
+        .collect();
+    for &(w, h) in &sizes {
+        images.scaled("img1.png", w, h);
+        claim(&mut images, "img1.png", w, h);
+        assert!(images.scaled_held() <= SCALED_KEEP, "never over the bound");
+    }
+    assert_eq!(images.scaled_held(), SCALED_KEEP);
+    let (w0, h0) = sizes[0];
+    assert!(!images.holds_scaled("img1.png", w0, h0), "the oldest went");
+    let (wn, hn) = *sizes.last().unwrap();
+    assert!(images.holds_scaled("img1.png", wn, hn), "the newest stays");
+}
+
+#[test]
+fn scroll_back_does_not_resample_on_ui_thread() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    write_png(dir.path(), "img1.png", 1200, 700);
+    let (w, _) = waker();
+    let mut lines: Vec<String> = vec!["alpha".into(), "![pic](img1.png)".into()];
+    lines.extend((0..200).map(|i| format!("line {i}")));
+    let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    let src = Fake::new(&refs, t.clone());
+    let resampled = resamples_on_this_thread();
+    let mut v = view(&t, 2.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    until("the image to land", || v.poll_async());
+    let height = v.line_height_px(1).unwrap();
+
+    assert!(v.scroll_to_cursor(Pos { line: 190, col: 0 }));
+    v.paint_all(&src);
+    assert!(!v.has_scaled_image(1), "off screen holds no scaled copy");
+
+    assert!(v.scroll_to_cursor(Pos { line: 0, col: 0 }));
+    v.paint_all(&src);
+    assert_eq!(
+        resamples_on_this_thread(),
+        resampled,
+        "the paint path did not resample"
+    );
+    until("the image to show again", || {
+        v.poll_async();
+        v.has_scaled_image(1)
+    });
+    let top = (t.px(TokenId::SpacePageTop) * 2.0).round() + v.line_height_px(0).unwrap();
+    let px = pixel(&v, W_PT as usize, (top + height / 2.0) as usize);
+    assert!(px[0] > 150 && px[1] < 80, "painted again, got {px:?}");
+    assert_eq!(
+        resamples_on_this_thread(),
+        resampled,
+        "nothing was resampled on this thread"
+    );
 }
