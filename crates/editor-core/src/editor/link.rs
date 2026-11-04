@@ -198,6 +198,11 @@ impl Editor {
             }
         });
         // The Insert session the link leaves the cursor in, which Esc ends.
+        // No change is pending for it (`start_link` cancelled the engine),
+        // so the link and the label typed into it are not what `.`
+        // repeats: `.` still repeats the change before the link. Recording
+        // the label as an `i` change would make `.` type the bare label
+        // with no link round it, which is worse.
         if insert && self.cfg.vim {
             self.history.begin();
         }
@@ -507,6 +512,33 @@ mod tests {
         assert_eq!(e.text(), "ab");
         keys(&mut e, "<CR>");
         assert_eq!(e.text(), "[](uhttps://x.y/)ab");
+    }
+
+    #[test]
+    fn dot_after_a_link_repeats_the_change_before_it() {
+        let mut e = ed("abcd");
+        keys(&mut e, "x<D-l>u<CR>t<Esc>");
+        assert_eq!(e.text(), "[t](u)bcd");
+        keys(&mut e, "$.");
+        assert_eq!(e.text(), "[t](u)bc");
+    }
+
+    #[test]
+    fn ctrl_space_does_not_edit_under_the_link_prompt() {
+        // Vim off: Ctrl+Space would toggle the task as typing.
+        let (mut e, _host) = plain_with_host("- [ ] a");
+        keys(&mut e, "<D-l><C-Space>");
+        assert_eq!(e.text(), "- [ ] a");
+        assert_eq!(prompt_line(&e), Some(String::new()));
+        keys(&mut e, "u<CR>");
+        assert_eq!(e.text(), "[](u)- [ ] a");
+        // Vim on, from Insert.
+        let mut e = ed("- [ ] a");
+        keys(&mut e, "i<D-l><C-Space>");
+        assert_eq!(e.text(), "- [ ] a");
+        assert_eq!(prompt_line(&e), Some(String::new()));
+        keys(&mut e, "u<CR>");
+        assert_eq!(e.text(), "[](u)- [ ] a");
     }
 
     #[test]
