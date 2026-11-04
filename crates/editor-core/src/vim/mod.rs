@@ -27,9 +27,8 @@ pub use count::Count;
 pub use motion::{Motion, MotionKind, MotionResult};
 pub use operator::{OpRange, Operator};
 
-/// The editing mode. Normal, Insert, Visual, Visual Line and Search have
-/// their behaviour; Command has only its entry from Visual (Task 25 builds
-/// it), and later tasks build the rest.
+/// The editing mode. Prompt is the only one not built yet; Command is the
+/// `:` line and Confirm the `:s///c` question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -95,8 +94,8 @@ pub enum Step {
     Visual { linewise: bool },
     /// Leave Visual for Normal.
     Leave,
-    /// `:` from Visual: the command line, pre-filled with the selection's
-    /// range.
+    /// `:`: the command line, empty from Normal and pre-filled with the
+    /// selection's range (`'<,'>`) from Visual.
     Cmdline,
     /// `/` (`forward`) or `?`: type a search, from Normal, Visual (to come
     /// back to) or after an operator (`d/foo`), which then acts up to the
@@ -414,6 +413,12 @@ impl Vim {
                 let count = self.count.given().then(|| self.count.effective());
                 self.reset();
                 Step::Repeat { count }
+            }
+            // The command line. A count before it (vim's `.,.+N-1` range)
+            // is not built and is dropped.
+            ':' if !after_op => {
+                self.reset();
+                Step::Cmdline
             }
             _ => {
                 self.reset();

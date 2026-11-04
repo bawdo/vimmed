@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::buffer::Pos;
-use crate::editor::{Config, Editor, OpenRequest};
+use crate::editor::{Config, Editor, FileCalls, OpenRequest};
 use crate::effects::Effects;
 use crate::host::{Host, Waker, WindowRequest};
 use crate::input::{Input, Key, KeyEvent, Mods};
@@ -123,6 +123,56 @@ pub(crate) fn build_reader(text: &str) -> Editor {
 /// Like `ed`, with a handle on the editor's host.
 pub(crate) fn ed_with_host(text: &str) -> (Editor, FakeHost) {
     build_with_host(text, Config::default(), false)
+}
+
+/// A call the editor made to write or reload its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileCall {
+    Write { force: bool },
+    Reload,
+}
+
+#[derive(Default)]
+struct FilesState {
+    calls: Vec<FileCall>,
+    fail_writes: bool,
+}
+
+/// A `FileCalls` double that records the calls. Writes succeed until
+/// `fail_writes`. Clones share one record.
+#[derive(Default, Clone)]
+pub(crate) struct FakeFiles {
+    state: Rc<RefCell<FilesState>>,
+}
+
+impl FakeFiles {
+    pub(crate) fn calls(&self) -> Vec<FileCall> {
+        self.state.borrow().calls.clone()
+    }
+
+    /// Makes every write from now on fail.
+    pub(crate) fn fail_writes(&self) {
+        self.state.borrow_mut().fail_writes = true;
+    }
+}
+
+impl FileCalls for FakeFiles {
+    fn write(&mut self, force: bool) -> bool {
+        let mut s = self.state.borrow_mut();
+        s.calls.push(FileCall::Write { force });
+        !s.fail_writes
+    }
+    fn reload(&mut self) {
+        self.state.borrow_mut().calls.push(FileCall::Reload);
+    }
+}
+
+/// Like `ed`, with a handle on the calls it makes to its file.
+pub(crate) fn ed_with_files(text: &str) -> (Editor, FakeFiles) {
+    let mut e = ed(text);
+    let files = FakeFiles::default();
+    e.set_files(Box::new(files.clone()));
+    (e, files)
 }
 
 /// Like `ed_with_host`, on Linux, where Ctrl is the primary modifier.

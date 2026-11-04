@@ -149,6 +149,13 @@ pub fn line_matches(line: &str, query: &str) -> Vec<Range<usize>> {
     Matcher::new(query).line(line)
 }
 
+/// The matches of `pattern` on `line` as `line_matches` finds them, but
+/// case sensitive unless `ignore_case`, whatever the pattern holds (`:s`
+/// and its `i` flag, not smartcase).
+pub fn literal_matches(line: &str, pattern: &str, ignore_case: bool) -> Vec<Range<usize>> {
+    Matcher::with_case(pattern, !ignore_case).line(line)
+}
+
 /// U+212A KELVIN SIGN, the only char beyond ASCII that folds to an ASCII
 /// one (`k`); `only_the_kelvin_sign_folds_to_ascii` checks that.
 const KELVIN: char = '\u{212A}';
@@ -159,7 +166,8 @@ struct Matcher<'q> {
     sensitive: bool,
     /// Ignoring case, the query is all ASCII.
     ascii: bool,
-    /// Ignoring case, the query holds `k`, which the Kelvin sign matches.
+    /// Ignoring case, the query holds `k` (or `K`), which the Kelvin sign
+    /// matches.
     has_k: bool,
     /// Up to two pairs of bytes a line holding a match must hold one of
     /// each: the query's rarest bytes (by a fixed guess at how common they
@@ -187,13 +195,19 @@ fn commonness(b: u8) -> usize {
 }
 
 impl<'q> Matcher<'q> {
+    /// Smartcase: case matters once `query` holds an uppercase letter.
     fn new(query: &'q str) -> Matcher<'q> {
-        let sensitive = case_sensitive(query);
+        Matcher::with_case(query, case_sensitive(query))
+    }
+
+    /// Case matters only when `sensitive`. Ignoring it, the query may hold
+    /// capitals too (`:s///i`), so `K` is treated as `k` throughout.
+    fn with_case(query: &'q str, sensitive: bool) -> Matcher<'q> {
         let bytes = query.as_bytes();
         let mut ranked: Vec<u8> = bytes
             .iter()
             .copied()
-            .filter(|&b| sensitive || (b.is_ascii() && b != b'k'))
+            .filter(|&b| sensitive || (b.is_ascii() && !b.eq_ignore_ascii_case(&b'k')))
             .collect();
         ranked.sort_by_key(|&b| commonness(b));
         ranked.dedup();
@@ -221,7 +235,7 @@ impl<'q> Matcher<'q> {
             query,
             sensitive,
             ascii: query.is_ascii(),
-            has_k: query.contains('k'),
+            has_k: query.contains(['k', 'K']),
             needs,
             anchor,
         }

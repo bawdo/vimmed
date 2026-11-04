@@ -173,6 +173,16 @@ impl History {
         }
     }
 
+    /// Sets the cursor the open group keeps (see `apply`), in place of the
+    /// one its first `record` gave, for a command that edits before it
+    /// knows where vim's undo would put the cursor (`:s///c`). With no
+    /// group open, or an empty one, it does nothing.
+    pub fn set_cursor(&mut self, cursor: Pos) {
+        if let Some(g) = self.open.as_mut().filter(|g| !g.edits.is_empty()) {
+            g.first_cursor = cursor;
+        }
+    }
+
     /// Files a finished group: a new step clears redo, and the oldest step
     /// goes once there are more than `MAX_UNDO_GROUPS`.
     fn push(&mut self, g: Group) {
@@ -248,6 +258,20 @@ mod tests {
         edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "hello");
         assert!(h.can_undo());
         assert!(!h.can_redo());
+    }
+
+    #[test]
+    fn set_cursor_replaces_the_open_groups_cursor() {
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("abc def\nxyz");
+        // Nothing open, or nothing recorded yet: no effect.
+        h.set_cursor(pos(0, 5));
+        h.begin();
+        h.set_cursor(pos(0, 5));
+        edit(&mut h, &mut buf, pos(0, 0)..pos(0, 1), "A");
+        h.set_cursor(pos(0, 4));
+        h.end();
+        assert_eq!(h.undo(&mut buf), Some(pos(0, 4)));
     }
 
     #[test]
