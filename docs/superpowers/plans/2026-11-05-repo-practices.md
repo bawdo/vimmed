@@ -202,16 +202,16 @@ Jobs (`name:` in brackets, which is what the ruleset and the gate see):
 **Files:**
 - Create: `.github/workflows/scorecard.yml`
 
-- [ ] **Step 1:** Copy jellyfish's `.github/workflows/scorecard.yml` verbatim (pins are in Global Constraints).
-- [ ] **Step 2:** `actionlint .github/workflows/scorecard.yml` prints nothing.
-- [ ] **Step 3:** Commit with "Added the OpenSSF Scorecard workflow".
+- [x] **Step 1:** Copy jellyfish's `.github/workflows/scorecard.yml` verbatim (pins are in Global Constraints).
+- [x] **Step 2:** `actionlint .github/workflows/scorecard.yml` prints nothing.
+- [x] **Step 3:** Commit with "Added the OpenSSF Scorecard workflow".
 
 ### Task 7: GitHub settings as code
 
 **Files:**
 - Create: `.github/rulesets/main.json`, `.github/rulesets/tags.json`, `.github/settings.md`
 
-- [ ] **Step 1:** Write `main.json`:
+- [x] **Step 1:** Write `main.json`:
 
 ```json
 {
@@ -238,8 +238,8 @@ Jobs (`name:` in brackets, which is what the ruleset and the gate see):
 }
 ```
 
-- [ ] **Step 2:** Write `tags.json`: `"target": "tag"`, include `["refs/tags/v*"]`, rules `deletion`, `non_fast_forward` and `update`. Do not use `creation`: the release workflow creates tags.
-- [ ] **Step 3:** Write `.github/settings.md`, a short runbook of the exact commands Keith runs, in order, and why each matters:
+- [x] **Step 2:** Write `tags.json`: `"target": "tag"`, include `["refs/tags/v*"]`, rules `deletion`, `non_fast_forward` and `update`. Do not use `creation`: the release workflow creates tags.
+- [x] **Step 3:** Write `.github/settings.md`, a short runbook of the exact commands Keith runs, in order, and why each matters:
 
 ```sh
 gh repo edit bawdo/vimmed --enable-wiki=false --enable-merge-commit \
@@ -257,8 +257,8 @@ gh api -X POST repos/bawdo/vimmed/rulesets --input .github/rulesets/tags.json
 ```
 
 Add a note that rulesets are updated with `PUT repos/bawdo/vimmed/rulesets/<id>` (find the id with `gh api repos/bawdo/vimmed/rulesets`), so the JSON in the repo stays the source of truth.
-- [ ] **Step 4:** Check both JSON files parse with `python3 -m json.tool .github/rulesets/main.json > /dev/null` (and the same for `tags.json`).
-- [ ] **Step 5:** Commit with "Added the GitHub settings runbook and rulesets".
+- [x] **Step 4:** Check both JSON files parse with `python3 -m json.tool .github/rulesets/main.json > /dev/null` (and the same for `tags.json`).
+- [x] **Step 5:** Commit with "Added the GitHub settings runbook and rulesets".
 
 ## PAUSE 1: end of Tier 1
 
