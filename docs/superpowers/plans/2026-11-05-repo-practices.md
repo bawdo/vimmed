@@ -262,9 +262,9 @@ Add a note that rulesets are updated with `PUT repos/bawdo/vimmed/rulesets/<id>`
 
 ## PAUSE 1: end of Tier 1
 
-- [ ] Every Task 1 to 7 box above is ticked, the ticks are committed, `git status` is clean, and `git verify-commit HEAD` is good.
-- [ ] Resume log entry added.
-- [ ] Keith told what to do: push `chore/repo-tier-1`, open the PR, watch CI. Expect `macOS`, `Linux`, `Linux container smoke`, `cargo-deny`, `Changelog` and `CI result` to go green. Merge with a merge commit, then run `.github/settings.md` top to bottom, rulesets last.
+- [x] Every Task 1 to 7 box above is ticked, the ticks are committed, `git status` is clean, and `git verify-commit HEAD` is good.
+- [x] Resume log entry added.
+- [x] Keith told what to do: push `chore/repo-tier-1`, open the PR, watch CI. Expect `macOS`, `Linux`, `Linux container smoke`, `cargo-deny`, `Changelog` and `CI result` to go green. Merge with a merge commit, then run `.github/settings.md` top to bottom, rulesets last.
 - [ ] **Context check asked; Keith's answer recorded in the Resume log.**
 
 **Ready to resume Tier 2 when:**
@@ -484,3 +484,4 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 
 | Date | Tier | Branch | Last commit | Notes for Keith |
 |---|---|---|---|---|
+| 2026-11-05 | 1 | chore/repo-tier-1 | ae14cc7 (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, cargo-deny, Changelog and CI result green, merge with a merge commit, then run .github/settings.md top to bottom (rulesets last). Local `cargo xtask ci` fails at fmt only because of the gitignored crates/editor-render/tests/demo_reel.rs: run `cargo fmt --all` locally. The git-guard reference-transaction hook blocks cargo-deny's advisory-db self-update (use `cargo deny check --offline` after the first fetch). RUSTSEC-2026-0192 (ttf-parser unmaintained) is ignored in deny.toml with a reason. Docker is unreachable from the sandbox, so `cargo xtask linux-check` with the pinned digest is first proven by the PR's container smoke job. Subagents no longer commit; the controller does (Keith, 2026-11-05). |
