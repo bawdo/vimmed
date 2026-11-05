@@ -36,8 +36,9 @@
 //! (`line.height.*`) within `LINE_HEIGHTS`; anything else is a bad value.
 //!
 //! What applies where, in v0.9:
-//! - `font.body` and `font.mono` apply on Linux; macOS uses the system
-//!   faces whatever they say.
+//! - `font.body` and `font.mono` name a font family on both shells. A
+//!   family the system doesn't know is quietly replaced, with no message:
+//!   by fontconfig's nearest match on Linux, by the system face on macOS.
 //! - A light/dark switch while the window is open changes colours, sizes
 //!   and spacing at once. Line heights and font families are taken when
 //!   the window opens, so a `line.height.*`, `font.body` or `font.mono`

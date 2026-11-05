@@ -196,7 +196,12 @@ pub fn run(args: WindowArgs) -> i32 {
     let cfg = cfg.for_bench(bench_enabled());
     let mut editor = Editor::open(req, cfg, Platform::Mac, Box::new(host));
     editor.say_config(&config_messages);
-    let fonts = FontSet::with_lookup(Box::new(MacFonts::load()), cache_file(), waker.clone());
+    let tokens = editor.tokens();
+    let resolver = MacFonts::load(
+        tokens.family(TokenId::FontBody),
+        tokens.family(TokenId::FontMono),
+    );
+    let fonts = FontSet::with_lookup(Box::new(resolver), cache_file(), waker.clone());
     marks::mark(names::FONTS_LOADED);
     PREPARED.with(|p| {
         *p.borrow_mut() = Some(Prepared {
