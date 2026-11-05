@@ -8,6 +8,7 @@ mod package_linux;
 mod rename;
 mod shell_lines;
 mod templates;
+mod validate_packaging;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
         Some("lint-name") => ci::lint_name(&root()),
         Some("lint-literals") => literals::run(&root()),
         Some("shell-lines") => shell_lines::run(&root()),
+        Some("validate-packaging") => validate_packaging::run(&root()),
         Some("bundle-mac") => bundle_mac::run(&root(), rest),
         Some("rename-test") => {
             let name = rest
@@ -63,6 +65,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | bundle-mac [--release] | install-mac | package-linux | rename-test [--name SLUG] [--linux] | fixture [DIR] | bench ...>"
+        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | validate-packaging | bundle-mac [--release] | install-mac | package-linux | rename-test [--name SLUG] [--linux] | fixture [DIR] | bench ...>"
     );
 }

@@ -252,6 +252,8 @@ pub fn linux_check(root: &Path) -> Result<(), String> {
     let run = |script: &str| in_container(root, &image, &volume, script);
     run("cargo build --workspace --all-targets")
         .map_err(|e| format!("linux-check: build failed: {e}"))?;
+    run("cargo xtask validate-packaging")
+        .map_err(|e| format!("linux-check: packaging validation failed: {e}"))?;
     run("cargo clippy --workspace --all-targets -- -D warnings")
         .map_err(|e| format!("linux-check: clippy failed: {e}"))?;
     run("cargo test --workspace").map_err(|e| format!("linux-check: tests failed: {e}"))?;

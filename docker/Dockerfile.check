@@ -10,7 +10,7 @@ FROM rust:1-trixie@sha256:4c4c8ec55be09785e6d6ac45ea9853525a73c15db74009100ac089
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libgtk-4-dev libfontconfig-dev pkg-config weston fonts-dejavu-core \
-        dpkg-dev rpm2cpio cpio \
+        dpkg-dev rpm2cpio cpio appstream desktop-file-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # The packagers `cargo xtask package-linux` drives, at the versions its flags
