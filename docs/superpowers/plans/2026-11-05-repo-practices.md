@@ -415,9 +415,9 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 **Files:**
 - Create: `.gitattributes`
 
-- [ ] **Step 1:** Write it with these lines: `* text=auto eol=lf`, `*.icns binary`, `*.png binary`, `*.gif binary`, `*.ttf binary`, `Cargo.lock linguist-generated=true`, `docs/superpowers/** linguist-documentation`, `research_notes/** linguist-documentation`, `reports/** linguist-documentation`.
-- [ ] **Step 2:** `git add --renormalize .` followed by `git status` shows no changed files other than `.gitattributes`. If files do change, stop and show Keith the list.
-- [ ] **Step 3:** `git check-attr -a packaging/icons/AppIcon.icns` shows `binary: set`. Commit with "Added .gitattributes".
+- [x] **Step 1:** Write it with these lines: `* text=auto eol=lf`, `*.icns binary`, `*.png binary`, `*.gif binary`, `*.ttf binary`, `Cargo.lock linguist-generated=true`, `docs/superpowers/** linguist-documentation`, `research_notes/** linguist-documentation`, `reports/** linguist-documentation`.
+- [x] **Step 2:** `git add --renormalize .` followed by `git status` shows no changed files other than `.gitattributes`. If files do change, stop and show Keith the list.
+- [x] **Step 3:** `git check-attr -a packaging/icons/AppIcon.icns` shows `binary: set`. Commit with "Added .gitattributes".
 
 ### Task 16: AI policy
 
