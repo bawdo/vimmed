@@ -9,7 +9,7 @@ permissions:
 # would run every job a second time on the same commit. A branch with no
 # pull request can be run by hand (workflow_dispatch) or checked locally with
 # cargo xtask ci. The weekly schedule runs on the default branch and runs
-# only cargo-deny, because advisories change while the code does not.
+# only cargo-deny and zizmor, because advisories change while the code does not.
 on:
   pull_request:
   schedule:
@@ -109,6 +109,32 @@ jobs:
         with:
           command: check
 
+  # Audits the workflow files for security problems (script injection,
+  # excess permissions, unpinned actions and so on). Runs on every trigger,
+  # including the weekly schedule, because its online audits (such as known
+  # vulnerable actions) change while the files do not. advanced-security is
+  # off so the findings fail the job: the SARIF mode uploads them and
+  # passes, and a fork or Dependabot pull request has a read-only token
+  # that cannot upload. The zizmor version matches CONTRIBUTING.md, and
+  # must stay within the versions the pinned action supports.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
+          version: 1.30.1
+
   # Pure shell and git, so it needs nothing from macOS. fetch-depth 0 because
   # the check reads tags and history.
   changelog:
@@ -180,7 +206,8 @@ jobs:
   #   workflow_dispatch: none
   #   pull_request: none
   #   push (a caller via workflow_call): none
-  #   schedule: macos, linux, linux-smoke, msrv and changelog (only deny runs)
+  #   schedule: macos, linux, linux-smoke, msrv and changelog (only deny and
+  #     zizmor run)
   # Any other event expects every job. A failed or cancelled job always
   # fails the gate, and so does a skip that the event does not allow, so a
   # job left out by a bad if: condition cannot pass unnoticed. A job added
@@ -189,7 +216,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [macos, linux, linux-smoke, msrv, deny, changelog]
+    needs: [macos, linux, linux-smoke, msrv, deny, zizmor, changelog]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -205,7 +232,7 @@ jobs:
             *)        may_skip='[]' ;;
           esac
           # Mirrors needs above, so a job missing from the results fails too.
-          all='["macos","linux","linux-smoke","msrv","deny","changelog"]'
+          all='["macos","linux","linux-smoke","msrv","deny","zizmor","changelog"]'
           echo "Event: $EVENT (may skip: $may_skip)"
           jq -r 'to_entries[] | "  \(.key): \(.value.result)"' <<<"$NEEDS"
           bad=$(jq -r --argjson all "$all" --argjson skip "$may_skip" '

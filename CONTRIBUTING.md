@@ -33,6 +33,7 @@ The checks use these pinned tools. Install the same versions to get the same
 results as CI:
 
 - cargo-deny: `cargo install --locked cargo-deny --version 0.20.2`
+- zizmor: `cargo install --locked zizmor --version 1.30.1`
 
 ## Licence
 
