@@ -19,13 +19,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use editor_core::editor::{Config, Editor, OpenRequest};
+use editor_core::config::{cache_appearance, cached_appearance};
+use editor_core::editor::{Config, Editor, OpenRequest, bench_enabled};
 use editor_core::effects::{Effects, Redraw};
+use editor_core::file::StateDir;
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
 use editor_core::input::{Input, MouseEvent, MouseKind, SignalKind};
 use editor_core::platform::Platform;
 use editor_core::strings;
-use editor_core::tokens::TokenId;
+use editor_core::tokens::{Theme, TokenId};
 use editor_core::view_model::ViewSource;
 use editor_render::fonts::FontSet;
 use editor_render::layout_cosmic::CosmicLayout;
@@ -41,7 +43,7 @@ use crate::clipboard::Clipboard;
 use crate::fonts_fc::{LinuxFonts, cache_file};
 use crate::strips::{self, StripSet};
 use crate::timing::{self, FirstFrame, KeyTimes};
-use crate::{env, input};
+use crate::{env, input, theme};
 
 /// The window's default content size in points: the bench protocol's size
 /// (Task 4), as on macOS.
@@ -216,7 +218,18 @@ pub fn run(args: WindowArgs) -> i32 {
         view: args.view,
         display_name: args.display_name,
     };
-    let editor = Editor::open(req, Config::default(), Platform::Linux, Box::new(host));
+    let (cfg, config_messages) = Config::load_from_env();
+    // A bench run paints light, so its numbers stay comparable.
+    let cfg = cfg.for_bench(bench_enabled());
+    let mut editor = Editor::open(req, cfg, Platform::Linux, Box::new(host));
+    editor.say_config(&config_messages);
+    // The system's light or dark as last seen, so the first frame need
+    // not wait on D-Bus (`theme`). The whole frame is painted at the first
+    // snapshot, so the effects ask nothing more.
+    let cached = StateDir::from_env().and_then(|s| cached_appearance(&s));
+    if let Some(theme) = cached {
+        let _ = editor.handle(Input::Appearance(theme));
+    }
     let tokens = editor.tokens().clone();
     let resolver = LinuxFonts::load(
         tokens.family(TokenId::FontBody),
@@ -230,6 +243,12 @@ pub fn run(args: WindowArgs) -> i32 {
         return EXIT_NOT_STARTED;
     }
     marks::mark(names::TOOLKIT_INIT);
+    // GTK 4.20 and later knows the scheme already. It is cached after the
+    // first frame (`start_following`), off the start-up path.
+    if let Some(theme) = theme::initial() {
+        let _ = editor.handle(Input::Appearance(theme));
+    }
+    let tokens = editor.tokens().clone();
 
     let window = gtk::Window::new();
     window.set_title(Some(editor.title()));
@@ -629,6 +648,9 @@ fn on_after_paint(clock: &gdk::FrameClock) {
             st.doc.start_font_fallback();
             // So does the file watch: never on the start-up path.
             st.editor.start_watching();
+            // And the system's light or dark, which may ask D-Bus. Not
+            // from inside this borrow of the state: it may report at once.
+            glib::idle_add_local_once(start_following);
             st.glass.push((frame, Glass::First, 0));
             log_refresh(st);
             changed = true;
@@ -738,6 +760,39 @@ fn on_wake() {
     });
     if let Some(Some(code)) = close {
         finish(code);
+    }
+}
+
+/// The system's light or dark, as `theme` found it: kept for the next
+/// start, and under the system theme everything repaints in the new
+/// token set.
+fn on_appearance(theme: Theme) {
+    remember_appearance(theme);
+    let close = with_state(|st| {
+        let fx = st.editor.handle(Input::Appearance(theme));
+        apply_changed(st, fx)
+    });
+    if let Some(Some(code)) = close {
+        finish(code);
+    }
+}
+
+/// Once the first frame is out: caches the scheme GTK 4.20 and later
+/// gave at start, and follows the system's light or dark from now on.
+fn start_following() {
+    if let Some(theme) = theme::initial() {
+        remember_appearance(theme);
+    }
+    theme::follow(on_appearance);
+}
+
+/// Caches `theme` in the state directory, unless it is there already.
+/// Failing to is harmless: the next start waits on D-Bus instead.
+fn remember_appearance(theme: Theme) {
+    if let Some(state) = StateDir::from_env()
+        && cached_appearance(&state) != Some(theme)
+    {
+        let _ = cache_appearance(&state, theme);
     }
 }
 

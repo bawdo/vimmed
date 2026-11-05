@@ -66,11 +66,12 @@ impl Editor {
     }
 
     /// Once the prompts at open are answered: says the lock failure held
-    /// back, if any.
+    /// back, if any, then the config file's warning (`appearance`).
     pub(super) fn say_held_lock_warning(&mut self) {
         if let Some(reason) = self.lock_warning.take() {
             self.lock_unavailable(&reason);
         }
+        self.say_held_config_warning();
     }
 
     fn lock_unavailable(&mut self, reason: &str) {
