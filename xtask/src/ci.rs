@@ -38,6 +38,8 @@ fn clippy(root: &Path) -> Result<(), String> {
 }
 /// The cargo arguments of the `test` step. With `coverage` the one test
 /// run also writes an lcov report, so CI tests once rather than twice.
+/// Note: `cargo llvm-cov` does not run doctests (unlike `cargo test`); the
+/// workspace has none today.
 pub fn test_step_args(coverage: bool) -> Vec<&'static str> {
     if coverage {
         vec![

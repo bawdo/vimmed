@@ -95,6 +95,7 @@ jobs:
           files: target/lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+          disable_search: true
 
   # Builds docker/Dockerfile.check and runs the workspace plus a smoke run in
   # the container. Docker is already on the runner.
