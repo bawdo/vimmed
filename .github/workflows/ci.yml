@@ -74,8 +74,28 @@ jobs:
       - name: Check Cargo.lock is up to date
         run: cargo metadata --locked --format-version 1 > /dev/null
 
-      - name: Run the CI gate
-        run: cargo xtask ci
+      # The version matches CONTRIBUTING.md. llvm-tools-preview comes from
+      # rust-toolchain.toml.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      # The test step runs under cargo llvm-cov, so the suite runs once and
+      # writes target/lcov.info.
+      - name: Run the CI gate with coverage
+        run: cargo xtask ci --coverage
+
+      # Coverage is informational. A fork or Dependabot pull request has no
+      # secrets, so the token is empty there and the upload may fail; that
+      # must not fail the job (fail_ci_if_error is false).
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: target/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          disable_search: true
 
   # Builds docker/Dockerfile.check and runs the workspace plus a smoke run in
   # the container. Docker is already on the runner.
@@ -182,6 +202,42 @@ jobs:
           fi
           echo "changelog: $version matches Cargo.toml"
 
+  # Spell check with typos, using typos.toml. Prose in Markdown is held to
+  # Australian English; code is checked without a locale. The action version
+  # matches CONTRIBUTING.md, because the action runs the typos release of
+  # its own tag.
+  typos:
+    name: typos
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run typos
+        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+
+  # Checks REUSE compliance (reuse.software): every file has a licence and
+  # copyright, here through REUSE.toml. The action runs the fsfe/reuse:6
+  # image and has no input for the reuse version, so CI tracks the latest
+  # 6.x while CONTRIBUTING.md pins the version for local runs.
+  reuse:
+    name: reuse
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run reuse lint
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
+
   # Checks the workspace on the oldest Rust the manifest promises
   # (rust-version in Cargo.toml), so that promise is tested and not just
   # written down. It reads the version from the manifest, so there is no
@@ -233,8 +289,8 @@ jobs:
   #   workflow_dispatch: none
   #   pull_request: none
   #   push (a caller via workflow_call): none
-  #   schedule: macos, linux, linux-smoke, msrv and changelog (only deny and
-  #     zizmor run)
+  #   schedule: macos, linux, linux-smoke, msrv, changelog, typos and reuse (only
+  #     deny and zizmor run)
   # Any other event expects every job. A failed or cancelled job always
   # fails the gate, and so does a skip that the event does not allow, so a
   # job left out by a bad if: condition cannot pass unnoticed. A job added
@@ -243,7 +299,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [macos, linux, linux-smoke, msrv, deny, zizmor, changelog]
+    needs: [macos, linux, linux-smoke, msrv, deny, zizmor, changelog, typos, reuse]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -255,11 +311,11 @@ jobs:
           set -euo pipefail
           case "$EVENT" in
             pull_request|push|workflow_dispatch) may_skip='[]' ;;
-            schedule) may_skip='["macos","linux","linux-smoke","msrv","changelog"]' ;;
+            schedule) may_skip='["macos","linux","linux-smoke","msrv","changelog","typos","reuse"]' ;;
             *)        may_skip='[]' ;;
           esac
           # Mirrors needs above, so a job missing from the results fails too.
-          all='["macos","linux","linux-smoke","msrv","deny","zizmor","changelog"]'
+          all='["macos","linux","linux-smoke","msrv","deny","zizmor","changelog","typos","reuse"]'
           echo "Event: $EVENT (may skip: $may_skip)"
           jq -r 'to_entries[] | "  \(.key): \(.value.result)"' <<<"$NEEDS"
           bad=$(jq -r --argjson all "$all" --argjson skip "$may_skip" '

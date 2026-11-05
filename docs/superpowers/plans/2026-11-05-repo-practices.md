@@ -386,11 +386,11 @@ Jobs, each with jellyfish's comments on why it is split this way:
 - [x] Every Task 8 to 13 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
 - [x] Resume log entry added.
 - [x] Keith told what to do: push `chore/repo-tier-2`, open the PR, CI green (now including `MSRV` and `zizmor`), merge. Merging does **not** release, because `CHANGELOG.md` has only `[Unreleased]`. To cut 0.9.0, open a PR that renames `[Unreleased]` to `[0.9.0] - <date>` with the compare link, and merge it. Then check the release page, download the zip and run the `SECURITY.md` verify commands.
-- [ ] **Context check asked; Keith's answer recorded in the Resume log.**
+- [x] **Context check asked; Keith's answer recorded in the Resume log.**
 
 **Ready to resume Tier 3 when:**
-- [ ] The Tier 2 PR is merged and the `main` release run shows `plan` with `due=false` (or a successful release, if Keith cut 0.9.0).
-- [ ] If a release was cut: `spctl` on the downloaded `.app` says `Notarized Developer ID`, and `gh attestation verify` passes.
+- [x] The Tier 2 PR is merged and the `main` release run shows `plan` with `due=false` (or a successful release, if Keith cut 0.9.0). (PR #4 merged as 813b2df. Release run 42028549524 succeeded: every CI job and `plan` green, build-mac, build-linux, sign-mac and publish skipped.)
+- [x] If a release was cut: `spctl` on the downloaded `.app` says `Notarized Developer ID`, and `gh attestation verify` passes. (Not applicable: no release was cut.)
 
 ---
 
@@ -404,20 +404,20 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 - Create: `typos.toml`
 - Modify: `.github/workflows/ci.yml`, and whatever files contain real typos
 
-- [ ] **Step 1:** Write `typos.toml` with no `locale` under `[default]`, because code uses US API names such as `Color` from dependencies. Add `[type.md] extend-glob = ["*.md"]` with `locale = "en-au"`. Add `[files] extend-exclude = ["Cargo.lock", "*.svg", "packaging/icons/**", "docs/superpowers/**", "research_notes/**", "reports/**", "bench-results/**"]`.
-- [ ] **Step 2:** Install with `cargo install --locked typos-cli --version <latest, 14 days or older>` and run `typos`. Fix real typos. Add genuine words (crate names, the project name) to `[default.extend-words]` with the word mapped to itself. Never add a misspelling.
-- [ ] **Step 3:** Add a `typos` job (`crate-ci/typos` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`.
-- [ ] **Step 4:** `typos` prints nothing. `actionlint` and `zizmor` are clean. `cargo xtask ci` (PASS).
-- [ ] **Step 5:** Commit with "Added typos checks with Australian English prose".
+- [x] **Step 1:** Write `typos.toml` with no `locale` under `[default]`, because code uses US API names such as `Color` from dependencies. Add `[type.md] extend-glob = ["*.md"]` with `locale = "en-au"`. Add `[files] extend-exclude = ["Cargo.lock", "*.svg", "packaging/icons/**", "docs/superpowers/**", "research_notes/**", "reports/**", "bench-results/**"]`.
+- [x] **Step 2:** Install with `cargo install --locked typos-cli --version <latest, 14 days or older>` and run `typos`. Fix real typos. Add genuine words (crate names, the project name) to `[default.extend-words]` with the word mapped to itself. Never add a misspelling.
+- [x] **Step 3:** Add a `typos` job (`crate-ci/typos` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`.
+- [x] **Step 4:** `typos` prints nothing. `actionlint` and `zizmor` are clean. `cargo xtask ci` (PASS).
+- [x] **Step 5:** Commit with "Added typos checks with Australian English prose".
 
 ### Task 15: .gitattributes
 
 **Files:**
 - Create: `.gitattributes`
 
-- [ ] **Step 1:** Write it with these lines: `* text=auto eol=lf`, `*.icns binary`, `*.png binary`, `*.gif binary`, `*.ttf binary`, `Cargo.lock linguist-generated=true`, `docs/superpowers/** linguist-documentation`, `research_notes/** linguist-documentation`, `reports/** linguist-documentation`.
-- [ ] **Step 2:** `git add --renormalize .` followed by `git status` shows no changed files other than `.gitattributes`. If files do change, stop and show Keith the list.
-- [ ] **Step 3:** `git check-attr -a packaging/icons/AppIcon.icns` shows `binary: set`. Commit with "Added .gitattributes".
+- [x] **Step 1:** Write it with these lines: `* text=auto eol=lf`, `*.icns binary`, `*.png binary`, `*.gif binary`, `*.ttf binary`, `Cargo.lock linguist-generated=true`, `docs/superpowers/** linguist-documentation`, `research_notes/** linguist-documentation`, `reports/** linguist-documentation`.
+- [x] **Step 2:** `git add --renormalize .` followed by `git status` shows no changed files other than `.gitattributes`. If files do change, stop and show Keith the list.
+- [x] **Step 3:** `git check-attr -a packaging/icons/AppIcon.icns` shows `binary: set`. Commit with "Added .gitattributes".
 
 ### Task 16: AI policy
 
@@ -425,9 +425,9 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 - Create: `AI_POLICY.md`
 - Modify: `CONTRIBUTING.md` (link it), `.github/PULL_REQUEST_TEMPLATE.md` (one checkbox)
 
-- [ ] **Step 1:** Draft `AI_POLICY.md` from ripgrep's points: AI tools for code are fine, the contributor is responsible for every line and must understand it, and the maintainer is accountable for releases. Fit the human-written-communication point to Keith's own practice: an AI-assisted PR must say so in its description. **Show Keith the draft and wait for his wording before committing.** It's his stance, not ours.
-- [ ] **Step 2:** Add the link in CONTRIBUTING.md and the checkbox "I have read AI_POLICY.md" to the PR template.
-- [ ] **Step 3:** `typos` clean. Commit with "Added an AI contribution policy".
+- [x] **Step 1:** Draft `AI_POLICY.md` from ripgrep's points: AI tools for code are fine, the contributor is responsible for every line and must understand it, and the maintainer is accountable for releases. Fit the human-written-communication point to Keith's own practice: an AI-assisted PR must say so in its description. **Show Keith the draft and wait for his wording before committing.** It's his stance, not ours. (Keith approved the draft after deleting its disclosure paragraph, so the policy has no PR-description disclosure rule.)
+- [x] **Step 2:** Add the link in CONTRIBUTING.md and the checkbox "I have read AI_POLICY.md" to the PR template.
+- [x] **Step 3:** `typos` clean. Commit with "Added an AI contribution policy".
 
 ### Task 17: Coverage, informational
 
@@ -438,14 +438,14 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 **Interfaces:**
 - Produces: `pub fn run(root: &Path, linux: bool, coverage: bool) -> Result<(), String>` in `xtask/src/ci.rs`. When `coverage` is true, the `test` step runs `cargo llvm-cov --workspace --lcov --output-path target/lcov.info` in place of `cargo test --workspace`, so CI tests once rather than twice. `cargo xtask ci --coverage` parses the flag in `main.rs`.
 
-- [ ] **Step 1: Write the failing test** in `ci.rs`: `test_step_args(coverage: bool) -> Vec<&'static str>` returns `["test", "--workspace"]` for false and `["llvm-cov", "--workspace", "--lcov", "--output-path", "target/lcov.info"]` for true. Assert both.
-- [ ] **Step 2: Run** `cargo test -p xtask ci::`. Expected: FAIL.
-- [ ] **Step 3:** Implement `test_step_args`. Thread `coverage` through `run`, so the step list picks the test args at run time (the `STEPS` const becomes a function or the test step reads a flag). Update the `main.rs` parsing and usage string.
-- [ ] **Step 4:** Install with `cargo install --locked cargo-llvm-cov --version <latest, 14 days or older>` and add `llvm-tools-preview` to `rust-toolchain.toml` components. Run `cargo xtask ci --coverage`: `target/lcov.info` exists and all steps are OK. `cargo xtask ci` still passes.
-- [ ] **Step 5 (Review Focus 3):** In `ci.yml`, the `linux` job runs `cargo xtask ci --coverage` (installing cargo-llvm-cov with `taiki-e/install-action`, pinned), then `codecov/codecov-action` with `files: target/lcov.info`, `token: ${{ secrets.CODECOV_TOKEN }}` and `fail_ci_if_error: false`. Pass `CODECOV_TOKEN` through `workflow_call` from `release.yml`. `grep -n 'secrets\.' .github/workflows/ci.yml` shows only the declaration and this step.
-- [ ] **Step 6:** Write `.codecov.yml` from jellyfish's with every status `informational: true`, no 90% floor (`target: auto`), and `ignore: ["xtask/**", "crates/layout-bench/**", "**/tests/**"]`.
-- [ ] **Step 7:** `actionlint` and `zizmor` clean, `cargo xtask ci` (PASS). Commit with "Added informational coverage via cargo-llvm-cov".
-- [ ] **Step 8:** Tell Keith to add `CODECOV_TOKEN` as a repository secret (`gh secret set CODECOV_TOKEN -R bawdo/vimmed`) after enabling the repo at codecov.io.
+- [x] **Step 1: Write the failing test** in `ci.rs`: `test_step_args(coverage: bool) -> Vec<&'static str>` returns `["test", "--workspace"]` for false and `["llvm-cov", "--workspace", "--lcov", "--output-path", "target/lcov.info"]` for true. Assert both.
+- [x] **Step 2: Run** `cargo test -p xtask ci::`. Expected: FAIL.
+- [x] **Step 3:** Implement `test_step_args`. Thread `coverage` through `run`, so the step list picks the test args at run time (the `STEPS` const becomes a function or the test step reads a flag). Update the `main.rs` parsing and usage string.
+- [x] **Step 4:** Install with `cargo install --locked cargo-llvm-cov --version <latest, 14 days or older>` and add `llvm-tools-preview` to `rust-toolchain.toml` components. Run `cargo xtask ci --coverage`: `target/lcov.info` exists and all steps are OK. `cargo xtask ci` still passes.
+- [x] **Step 5 (Review Focus 3):** In `ci.yml`, the `linux` job runs `cargo xtask ci --coverage` (installing cargo-llvm-cov with `taiki-e/install-action`, pinned), then `codecov/codecov-action` with `files: target/lcov.info`, `token: ${{ secrets.CODECOV_TOKEN }}` and `fail_ci_if_error: false`. Pass `CODECOV_TOKEN` through `workflow_call` from `release.yml`. `grep -n 'secrets\.' .github/workflows/ci.yml` shows only the declaration and this step.
+- [x] **Step 6:** Write `.codecov.yml` from jellyfish's with every status `informational: true`, no 90% floor (`target: auto`), and `ignore: ["xtask/**", "crates/layout-bench/**", "**/tests/**"]`.
+- [x] **Step 7:** `actionlint` and `zizmor` clean, `cargo xtask ci` (PASS). Commit with "Added informational coverage via cargo-llvm-cov".
+- [x] **Step 8:** Tell Keith to add `CODECOV_TOKEN` as a repository secret (`gh secret set CODECOV_TOKEN -R bawdo/vimmed`) after enabling the repo at codecov.io. (Told at PAUSE 3. Review found `docker/Dockerfile.check` installed only rustfmt and clippy, so the image now installs `llvm-tools-preview` too.)
 
 ### Task 18: REUSE compliance
 
@@ -453,29 +453,29 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 - Create: `REUSE.toml`, `LICENSES/MIT.txt`, `LICENSES/OFL-1.1.txt`
 - Modify: `.github/workflows/ci.yml`, `CONTRIBUTING.md` (one line: new files are covered by `REUSE.toml` globs or need an SPDX header)
 
-- [ ] **Step 1:** Install with `pipx install reuse==<latest, 14 days or older>` and run `reuse lint` to record the baseline failure count.
-- [ ] **Step 2:** Run `reuse download MIT OFL-1.1`. Keep the root `LICENSE` for GitHub's licence detection; it is identical in substance to `LICENSES/MIT.txt`.
-- [ ] **Step 3:** Write `REUSE.toml` (version 1) with these annotations:
+- [x] **Step 1:** Install with `pipx install reuse==<latest, 14 days or older>` and run `reuse lint` to record the baseline failure count.
+- [x] **Step 2:** Run `reuse download MIT OFL-1.1`. Keep the root `LICENSE` for GitHub's licence detection; it is identical in substance to `LICENSES/MIT.txt`.
+- [x] **Step 3:** Write `REUSE.toml` (version 1) with these annotations:
   - `**` under `MIT`, `SPDX-FileCopyrightText = "2026 Keith Bawden"`.
   - `crates/editor-render/tests/fonts/*.ttf` under `OFL-1.1`, with the copyright line taken from each font's `*-OFL.txt` (first line).
   - `crates/editor-render/tests/fonts/*-OFL.txt` under `OFL-1.1`.
 
   Use `precedence = "override"` for the font entries.
-- [ ] **Step 4:** `reuse lint` ends with `Congratulations! Your project is compliant`.
-- [ ] **Step 5:** Add a `reuse` job (`fsfe/reuse-action` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`. `actionlint` and `zizmor` clean.
-- [ ] **Step 6:** Commit with "Made the repository REUSE compliant".
+- [x] **Step 4:** `reuse lint` ends with `Congratulations! Your project is compliant`.
+- [x] **Step 5:** Add a `reuse` job (`fsfe/reuse-action` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`. `actionlint` and `zizmor` clean.
+- [x] **Step 6:** Commit with "Made the repository REUSE compliant".
 
 ### Task 19: Whole branch review
 
-- [ ] **Step 1:** Run superpowers:requesting-code-review over `main..chore/repo-tier-3`, and over the merged Tier 1 and 2 changes if Keith asks.
-- [ ] **Step 2:** Re-run `cargo xtask ci` and `cargo xtask linux-check` yourself and paste the summary lines.
-- [ ] **Step 3:** Update the CONTRIBUTING.md Tool versions list against what was actually installed.
+- [x] **Step 1:** Run superpowers:requesting-code-review over `main..chore/repo-tier-3`, and over the merged Tier 1 and 2 changes if Keith asks. (Review over 813b2df..9312ef3, which also triaged the deferred minors from all three tiers. One fix wave, 84430dd: CODE_OF_CONDUCT.md licensed CC-BY-4.0 in REUSE.toml, session paths removed from docs/manual-checks.md, Codecov `disable_search`, a doctest note in xtask.)
+- [x] **Step 2:** Re-run `cargo xtask ci` and `cargo xtask linux-check` yourself and paste the summary lines. (`ci: all 7 steps OK` for both `cargo xtask ci` and `cargo xtask ci --coverage` on a clean tree of 84430dd. `linux-check` cannot run in the sandbox (no Docker): the PR's `Linux container smoke` job proves it, including the image's new `llvm-tools-preview` component.)
+- [x] **Step 3:** Update the CONTRIBUTING.md Tool versions list against what was actually installed. (Already matched: cargo-deny 0.20.2, zizmor 1.30.1, typos-cli 1.51.1, cargo-llvm-cov 0.9.1, reuse 6.2.0.)
 
 ## PAUSE 3: end of Tier 3
 
-- [ ] Every Task 14 to 19 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
-- [ ] Resume log entry added.
-- [ ] Keith told what to do: push `chore/repo-tier-3`, open the PR, CI green (now including `typos` and `reuse`), merge, set `CODECOV_TOKEN`. Scorecard results appear at `https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed` after the next weekly run or push to `main`.
+- [x] Every Task 14 to 19 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
+- [x] Resume log entry added.
+- [x] Keith told what to do: push `chore/repo-tier-3`, open the PR, CI green (now including `typos` and `reuse`), merge, set `CODECOV_TOKEN`. Scorecard results appear at `https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed` after the next weekly run or push to `main`.
 - [ ] **Context check asked; Keith's answer recorded in the Resume log.**
 
 ---
@@ -487,3 +487,5 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 | 2026-11-05 | 1 | chore/repo-tier-1 | ae14cc7 (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, cargo-deny, Changelog and CI result green, merge with a merge commit, then run .github/settings.md top to bottom (rulesets last). Local `cargo xtask ci` fails at fmt only because of the gitignored crates/editor-render/tests/demo_reel.rs: run `cargo fmt --all` locally. The git-guard reference-transaction hook blocks cargo-deny's advisory-db self-update (use `cargo deny check --offline` after the first fetch). RUSTSEC-2026-0192 (ttf-parser unmaintained) is ignored in deny.toml with a reason. Docker is unreachable from the sandbox, so `cargo xtask linux-check` with the pinned digest is first proven by the PR's container smoke job. Subagents no longer commit; the controller does (Keith, 2026-11-05). |
 | 2026-11-05 | 1 (context check) | chore/repo-tier-1 | c1837c3, merged as 019888f | Keith: stop here, resume in a fresh session. Tier 2 resumed on chore/repo-tier-2 from 019888f. |
 | 2026-11-05 | 2 | chore/repo-tier-2 | 110327a (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, MSRV (macOS and Ubuntu), cargo-deny, zizmor, Changelog and CI result green, merge with a merge commit. The merge runs release.yml for the first time: expect `plan` with due=false. Before cutting 0.9.0, add a deployment branch rule limiting the `release` environment to `main` (`gh api repos/bawdo/vimmed/environments/release` to check). To release, bump `[workspace.package] version` with the changelog heading (CI now fails a mismatch). Run `cargo xtask linux-check` locally once, plus Task 12's negative check (delete `<summary>` from metainfo.xml.in, expect failure, restore). zizmor is 1.30.1 because the pinned zizmor-action supports nothing newer. Inside the sandbox rustup needs `RUSTUP_USE_CURL=1`. |
+| 2026-11-05 | 2 (context check) | chore/repo-tier-2 | 925f74a, then 7599044, merged as 813b2df | Keith: stop here, resume in a fresh session. Tier 3 resumed on chore/repo-tier-3 from 813b2df. Still owed before 0.9.0: the `release` environment deployment branch rule (main only), and Task 12's negative check run locally. |
+| 2026-11-06 | 3 | chore/repo-tier-3 | 84430dd (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke (first build of the image with llvm-tools-preview), MSRV x2, cargo-deny, zizmor, typos, reuse, Changelog and CI result green, merge with a merge commit. Enable the repo at codecov.io, then `gh secret set CODECOV_TOKEN -R bawdo/vimmed` (until then the upload is a non-fatal no-op). Confirm `crates/layout-bench/src/prose.txt` and `packaging/icons` are your own work (REUSE.toml claims MIT, 2026 Keith Bawden, for everything not overridden). Still owed from Tier 2 before 0.9.0: the `release` environment deployment branch rule (main only), and Task 12's negative check run locally. Scorecard: https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed after the next weekly run or push to main. |

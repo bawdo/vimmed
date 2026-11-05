@@ -8,6 +8,8 @@ so the process is light.
 Everyone taking part is expected to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
+If you use AI tools, read the [AI policy](AI_POLICY.md) first.
+
 Open an issue for anything bigger than a typo or a one-line fix, so the
 approach can be agreed before you spend time on it. Security problems go
 through [SECURITY.md](SECURITY.md), not the issue tracker.
@@ -67,6 +69,9 @@ results as CI:
 
 - cargo-deny: `cargo install --locked cargo-deny --version 0.20.2`
 - zizmor: `cargo install --locked zizmor --version 1.30.1`
+- typos: `cargo install --locked typos-cli --version 1.51.1`
+- cargo-llvm-cov: `cargo install --locked cargo-llvm-cov --version 0.9.1` (for `cargo xtask ci --coverage`; needs the `llvm-tools-preview` component, which `rust-toolchain.toml` lists)
+- reuse: `pipx install reuse==6.2.0` (the CI action runs the latest 6.x image). New files are covered by the globs in `REUSE.toml`, or need an SPDX header if their licence differs.
 
 ## Licence
 

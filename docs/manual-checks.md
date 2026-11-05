@@ -8,7 +8,7 @@ v0.9. Run them on the Mac (and on Linux at Checkpoint 3, Task 45), then tick the
 Build the release bundle and open a file with the window binary inside it:
 
 ```sh
-PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME=/tmp/claude-501/cargo-home cargo xtask bundle-mac --release
+cargo xtask bundle-mac --release
 target/dist/<BundleName>.app/Contents/MacOS/<name> test.md
 ```
 
@@ -155,7 +155,7 @@ scrolls about the page height to the power 2/3, in points, as GTK's own scrolled
 Paste each results directory the bench prints back into the session.
 
 31. **macOS typing run.** Close other heavy apps and keep the screen unlocked, then run
-    `PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME=/tmp/claude-501/cargo-home cargo xtask bench type --manual --keys 500`.
+    `cargo xtask bench type --manual --keys 500`.
     Type ordinary prose, but switch modes often: Esc and `i`, `o` for new lines, a few `:w`
     saves, and `u` now and then. Checkpoint 2 missed once on a stall after switching modes, so
     the switches matter here. Expect key_ms p95 at or under 16 ms.

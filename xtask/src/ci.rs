@@ -4,7 +4,7 @@ use crate::{lint, rename};
 use std::path::Path;
 use std::process::Command;
 
-type Step = (&'static str, fn(&Path) -> Result<(), String>);
+type Step = (&'static str, Box<dyn Fn(&Path) -> Result<(), String>>);
 
 fn cargo(root: &Path, args: &[&str]) -> Result<(), String> {
     let ok = Command::new("cargo")
@@ -36,8 +36,25 @@ fn clippy(root: &Path) -> Result<(), String> {
         ],
     )
 }
-fn test(root: &Path) -> Result<(), String> {
-    cargo(root, &["test", "--workspace"])
+/// The cargo arguments of the `test` step. With `coverage` the one test
+/// run also writes an lcov report, so CI tests once rather than twice.
+/// Note: `cargo llvm-cov` does not run doctests (unlike `cargo test`); the
+/// workspace has none today.
+pub fn test_step_args(coverage: bool) -> Vec<&'static str> {
+    if coverage {
+        vec![
+            "llvm-cov",
+            "--workspace",
+            "--lcov",
+            "--output-path",
+            "target/lcov.info",
+        ]
+    } else {
+        vec!["test", "--workspace"]
+    }
+}
+fn test(root: &Path, coverage: bool) -> Result<(), String> {
+    cargo(root, &test_step_args(coverage))
 }
 pub fn lint_name(root: &Path) -> Result<(), String> {
     let (slug, prefix) = rename::read_manifest_names(root)?;
@@ -47,23 +64,26 @@ fn rename_test(root: &Path) -> Result<(), String> {
     rename::run(root, rename::DEFAULT_NAME, false)
 }
 
-const STEPS: &[Step] = &[
-    ("fmt", fmt),
-    ("clippy", clippy),
-    ("test", test),
-    ("lint-name", lint_name),
-    ("lint-literals", crate::literals::run),
-    ("shell-lines", crate::shell_lines::run),
-    ("rename-test", rename_test),
-];
+fn steps(coverage: bool) -> Vec<Step> {
+    vec![
+        ("fmt", Box::new(fmt)),
+        ("clippy", Box::new(clippy)),
+        ("test", Box::new(move |root| test(root, coverage))),
+        ("lint-name", Box::new(lint_name)),
+        ("lint-literals", Box::new(crate::literals::run)),
+        ("shell-lines", Box::new(crate::shell_lines::run)),
+        ("rename-test", Box::new(rename_test)),
+    ]
+}
 
-pub fn run(root: &Path, linux: bool) -> Result<(), String> {
-    for (name, step) in STEPS {
+pub fn run(root: &Path, linux: bool, coverage: bool) -> Result<(), String> {
+    let steps = steps(coverage);
+    for (name, step) in &steps {
         println!("== ci: {name}");
         step(root).map_err(|e| format!("ci step `{name}` failed: {e}"))?;
         println!("ci: {name} OK");
     }
-    println!("ci: all {} steps OK", STEPS.len());
+    println!("ci: all {} steps OK", steps.len());
     if linux {
         println!("== ci: linux-check");
         linux_check(root)?;
@@ -292,6 +312,25 @@ mod tests {
 \tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff8a750000)
 \t/lib/ld-linux-aarch64.so.1 (0x0000ffff8a983000)
 ";
+
+    #[test]
+    fn test_step_runs_plain_tests_without_coverage() {
+        assert_eq!(test_step_args(false), ["test", "--workspace"]);
+    }
+
+    #[test]
+    fn test_step_writes_lcov_with_coverage() {
+        assert_eq!(
+            test_step_args(true),
+            [
+                "llvm-cov",
+                "--workspace",
+                "--lcov",
+                "--output-path",
+                "target/lcov.info"
+            ]
+        );
+    }
 
     #[test]
     fn toolchain_channel_is_read_from_the_pin() {

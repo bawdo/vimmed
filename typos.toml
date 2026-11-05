@@ -1,0 +1,52 @@
+# Spell check for the repository (typos). Prose in Markdown is held to
+# Australian English. Code is not given a locale, because it uses US API
+# names from dependencies (Color and the like).
+
+[files]
+extend-exclude = [
+    "Cargo.lock",
+    "*.svg",
+    "packaging/icons/**",
+    "docs/superpowers/**",
+    "research_notes/**",
+    "reports/**",
+    "bench-results/**",
+]
+
+# Words that are correct as written. Each maps to itself.
+[default.extend-words]
+# Australian English noun; typos' en-au list suggests the US "license".
+licence = "licence"
+# Table tag in Apple's AAT font tracking table.
+trak = "trak"
+# The in-toto attestation file extension (".intoto.jsonl").
+intoto = "intoto"
+
+[default.extend-identifiers]
+# "PNG" plus a plural s, which typos splits into "PN" and "Gs".
+PNGs = "PNGs"
+
+[type.md]
+extend-glob = ["*.md"]
+locale = "en-au"
+extend-ignore-re = [
+    # HTML attribute value, not prose.
+    'align="center"',
+    # Literal spctl output (Apple's US spelling).
+    'source=Notarized Developer ID',
+]
+
+# Deliberate fragments in tests (expected text after an edit, search prefixes,
+# vim option names) and prompt mnemonics such as "[c]ompare". Scoped to Rust so
+# a real typo in prose still fails.
+[type.rust.extend-words]
+abd = "abd"        # expected text after an edit
+caf = "caf"        # "caf\xe9": invalid UTF-8 and accented-letter fixtures
+froms = "froms"    # test table column of search start positions
+fo = "fo"          # vim 'formatoptions' (fo+=r)
+hel = "hel"        # partial search query
+helo = "helo"      # expected text after deleting a letter
+ine = "ine"        # expected text after deleting a letter
+nd = "nd"          # closure name, and keys "nd" after a visual search
+ompare = "ompare"  # from the "[c]ompare" recovery prompt mnemonic
+worl = "worl"      # expected text after deleting a letter

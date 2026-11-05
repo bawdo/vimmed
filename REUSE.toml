@@ -1,0 +1,40 @@
+version = 1
+
+# Everything is MIT unless an annotation below overrides it. New files are
+# covered by the first annotation; a file with a different licence needs its
+# own annotation here or an SPDX header.
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Keith Bawden"
+SPDX-License-Identifier = "MIT"
+
+# The Noto fonts used by the render tests are under the SIL Open Font
+# Licence. Each copyright line is the first line of the font's own
+# *-OFL.txt. These annotations come after the one above and override it.
+[[annotations]]
+path = [
+    "crates/editor-render/tests/fonts/NotoSans-Regular.ttf",
+    "crates/editor-render/tests/fonts/NotoSans-OFL.txt",
+    "crates/editor-render/tests/fonts/NotoSansMono-Regular.ttf",
+    "crates/editor-render/tests/fonts/NotoSansMono-OFL.txt",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = [
+    "crates/editor-render/tests/fonts/NotoSansSymbols2-Regular.ttf",
+    "crates/editor-render/tests/fonts/NotoSansSymbols2-OFL.txt",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2022 The Noto Project Authors (https://github.com/notofonts/symbols)"
+SPDX-License-Identifier = "OFL-1.1"
+
+# The Code of Conduct is the Contributor Covenant 2.1, which is published
+# under CC BY 4.0. This annotation comes after the first one and overrides it.
+[[annotations]]
+path = "CODE_OF_CONDUCT.md"
+precedence = "override"
+SPDX-FileCopyrightText = "Contributor Covenant contributors"
+SPDX-License-Identifier = "CC-BY-4.0"
