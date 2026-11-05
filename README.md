@@ -10,6 +10,8 @@
 
 A fast, keyboard-driven Markdown editor with vim keys, one window per file, for macOS and Linux.
 
+![Demo: Markdown rendering live as it is typed, then the :table grid picker inserting a table whose cells are filled in with Tab](docs/assets/demo.gif)
+
 It is MIT licensed: see `LICENSE`.
 
 ## Building
