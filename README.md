@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-# &lt;name&gt;
+# vimmed
 
 A fast, keyboard-driven Markdown editor with vim keys, one window per file, for macOS and Linux.
 
