@@ -8,6 +8,13 @@
 
 # vimmed
 
+[![CI](https://github.com/bawdo/vimmed/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/bawdo/vimmed/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/bawdo/vimmed)](https://github.com/bawdo/vimmed/releases/latest)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/bawdo/vimmed/badge)](https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed)
+[![Coverage](https://codecov.io/gh/bawdo/vimmed/branch/main/graph/badge.svg)](https://codecov.io/gh/bawdo/vimmed)
+[![REUSE status](https://api.reuse.software/badge/github.com/bawdo/vimmed)](https://api.reuse.software/info/github.com/bawdo/vimmed)
+[![Licence: MIT](https://img.shields.io/github/license/bawdo/vimmed)](LICENSE)
+
 A fast, keyboard-driven Markdown editor with vim keys, one window per file, for macOS and Linux.
 
 ![Demo: Markdown rendering live as it is typed, then the :table grid picker inserting a table whose cells are filled in with Tab](docs/assets/demo.gif)
