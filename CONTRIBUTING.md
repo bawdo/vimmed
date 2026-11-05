@@ -71,6 +71,7 @@ results as CI:
 - zizmor: `cargo install --locked zizmor --version 1.30.1`
 - typos: `cargo install --locked typos-cli --version 1.51.1`
 - cargo-llvm-cov: `cargo install --locked cargo-llvm-cov --version 0.9.1` (for `cargo xtask ci --coverage`; needs the `llvm-tools-preview` component, which `rust-toolchain.toml` lists)
+- reuse: `pipx install reuse==6.2.0` (the CI action runs the latest 6.x image). New files are covered by the globs in `REUSE.toml`, or need an SPDX header if their licence differs.
 
 ## Licence
 

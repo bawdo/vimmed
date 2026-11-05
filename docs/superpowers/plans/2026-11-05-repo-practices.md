@@ -453,17 +453,17 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 - Create: `REUSE.toml`, `LICENSES/MIT.txt`, `LICENSES/OFL-1.1.txt`
 - Modify: `.github/workflows/ci.yml`, `CONTRIBUTING.md` (one line: new files are covered by `REUSE.toml` globs or need an SPDX header)
 
-- [ ] **Step 1:** Install with `pipx install reuse==<latest, 14 days or older>` and run `reuse lint` to record the baseline failure count.
-- [ ] **Step 2:** Run `reuse download MIT OFL-1.1`. Keep the root `LICENSE` for GitHub's licence detection; it is identical in substance to `LICENSES/MIT.txt`.
-- [ ] **Step 3:** Write `REUSE.toml` (version 1) with these annotations:
+- [x] **Step 1:** Install with `pipx install reuse==<latest, 14 days or older>` and run `reuse lint` to record the baseline failure count.
+- [x] **Step 2:** Run `reuse download MIT OFL-1.1`. Keep the root `LICENSE` for GitHub's licence detection; it is identical in substance to `LICENSES/MIT.txt`.
+- [x] **Step 3:** Write `REUSE.toml` (version 1) with these annotations:
   - `**` under `MIT`, `SPDX-FileCopyrightText = "2026 Keith Bawden"`.
   - `crates/editor-render/tests/fonts/*.ttf` under `OFL-1.1`, with the copyright line taken from each font's `*-OFL.txt` (first line).
   - `crates/editor-render/tests/fonts/*-OFL.txt` under `OFL-1.1`.
 
   Use `precedence = "override"` for the font entries.
-- [ ] **Step 4:** `reuse lint` ends with `Congratulations! Your project is compliant`.
-- [ ] **Step 5:** Add a `reuse` job (`fsfe/reuse-action` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`. `actionlint` and `zizmor` clean.
-- [ ] **Step 6:** Commit with "Made the repository REUSE compliant".
+- [x] **Step 4:** `reuse lint` ends with `Congratulations! Your project is compliant`.
+- [x] **Step 5:** Add a `reuse` job (`fsfe/reuse-action` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`. `actionlint` and `zizmor` clean.
+- [x] **Step 6:** Commit with "Made the repository REUSE compliant".
 
 ### Task 19: Whole branch review
 

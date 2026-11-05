@@ -219,6 +219,24 @@ jobs:
       - name: Run typos
         uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
 
+  # Checks REUSE compliance (reuse.software): every file has a licence and
+  # copyright, here through REUSE.toml. The action runs the fsfe/reuse:6
+  # image and has no input for the reuse version, so CI tracks the latest
+  # 6.x while CONTRIBUTING.md pins the version for local runs.
+  reuse:
+    name: reuse
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run reuse lint
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
+
   # Checks the workspace on the oldest Rust the manifest promises
   # (rust-version in Cargo.toml), so that promise is tested and not just
   # written down. It reads the version from the manifest, so there is no
@@ -270,8 +288,8 @@ jobs:
   #   workflow_dispatch: none
   #   pull_request: none
   #   push (a caller via workflow_call): none
-  #   schedule: macos, linux, linux-smoke, msrv, changelog and typos (only deny and
-  #     zizmor run)
+  #   schedule: macos, linux, linux-smoke, msrv, changelog, typos and reuse (only
+  #     deny and zizmor run)
   # Any other event expects every job. A failed or cancelled job always
   # fails the gate, and so does a skip that the event does not allow, so a
   # job left out by a bad if: condition cannot pass unnoticed. A job added
@@ -280,7 +298,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [macos, linux, linux-smoke, msrv, deny, zizmor, changelog, typos]
+    needs: [macos, linux, linux-smoke, msrv, deny, zizmor, changelog, typos, reuse]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -292,11 +310,11 @@ jobs:
           set -euo pipefail
           case "$EVENT" in
             pull_request|push|workflow_dispatch) may_skip='[]' ;;
-            schedule) may_skip='["macos","linux","linux-smoke","msrv","changelog","typos"]' ;;
+            schedule) may_skip='["macos","linux","linux-smoke","msrv","changelog","typos","reuse"]' ;;
             *)        may_skip='[]' ;;
           esac
           # Mirrors needs above, so a job missing from the results fails too.
-          all='["macos","linux","linux-smoke","msrv","deny","zizmor","changelog","typos"]'
+          all='["macos","linux","linux-smoke","msrv","deny","zizmor","changelog","typos","reuse"]'
           echo "Event: $EVENT (may skip: $may_skip)"
           jq -r 'to_entries[] | "  \(.key): \(.value.result)"' <<<"$NEEDS"
           bad=$(jq -r --argjson all "$all" --argjson skip "$may_skip" '
