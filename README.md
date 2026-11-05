@@ -261,3 +261,29 @@ need `vim = false` in it.
 
 Repeat 1, 2, 3, 5, 7, 8 (Ctrl+click in Insert), 11 and 12 under GTK, and 29. On Linux a wheel notch
 scrolls about the page height to the power 2/3, in points, as GTK's own scrolled windows do.
+
+### Checkpoint 3 (Task 45)
+
+Paste each results directory the bench prints back into the session.
+
+31. **macOS typing run.** Close other heavy apps and keep the screen unlocked, then run
+    `PATH="$HOME/.cargo/bin:$PATH" CARGO_HOME=/tmp/claude-501/cargo-home cargo xtask bench type --manual --keys 500`.
+    Type ordinary prose, but switch modes often: Esc and `i`, `o` for new lines, a few `:w`
+    saves, and `u` now and then. Checkpoint 2 missed once on a stall after switching modes, so
+    the switches matter here. Expect key_ms p95 at or under 16 ms.
+32. **Linux laptop run.** On the reference laptop (Wayland session, `wtype` installed), from the
+    repository root, run `scripts/checkpoint-linux.sh 3` and paste back the directories it
+    prints.
+33. **Input methods on Linux.** On Hyprland, type with dead keys (for example `'` then `e`) and
+    with a compose sequence. Expect the composed character, once, at the cursor. Repeat on one
+    compositor without text-input-v3 (your pick).
+34. **Side by side with neovim.** In the same session, type the same text into this editor and
+    into neovim in foot, and record both (a 240 fps camera works on both platforms). There's no
+    target: note how they compare.
+35. **Mouse and links on Linux.** Run steps 1, 2, 3, 5, 7, 8 (Ctrl+click in Insert), 11, 12 and
+    29 above under GTK.
+36. **X11 smoke run (best effort).** Under XWayland, run `GDK_BACKEND=x11 <name>
+    target/fixture/test.md`, type a few lines, `:w`, then close. Expect it to open, type, save
+    and close the same as under Wayland.
+37. **R&D record.** Closing the branch's R&D record (`wombat-rnd`) is your call once the
+    checkpoint is judged.
