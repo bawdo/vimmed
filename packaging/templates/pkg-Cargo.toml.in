@@ -31,6 +31,12 @@ assets = [
     ["bin/{{slug}}-window", "{{libexec}}/{{slug}}-window", "755"],
     ["{{bundle_id}}.desktop", "/usr/share/applications/{{bundle_id}}.desktop", "644"],
     ["{{bundle_id}}.metainfo.xml", "/usr/share/metainfo/{{bundle_id}}.metainfo.xml", "644"],
+    ["icons/hicolor/32x32/apps/app-icon.png", "/usr/share/icons/hicolor/32x32/apps/{{bundle_id}}.png", "644"],
+    ["icons/hicolor/48x48/apps/app-icon.png", "/usr/share/icons/hicolor/48x48/apps/{{bundle_id}}.png", "644"],
+    ["icons/hicolor/64x64/apps/app-icon.png", "/usr/share/icons/hicolor/64x64/apps/{{bundle_id}}.png", "644"],
+    ["icons/hicolor/128x128/apps/app-icon.png", "/usr/share/icons/hicolor/128x128/apps/{{bundle_id}}.png", "644"],
+    ["icons/hicolor/256x256/apps/app-icon.png", "/usr/share/icons/hicolor/256x256/apps/{{bundle_id}}.png", "644"],
+    ["icons/hicolor/512x512/apps/app-icon.png", "/usr/share/icons/hicolor/512x512/apps/{{bundle_id}}.png", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -41,5 +47,11 @@ assets = [
     { source = "bin/{{slug}}-window", dest = "{{libexec}}/{{slug}}-window", mode = "755" },
     { source = "{{bundle_id}}.desktop", dest = "/usr/share/applications/{{bundle_id}}.desktop", mode = "644" },
     { source = "{{bundle_id}}.metainfo.xml", dest = "/usr/share/metainfo/{{bundle_id}}.metainfo.xml", mode = "644" },
+    { source = "icons/hicolor/32x32/apps/app-icon.png", dest = "/usr/share/icons/hicolor/32x32/apps/{{bundle_id}}.png", mode = "644" },
+    { source = "icons/hicolor/48x48/apps/app-icon.png", dest = "/usr/share/icons/hicolor/48x48/apps/{{bundle_id}}.png", mode = "644" },
+    { source = "icons/hicolor/64x64/apps/app-icon.png", dest = "/usr/share/icons/hicolor/64x64/apps/{{bundle_id}}.png", mode = "644" },
+    { source = "icons/hicolor/128x128/apps/app-icon.png", dest = "/usr/share/icons/hicolor/128x128/apps/{{bundle_id}}.png", mode = "644" },
+    { source = "icons/hicolor/256x256/apps/app-icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/{{bundle_id}}.png", mode = "644" },
+    { source = "icons/hicolor/512x512/apps/app-icon.png", dest = "/usr/share/icons/hicolor/512x512/apps/{{bundle_id}}.png", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/licenses/{{kebab}}/LICENSE", mode = "644", doc = true },
 ]

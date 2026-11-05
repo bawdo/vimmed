@@ -29,7 +29,7 @@ Credible end-to-end (key to light) numbers for good editors and terminals on 60 
 ### Inferences
 - Typical at 60 Hz, end to end with a photodiode: about 30 to 36 ms for the best apps on a composited desktop (macOS 2020 data), 45 to 50+ ms for slower ones. No equivalent clean Linux Wayland 60 Hz table was found, but the foot spike's own on-glass p50 of 28 to 31 ms (presentation-feedback, which excludes the keyboard and the panel) is consistent with being in the "as good as it gets" band.
 - Typical at 120 to 144 Hz: Molodetskikh's spread of about one refresh (about 7 ms at 144 Hz) implies the refresh-dependent portion shrinks proportionally. No credible absolute 120 Hz glass number for editors was found.
-- foo_edit's hand-off p95 of 5 ms (raw Wayland) is in the Fatin "1 to 5 ms" band and comparable to the best Typometer results. The GTK4 shell's p95 of 14 ms is in the Konsole/Alacritty-2018 band: acceptable, but it costs a frame some of the time at 60 Hz.
+- vimmed's hand-off p95 of 5 ms (raw Wayland) is in the Fatin "1 to 5 ms" band and comparable to the best Typometer results. The GTK4 shell's p95 of 14 ms is in the Konsole/Alacritty-2018 band: acceptable, but it costs a frame some of the time at 60 Hz.
 
 ### Gaps
 - No primary-source numbers for neovim in foot, kitty, Alacritty, Ghostty, VS Code, Zed or Sublime on Wayland with a hardware tester. Molodetskikh's later multi-terminal posts were only available via mirrors.
@@ -98,7 +98,7 @@ Credible numbers need a stated start point and end point. The gold standard is a
 
 ### Inferences
 - The wtype problem: wtype uses the zwp_virtual_keyboard protocol, so the compositor synthesises the key event and its `time` field is whatever the compositor or client supplies, not a kernel evdev time. Core `wl_keyboard.key` time is milliseconds with an undefined base (Wayland core protocol), so it cannot be subtracted from a wp_presentation timestamp without knowing the compositor's clock. Recommendation: inject with a small uinput program that records `clock_gettime(CLOCK_MONOTONIC)` immediately before `write()` of the EV_KEY/SYN_REPORT, and in the client record CLOCK_MONOTONIC on receipt plus the wp_presentation timestamp (check that `clock_id` is CLOCK_MONOTONIC, which it is on wlroots and Mutter in practice; verify by logging it). evdev stamps events with the kernel's event clock (settable via EVIOCSCLOCKID; libinput uses CLOCK_MONOTONIC), so uinput gives real kernel-time starts. ydotool also uses uinput and is usable if you log your own send time. These clock statements are from general knowledge and were not verified against a fetched source this session.
-- Three-layer measurement for foo_edit:
+- Three-layer measurement for vimmed:
   1. Hand-off: key receipt (client, CLOCK_MONOTONIC) to `wl_surface.commit` / CATransaction flush. Cheap, every CI run.
   2. On-glass estimate: uinput send time to wp_presentation `presented` (record `flags`; only trust samples with `vsync` and ideally `hw_clock`/`hw_completion`; drop `discarded`). Log `refresh` so results can be normalised to refresh periods.
   3. Photodiode: Teensy-style tester for a periodic calibration run, sensor at a fixed screen row, to measure what wp_presentation omits (scan-out row offset, panel response, and on real keyboards the keyboard). The spike's manual typing runs are a weak substitute; a 240 fps phone camera gives about 4.2 ms resolution, useful only for sanity checks.
@@ -110,7 +110,7 @@ Credible numbers need a stated start point and end point. The gold standard is a
 - No source found for is-it-snappy methodology details (not fetched).
 - Exact clock used by Hyprland for wp_presentation and for key event timestamps was not verified.
 
-## 5. A sensible, defensible latency target for foo_edit
+## 5. A sensible, defensible latency target for vimmed
 
 ### Takeaway
 Define the target in two layers: an app-controlled hand-off budget expressed in milliseconds, and an on-glass budget expressed in refresh periods and relative to a terminal-vim baseline on the same machine. The proposed redefinition is right in direction but should keep a hard on-glass bound so hand-off cannot be gamed by pushing the wait into the compositor.
@@ -126,7 +126,7 @@ Recommended spec wording (proposal, derived from the above):
 1. **Hand-off (app budget):** key event received by the client to frame committed to the compositor (wl_surface.commit with attached buffer, or CATransaction flush): p95 <= 8 ms and p99 <= 16 ms on the reference Linux machine, idle, typical buffer. Rationale: 8 ms is half a 60 Hz frame and leaves headroom for late-latching compositors; the raw Wayland shell (5 ms) passes, the GTK4 shell (14 ms) does not, which is the correct signal because at 60 Hz 14 ms routinely misses a late latch. If 16 ms is kept for continuity, keep it as p99, not p95.
    - Caveat: when the toolkit waits on the frame callback before drawing (GTK4), measure hand-off from "frame callback received" as well, so frame-clock waiting is not counted as app work, or measure the app's render time separately.
 2. **On-glass (system budget, recorded and gated):** uinput key send to wp_presentation `presented`, normalised by `refresh`: p50 <= 1.75 refresh periods and p95 <= 2.5 refresh periods (60 Hz: about 29 ms and 42 ms; 120 Hz: about 15 ms and 21 ms; 144 Hz: about 12 and 17 ms). These reflect the random-phase floor model (commit to presented uniform on [T, 2T] for an early-compositing compositor) plus a small app margin; the spike's 28 to 31 / 40 ms at 60 Hz sits at the edge, which is honest.
-3. **Relative to baseline (the real "vim, but rendered" promise):** on the same machine, compositor and session, foo_edit on-glass p50 and p95 must be no worse than foot + neovim by more than 0.25 refresh periods (about 4 ms at 60 Hz), and never one full refresh worse at p50. This is what users will actually feel and it is robust to compositor and hardware changes.
+3. **Relative to baseline (the real "vim, but rendered" promise):** on the same machine, compositor and session, vimmed on-glass p50 and p95 must be no worse than foot + neovim by more than 0.25 refresh periods (about 4 ms at 60 Hz), and never one full refresh worse at p50. This is what users will actually feel and it is robust to compositor and hardware changes.
 4. **Report, do not gate:** photodiode key-to-light on the calibration rig, loaded-system runs (for example during a cargo build), and macOS ProMotion glass times via Metal/Core Animation presented timestamps.
 5. **Method requirements in the spec:** uinput injection with CLOCK_MONOTONIC send time; at least 500 samples per condition with randomised 100 to 250 ms gaps; fixed window size, font and file; report p50/p95/p99/max and n; reject samples whose presentation flags lack `vsync`, and record whether `hw_completion` was set.
 

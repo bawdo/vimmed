@@ -9,10 +9,11 @@
 //! - `bin/<SLUG>` and `bin/<SLUG>-window`: the launcher and the window,
 //!   renamed.
 //! - `<BUNDLE_ID>.desktop` and `<BUNDLE_ID>.metainfo.xml`, rendered.
+//! - `icons/hicolor/<s>x<s>/apps/app-icon.png`: the app icon at each of
+//!   `ICON_SIZES`, installed as `<BUNDLE_ID>.png` in the hicolor theme.
 //! - `arch/`: the rendered `PKGBUILD` with the sources it lists (a source
-//!   tarball of the workspace's build inputs, the desktop and the metainfo
-//!   files), ready
-//!   for `makepkg`.
+//!   tarball of the workspace's build inputs, which carries the icons, and
+//!   the desktop and the metainfo files), ready for `makepkg`.
 //!
 //! cargo-deb and cargo-generate-rpm then package the staged files, without
 //! building, into `<target>/dist/`.
@@ -97,6 +98,12 @@ pub fn rpm_args(dist: &Path) -> Vec<String> {
     ]
 }
 
+/// The hicolor sizes shipped, each from
+/// `packaging/icons/hicolor/<s>x<s>/apps/app-icon.png` (made by
+/// `scripts/make-icons.sh`). The deb and rpm asset lists and the PKGBUILD
+/// name the same sizes; the staging test holds them to this list.
+pub const ICON_SIZES: [u32; 6] = [32, 48, 64, 128, 256, 512];
+
 /// Lays out the staging directory `pkg` from the binaries in `bin`,
 /// replacing whatever was there.
 pub fn stage(root: &Path, bin: &Path, pkg: &Path, n: &Names) -> Result<(), String> {
@@ -122,6 +129,13 @@ pub fn stage(root: &Path, bin: &Path, pkg: &Path, n: &Names) -> Result<(), Strin
     // The deb's copyright file and the rpm's licence asset are made from it.
     let license = root.join("LICENSE");
     fs::copy(&license, pkg.join("LICENSE")).map_err(|e| io_err("copy", &license, e))?;
+    for size in ICON_SIZES {
+        let rel = format!("icons/hicolor/{size}x{size}/apps/app-icon.png");
+        let (src, dst) = (root.join("packaging").join(&rel), pkg.join(&rel));
+        let dir = dst.parent().expect("an icon path has a parent");
+        fs::create_dir_all(dir).map_err(|e| io_err("create", dir, e))?;
+        fs::copy(&src, &dst).map_err(|e| io_err("copy", &src, e))?;
+    }
     write(
         &pkg.join("Cargo.toml"),
         &templates::render_file(root, "pkg-Cargo.toml.in", n)?,
@@ -322,6 +336,22 @@ mod tests {
         ] {
             assert_eq!(manifest.matches(dest).count(), 2, "{dest} in deb and rpm");
         }
+        for size in ICON_SIZES {
+            let rel = format!("icons/hicolor/{size}x{size}/apps/app-icon.png");
+            let dest =
+                format!("\"/usr/share/icons/hicolor/{size}x{size}/apps/com.bawdo.abc-def.png\"");
+            assert_eq!(manifest.matches(&dest).count(), 2, "{dest} in deb and rpm");
+            assert_eq!(
+                manifest.matches(&format!("\"{rel}\"")).count(),
+                2,
+                "{rel} as the source in deb and rpm"
+            );
+            assert_eq!(
+                fs::read(pkg.join(&rel)).unwrap(),
+                fs::read(root().join("packaging").join(&rel)).unwrap(),
+                "{rel} staged"
+            );
+        }
         // The licence and maintainer, and LICENSE shipped by both packagers.
         assert!(manifest.contains("license = \"MIT\""));
         assert!(manifest.contains("authors = [\"Keith Bawden <keith@bawdo.com>\"]"));
@@ -342,7 +372,9 @@ mod tests {
         );
         let desktop = fs::read_to_string(pkg.join("com.bawdo.abc-def.desktop")).unwrap();
         assert!(desktop.contains("Exec=abc_def -b %f"));
-        assert!(pkg.join("com.bawdo.abc-def.metainfo.xml").is_file());
+        assert!(desktop.contains("\nIcon=com.bawdo.abc-def\n"));
+        let metainfo = fs::read_to_string(pkg.join("com.bawdo.abc-def.metainfo.xml")).unwrap();
+        assert!(metainfo.contains("<icon type=\"stock\">com.bawdo.abc-def</icon>"));
 
         let arch = pkg.join("arch");
         let pkgbuild = fs::read_to_string(arch.join("PKGBUILD")).unwrap();
@@ -351,6 +383,11 @@ mod tests {
         assert!(pkgbuild.contains("\"$pkgdir/usr/lib/abc_def/abc_def-window\""));
         assert!(pkgbuild.contains("# Maintainer: Keith Bawden <keith@bawdo.com>"));
         assert!(pkgbuild.contains("license=('MIT')"));
+        let sizes = ICON_SIZES.map(|s| s.to_string()).join(" ");
+        assert!(pkgbuild.contains(&format!("for _s in {sizes}; do")));
+        assert!(pkgbuild.contains(
+            "\"packaging/icons/hicolor/${_s}x${_s}/apps/app-icon.png\" \\\n      \"$pkgdir/usr/share/icons/hicolor/${_s}x${_s}/apps/com.bawdo.abc-def.png\""
+        ));
         assert!(
             pkgbuild
                 .contains("install -Dm644 LICENSE \"$pkgdir/usr/share/licenses/$pkgname/LICENSE\"")

@@ -12,6 +12,7 @@
     </p>
   </description>
   <launchable type="desktop-id">{{bundle_id}}.desktop</launchable>
+  <icon type="stock">{{bundle_id}}</icon>
   <provides>
     <binary>{{slug}}</binary>
   </provides>

@@ -13,8 +13,8 @@ pub fn override_var() -> String {
 ///
 /// Candidates, first existing file wins:
 /// 1. Linux only: `LINUX_LIBEXEC_DIR/WINDOW_BIN` (the installed package).
-/// 2. Next to the canonicalised launcher: `WINDOW_BIN` on Linux, and the
-///    bundle executable `BUNDLE_NAME` on macOS.
+/// 2. Next to the canonicalised launcher: `WINDOW_BIN`, which on macOS is
+///    the bundle executable.
 /// 3. Next to the launcher: `window` (development builds).
 ///
 /// `<P>WINDOW_BIN` is a test hook. When it is set and non-empty it is used
@@ -39,12 +39,7 @@ fn candidates(exe: &Path) -> Vec<PathBuf> {
     }
     let real = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
     if let Some(dir) = real.parent() {
-        let packaged = if cfg!(target_os = "macos") {
-            app_meta::BUNDLE_NAME
-        } else {
-            app_meta::WINDOW_BIN
-        };
-        out.push(dir.join(packaged));
+        out.push(dir.join(app_meta::WINDOW_BIN));
         out.push(dir.join("window"));
     }
     // Through a symlink, also look beside the link itself.
@@ -95,11 +90,7 @@ mod tests {
     fn packaged_name_beats_dev_name() {
         let dir = scratch("packaged");
         let exe = dir.join("launcher");
-        let packaged = if cfg!(target_os = "macos") {
-            app_meta::BUNDLE_NAME
-        } else {
-            app_meta::WINDOW_BIN
-        };
+        let packaged = app_meta::WINDOW_BIN;
         std::fs::write(&exe, "").unwrap();
         std::fs::write(dir.join("window"), "").unwrap();
         std::fs::write(dir.join(packaged), "").unwrap();

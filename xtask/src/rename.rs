@@ -9,7 +9,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_NAME: &str = "zq_scribe";
+/// One word, so its CamelCase form differs from it only by case: the shape
+/// that once made the `.app`'s two executables collide on macOS.
+pub const DEFAULT_NAME: &str = "zqscribe";
 
 /// Replace the value of the `name = "..."` line under `[workspace.metadata.app]`.
 pub fn rewrite_name(src: &str, new_slug: &str) -> Result<String, String> {
@@ -205,6 +207,7 @@ pub fn expected_package_files(n: &Names) -> Vec<String> {
         ),
         format!("usr/share/applications/{}.desktop", n.bundle_id),
         format!("usr/share/metainfo/{}.metainfo.xml", n.bundle_id),
+        format!("usr/share/icons/hicolor/512x512/apps/{}.png", n.bundle_id),
     ]
 }
 
@@ -593,6 +596,7 @@ mod tests {
                 "usr/lib/abc_def/abc_def-window",
                 "usr/share/applications/com.bawdo.abc-def.desktop",
                 "usr/share/metainfo/com.bawdo.abc-def.metainfo.xml",
+                "usr/share/icons/hicolor/512x512/apps/com.bawdo.abc-def.png",
             ]
         );
     }

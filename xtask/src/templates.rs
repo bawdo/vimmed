@@ -143,7 +143,8 @@ mod tests {
     fn info_plist_template_renders() {
         let plist = render(&template("Info.plist.in"), &names()).unwrap();
         assert!(plist.contains("<string>com.bawdo.abc-def</string>"));
-        assert!(plist.contains("<string>AbcDef</string>"));
+        assert!(plist.contains("<key>CFBundleName</key>\n\t<string>AbcDef</string>"));
+        assert!(plist.contains("<key>CFBundleExecutable</key>\n\t<string>abc_def-window</string>"));
         assert!(plist.contains("<string>14.0</string>"));
         assert!(plist.contains("net.daringfireball.markdown"));
         assert!(plist.contains("public.plain-text"));

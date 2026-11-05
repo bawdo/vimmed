@@ -1,11 +1,11 @@
 # Launcher versus GUI process models, and fork-without-exec safety with GLib/GTK
 
-Scope: how GUI editors and terminals split (or do not split) the command-line launcher from the GUI process, how they wait, detach and report exit codes, and whether foo_edit's proposed "single binary, fork without exec before any GLib/GTK init on Linux, fork+exec on macOS" launcher is safe. Notation: each finding ends with its source in brackets. Items marked "from source read" were checked directly in the upstream code on 2026-11-03.
+Scope: how GUI editors and terminals split (or do not split) the command-line launcher from the GUI process, how they wait, detach and report exit codes, and whether vimmed's proposed "single binary, fork without exec before any GLib/GTK init on Linux, fork+exec on macOS" launcher is safe. Notation: each finding ends with its source in brackets. Items marked "from source read" were checked directly in the upstream code on 2026-11-03.
 
 ## 1. Prior art: launcher vs GUI, waiting, detaching, instancing, exit codes
 
 ### Takeaway
-There are three families. (a) Self-forking single binaries (gVim, Neovide, kitty) where the shell command and the GUI are the same executable and a flag picks wait or detach. (b) Thin client plus long-lived server or single instance (Zed, VS Code, Sublime, emacsclient, footclient, kitty `--single-instance`, `alacritty msg`) where "wait" means "wait for a message from the server", which is the source of the wrong-window and early-return bugs. (c) Separate launcher binary that execs a GUI binary (WezTerm). foo_edit's "one process per file, launcher waits on its own child" is closest to (a), and kitty's C launcher on Linux is almost exactly the proposed design.
+There are three families. (a) Self-forking single binaries (gVim, Neovide, kitty) where the shell command and the GUI are the same executable and a flag picks wait or detach. (b) Thin client plus long-lived server or single instance (Zed, VS Code, Sublime, emacsclient, footclient, kitty `--single-instance`, `alacritty msg`) where "wait" means "wait for a message from the server", which is the source of the wrong-window and early-return bugs. (c) Separate launcher binary that execs a GUI binary (WezTerm). vimmed's "one process per file, launcher waits on its own child" is closest to (a), and kitty's C launcher on Linux is almost exactly the proposed design.
 
 ### Cited Findings
 
@@ -48,9 +48,9 @@ There are three families. (a) Self-forking single binaries (gVim, Neovide, kitty
 - `alacritty msg create-window` asks a running instance over a socket to open a window in the same process; `alacritty --daemon` starts without an initial window ([alacritty-msg.1](https://raw.githubusercontent.com/alacritty/alacritty/master/extra/man/alacritty-msg.1.scd); [alacritty.1](https://raw.githubusercontent.com/alacritty/alacritty/master/extra/man/alacritty.1.scd)).
 
 ### Inferences
-- Every client/server design (Zed, VS Code, footclient, kitty single-instance, emacsclient) has to invent a "window closed, here is the code" message, and VS Code shows how that goes wrong. foo_edit's one-process-per-file model sidesteps it entirely: the launcher's waitpid on its own child is the ground truth, and crashes show up as WIFSIGNALED for free.
-- Wait-by-default with an explicit detach flag is now the mainstream choice (Neovide reversed its default in 0.13; footclient waits by default; gVim's fork-by-default is the historic footgun). foo_edit's "wait by default, `-b` detaches" matches current consensus.
-- kitty's Linux `--detach` is direct prior art for fork without exec in a GUI program, done before any toolkit initialisation, in production for years. Its #8680 race applies to foo_edit's `-b` mode exactly.
+- Every client/server design (Zed, VS Code, footclient, kitty single-instance, emacsclient) has to invent a "window closed, here is the code" message, and VS Code shows how that goes wrong. vimmed's one-process-per-file model sidesteps it entirely: the launcher's waitpid on its own child is the ground truth, and crashes show up as WIFSIGNALED for free.
+- Wait-by-default with an explicit detach flag is now the mainstream choice (Neovide reversed its default in 0.13; footclient waits by default; gVim's fork-by-default is the historic footgun). vimmed's "wait by default, `-b` detaches" matches current consensus.
+- kitty's Linux `--detach` is direct prior art for fork without exec in a GUI program, done before any toolkit initialisation, in production for years. Its #8680 race applies to vimmed's `-b` mode exactly.
 
 ### Gaps
 - Sublime Text `subl -w`, Kate (`kate -b`/`--block`, single instance via D-Bus), gnome-text-editor/gedit (GApplication single instance; `--standalone`/`-s`), Lapce, Helix GUIs and `emacsclient -c` were not source-checked in this pass. From prior knowledge (unverified here): `subl -w` and `kate -b` block until the file's tab closes via the running instance; GApplication editors are single-instance by default; Lapce detaches by default with a `--wait` flag. Treat as hypotheses.
@@ -121,7 +121,7 @@ GLib's maintainers say you cannot fork without exec and keep using GLib in the c
 ### Inferences
 - Race to close: SIGINT from Ctrl+C goes to the terminal's foreground process group, which includes the child until it calls `setsid()`. Block SIGINT, SIGQUIT, SIGTSTP, SIGHUP and SIGTERM with `sigprocmask` before `fork`; in the child call `setsid()` first, then restore default dispositions and unblock; in the parent install handlers, then unblock. This closes the window without a pipe for the wait case. For `-b`, still use kitty's pipe handshake (parent exits only after child has setsid), since the parent exits straight away.
 - Launcher behaviour: on SIGINT (and SIGTERM, SIGHUP) stop waiting and `_exit(130)` (128 + SIGINT; for SIGHUP use 129). The window, in its own session, receives none of these. When the launcher exits, the window is reparented to init or the nearest subreaper (often systemd --user or the terminal), which reaps it; no zombie.
-- Exit code mapping: `WIFEXITED` -> pass through `WEXITSTATUS`; `WIFSIGNALED` -> `128 + WTERMSIG` (shell convention), optionally printing "foo_edit: window crashed (SIGSEGV)". Reserve a launcher-only code (e.g. footclient-style) for "could not fork/spawn". Because waitpid returns when the process dies however it dies, the launcher cannot hang on a crash; it can only hang if the window process hangs, which is the user's call (Ctrl+C).
+- Exit code mapping: `WIFEXITED` -> pass through `WEXITSTATUS`; `WIFSIGNALED` -> `128 + WTERMSIG` (shell convention), optionally printing "vimmed: window crashed (SIGSEGV)". Reserve a launcher-only code (e.g. footclient-style) for "could not fork/spawn". Because waitpid returns when the process dies however it dies, the launcher cannot hang on a crash; it can only hang if the window process hangs, which is the user's call (Ctrl+C).
 - pidfd (Linux 5.3+, `pidfd_open`, also returned by `clone3`/`CLONE_PIDFD`): lets the launcher `poll()` on the child alongside a `signalfd` or self-pipe, avoiding EINTR loops and PID-reuse races. Optional nicety; plain blocking `waitpid` with a SIGINT handler that `_exit`s is sufficient for a launcher whose only job is to wait. (pidfd details are prior knowledge, not sourced in this pass.)
 - Do not use `PR_SET_PDEATHSIG` in the child: the requirement is the opposite (window survives launcher death).
 
@@ -141,7 +141,7 @@ Shipping two executables is normal and accepted (WezTerm, Zed, foot, Alacritty's
 - Neovide maintainers pushed back on putting launcher scripts in Homebrew because they sit outside Neovide's release cycle ([neovide PR #2512](https://github.com/neovide/neovide/pull/2512)).
 
 ### Inferences
-- FHS convention for a helper that users should not run directly is `/usr/libexec/foo_edit/foo_edit-window` (or `/usr/lib/foo_edit/` on distros without libexec); the launcher finds it relative to `/proc/self/exe` with a compile-time fallback. This is prior knowledge; no distro policy citation fetched.
+- FHS convention for a helper that users should not run directly is `/usr/libexec/vimmed/vimmed-window` (or `/usr/lib/vimmed/` on distros without libexec); the launcher finds it relative to `/proc/self/exe` with a compile-time fallback. This is prior knowledge; no distro policy citation fetched.
 - On macOS the `.app` bundle's main executable must be the GUI; the CLI launcher can be a second executable inside `Contents/MacOS` or `Contents/Resources/bin` and symlinked into PATH (the Zed and VS Code pattern), and kitty/Neovide show exec is required there anyway.
 
 ### Gaps

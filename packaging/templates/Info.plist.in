@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>{{bundle_name}}</string>
+	<string>{{slug}}-window</string>
 	<key>CFBundleIdentifier</key>
 	<string>{{bundle_id}}</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -14,6 +14,8 @@
 	<string>{{bundle_name}}</string>
 	<key>CFBundleDisplayName</key>
 	<string>{{display_name}}</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

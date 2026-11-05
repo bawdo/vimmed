@@ -32,7 +32,7 @@ edition = "2024"
 rust-version = "1.92"
 
 [workspace.metadata.app]
-name = "foo_edit"
+name = "vimmed"
 id_prefix = "com.bawdo"
 
 [profile.release]

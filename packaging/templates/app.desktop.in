@@ -4,6 +4,7 @@ Version=1.5
 Name={{display_name}}
 GenericName=Markdown Editor
 Comment=Edit Markdown files
+Icon={{bundle_id}}
 Exec={{slug}} -b %f
 TryExec={{slug}}
 Terminal=false

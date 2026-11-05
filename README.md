@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.png">
+    <img alt="Project logo: a green brush-stroke circle around a colon and the letters VMd" src="docs/assets/logo-light.png" width="256">
+  </picture>
+</p>
+
 # &lt;name&gt;
 
 A fast, keyboard-driven Markdown editor with vim keys, one window per file, for macOS and Linux.
@@ -74,13 +82,14 @@ This builds the release binaries, stages them in `target/pkg/`, and writes the `
 | window | `/usr/lib/<name>/<name>-window` |
 | desktop entry | `/usr/share/applications/<bundle id>.desktop` |
 | AppStream metainfo | `/usr/share/metainfo/<bundle id>.metainfo.xml` |
+| app icon (32 to 512 px) | `/usr/share/icons/hicolor/<size>/apps/<bundle id>.png` |
 
 The desktop entry runs `<name> -b %f`, so opening a Markdown file from a file manager starts a
 detached window for it.
 
 For Arch, `package-linux` also renders `target/pkg/arch/PKGBUILD` beside a source tarball of the
 workspace's committed build inputs (the manifests, `.cargo/`, `crates/`, `xtask/` and
-`packaging/`) and the desktop and metainfo files. Build it there:
+`packaging/`, which carries the icons) and the desktop and metainfo files. Build it there:
 
 ```sh
 cd target/pkg/arch && makepkg -si
@@ -88,6 +97,23 @@ cd target/pkg/arch && makepkg -si
 
 The PKGBUILD fetches the locked dependencies, builds with `cargo build --frozen --release` and
 installs the layout above.
+
+## Icons
+
+The app icons and the logo above are made from two source images by `scripts/make-icons.sh`:
+the logo with black text (for light backgrounds) and the logo with white text (for dark ones).
+
+```sh
+scripts/make-icons.sh LIGHT_SRC.png DARK_SRC.png
+```
+
+It writes `docs/assets/logo-light.png` and `docs/assets/logo-dark.png` (this README picks one by
+the viewer's theme), `packaging/icons/AppIcon.icns` (copied into the `.app` by `bundle-mac`) and
+`packaging/icons/hicolor/<size>/apps/app-icon.png` (installed by the Linux packages). Both app
+icons use the white-text image: a `.icns` holds one image for every appearance, and the
+freedesktop icon theme has no light and dark variants either. It needs ImageMagick 7 and, for
+the `.icns`, macOS `iconutil`. Run it outside any sandbox, because `iconutil` writes temporary
+files under `/var/folders`.
 
 ## Renaming
 

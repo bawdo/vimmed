@@ -38,7 +38,7 @@ The cheapest correct pattern is: load only the configured faces at start-up, the
 
 ### Inferences
 - **Root cause of the tofu:** with only SF Pro and SF Mono in the db, cosmic-text's fallback chain (script list, then common list, then every face in the db) has nothing to try, because none of `.SF NS`, Menlo, Apple Color Emoji, Geneva, Arial Unicode MS or Apple Symbols is loaded. With the full scan it "worked" only because the final brute-force pass eventually hit a face covering U+2610, and that pass (calling `get_font` on faces one by one, each a lazy parse) is very likely the bulk of your 11 to 57 ms first-layout jump. The full scan is not giving you good fallback; it gives you exhaustive fallback.
-- **Recommended pattern for foo_edit on cosmic-text 0.19:**
+- **Recommended pattern for vimmed on cosmic-text 0.19:**
   1. Start-up: build a `fontdb::Database` with only the configured faces (paths from your cache file), plus a small, platform-specific "always present" fallback set loaded by path: on macOS `Apple Color Emoji`, `Apple Symbols`, `Menlo` (and optionally `Lucida Grande`); on Linux the fontconfig matches for `emoji` and `symbol`. Construct with `new_with_locale_and_db_and_fallback` and a custom `Fallback` whose common list names exactly those faces, so the brute-force pass is never reached in practice.
   2. On a missed codepoint (detect via glyph id 0 after shaping, or by checking the face's cmap before layout), ask the OS for a covering face on a background thread: macOS `CTFontCreateForString` with your primary font as the base, read `kCTFontURLAttribute`, then `db.load_font_file(path)` and invalidate the affected lines (note `db_mut()` clears cosmic-text's `font_matches_cache`). Linux: `FcPatternAddCharSet` with the missing codepoint, `FcConfigSubstitute`, `FcFontMatch` (or `FcFontSort` for a list), read `FC_FILE`. Remember the codepoint-to-path mapping in your on-disk cache so the next launch preloads it.
   3. Prewarm Core Text on a background thread right after first paint (a throwaway `CTFontCreateForString`) to absorb its ~14 ms first-call cost off the critical path.
@@ -66,7 +66,7 @@ Both are active and current as of late 2026 (cosmic-text 0.19.0, April 2026; par
 - cosmic-text's maintainers are adding start-up performance features (persistent font index cache, June 2026); source: [cache.rs history](https://api.github.com/repos/pop-os/cosmic-text/commits?path=src/font/cache.rs)
 
 ### Inferences
-- For foo_edit, stay on cosmic-text and fix fallback via a custom `Fallback` plus OS-driven lazy loading (previous section). A parley migration would cost a layout rewrite and would not remove the macOS scan cost. Revisit parley if you need per-span font metrics (mixed sizes in one line) or better script-aware fallback across many languages.
+- For vimmed, stay on cosmic-text and fix fallback via a custom `Fallback` plus OS-driven lazy loading (previous section). A parley migration would cost a layout rewrite and would not remove the macOS scan cost. Revisit parley if you need per-span font metrics (mixed sizes in one line) or better script-aware fallback across many languages.
 - Track the next cosmic-text release for `new_cached`; it would replace your hand-rolled path cache if you ever want the full index, but a trimmed db remains faster than any full index because `new_with_locale_and_db_and_fallback` still iterates every face.
 
 ### Gaps
@@ -87,7 +87,7 @@ Both are active and current as of late 2026 (cosmic-text 0.19.0, April 2026; par
 - Zed limits its highlight `QueryCursor` to a byte range (visible region) to fix slow highlighting on files with broken syntax; source: [Zed commit #52674](https://git.secluded.site/zed/commit/6cdf954e2ce0e1a6b83ce116b81258d3b512adf1)
 
 ### Inferences
-- Concrete plan for foo_edit:
+- Concrete plan for vimmed:
   1. Keep a `HashMap<LanguageId, OnceLock<Arc<HighlightConfiguration>>>`; compile only when a buffer of that language is first opened.
   2. Compile on a worker thread (the config is `Send + Sync` once configured); first paint shows plain text, colour arrives when ready (no layout change, as in your spike).
   3. Once the first file is open, optionally precompile other likely languages (e.g. same project's languages detected from the file tree) at idle priority.

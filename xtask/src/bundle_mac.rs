@@ -1,10 +1,12 @@
 //! `cargo xtask bundle-mac [--release]`: builds the window and the launcher
 //! and lays out `target/dist/<BUNDLE_NAME>.app`.
 //!
-//! - `Contents/MacOS/<BUNDLE_NAME>`: the window binary, the bundle's
-//!   executable, which the launcher finds beside itself.
+//! - `Contents/MacOS/<WINDOW_BIN>` (`<SLUG>-window`): the window binary, the
+//!   bundle's executable, which the launcher finds beside itself.
 //! - `Contents/MacOS/<SLUG>`: the launcher, the command users run.
 //! - `Contents/Info.plist`, from `packaging/templates/Info.plist.in`.
+//! - `Contents/Resources/AppIcon.icns`, copied from `packaging/icons/`
+//!   (made by `scripts/make-icons.sh`).
 //!
 //! Nothing here needs the WindowServer.
 //!
@@ -56,6 +58,17 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The two executables in `Contents/MacOS/`, as `(built binary, bundle
+/// name)`: the window first (the bundle's `CFBundleExecutable`), then the
+/// launcher. The window is `<SLUG>-window`, never the CamelCase bundle name,
+/// which for a one-word slug differs from the launcher's name only by case.
+pub fn bundle_executables(n: &Names) -> [(&'static str, String); 2] {
+    [
+        ("window", n.window_bin.clone()),
+        ("launcher", n.slug.clone()),
+    ]
+}
+
 /// Lays out the bundle at `app` from the binaries in `bin`, replacing any
 /// bundle already there.
 pub fn write_bundle(root: &Path, bin: &Path, app: &Path) -> Result<(), String> {
@@ -65,15 +78,23 @@ pub fn write_bundle(root: &Path, bin: &Path, app: &Path) -> Result<(), String> {
     }
     let macos = app.join("Contents/MacOS");
     std::fs::create_dir_all(&macos).map_err(|e| err("create", &macos, e))?;
-    for (from, to) in [
-        ("window", app_meta::BUNDLE_NAME),
-        ("launcher", app_meta::SLUG),
-    ] {
+    let entries = bundle_executables(&templates::current_names());
+    if entries[0].1.eq_ignore_ascii_case(&entries[1].1) {
+        return Err(format!(
+            "the window and the launcher would both be Contents/MacOS/{} on a case-insensitive volume",
+            entries[0].1
+        ));
+    }
+    for (from, to) in entries {
         let (src, dst) = (bin.join(from), macos.join(to));
         std::fs::copy(&src, &dst).map_err(|e| err("copy", &src, e))?;
     }
     let plist = templates::render_file(root, "Info.plist.in", &templates::current_names())?;
     let contents = app.join("Contents");
+    let resources = contents.join("Resources");
+    std::fs::create_dir_all(&resources).map_err(|e| err("create", &resources, e))?;
+    let icon = root.join("packaging/icons/AppIcon.icns");
+    std::fs::copy(&icon, resources.join("AppIcon.icns")).map_err(|e| err("copy", &icon, e))?;
     std::fs::write(contents.join("Info.plist"), plist).map_err(|e| err("write", &contents, e))?;
     std::fs::write(contents.join("PkgInfo"), "APPL????").map_err(|e| err("write", &contents, e))?;
     Ok(())
@@ -258,7 +279,7 @@ mod tests {
         write_bundle(&root, &bin, &app).unwrap();
         let macos = app.join("Contents/MacOS");
         assert_eq!(
-            std::fs::read_to_string(macos.join(app_meta::BUNDLE_NAME)).unwrap(),
+            std::fs::read_to_string(macos.join(app_meta::WINDOW_BIN)).unwrap(),
             "w"
         );
         assert_eq!(
@@ -267,8 +288,40 @@ mod tests {
         );
         let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
         assert!(plist.contains(app_meta::BUNDLE_ID));
+        assert!(plist.contains("<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>"));
+        assert_eq!(
+            std::fs::read(app.join("Contents/Resources/AppIcon.icns")).unwrap(),
+            std::fs::read(root.join("packaging/icons/AppIcon.icns")).unwrap()
+        );
         assert!(!app.join("stale").exists());
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// macOS volumes are case-insensitive by default, so two executables
+    /// whose names differ only by case would land on one file.
+    #[test]
+    fn bundle_executables_never_collide() {
+        for slug in ["abc", "abcdef", "abc_def", "a1_b2_c3"] {
+            let n = Names::from_slug(slug, "com.bawdo").unwrap();
+            let names: Vec<String> = bundle_executables(&n)
+                .iter()
+                .map(|(_, to)| to.to_ascii_lowercase())
+                .collect();
+            assert_eq!(names.len(), 2);
+            assert_ne!(names[0], names[1], "{slug}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn bundle_executable_is_the_window() {
+        let n = Names::from_slug("abcdef", "com.bawdo").unwrap();
+        assert_eq!(
+            bundle_executables(&n),
+            [
+                ("window", "abcdef-window".to_string()),
+                ("launcher", "abcdef".to_string())
+            ]
+        );
     }
 
     #[test]
