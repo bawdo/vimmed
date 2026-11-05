@@ -38,6 +38,14 @@ has_unreleased() {
     grep -qE '^## \[Unreleased\]' "$CHANGELOG_FILE"
 }
 
+# Called when no line matched HEADING. Any other "## [" heading than
+# [Unreleased] is a botched release heading, not an absent one, so fail loudly.
+reject_malformed() {
+    local bad
+    bad=$(grep -E '^## \[' "$CHANGELOG_FILE" | grep -vE '^## \[Unreleased\]' | head -1 || true)
+    [ -z "$bad" ] || die "malformed release heading '$bad' (want '## [X.Y.Z] - YYYY-MM-DD')"
+}
+
 # First released heading. Lines are read one at a time so the regex is
 # anchored to a whole line, which a grep -o could not guarantee.
 top_heading() {
@@ -54,7 +62,7 @@ top_heading() {
 cmd_version() {
     local parsed
     # Exit 3 means "no release yet": the release workflow relies on it.
-    parsed=$(top_heading) || exit 3
+    parsed=$(top_heading) || { reject_malformed; exit 3; }
     sed -n '1p' <<< "$parsed"
 }
 
@@ -101,6 +109,7 @@ highest_tag() {
 cmd_check() {
     local parsed version date
     if ! parsed=$(top_heading); then
+        reject_malformed
         has_unreleased || die "no '## [Unreleased]' or '## [X.Y.Z] - YYYY-MM-DD' heading in $CHANGELOG_FILE"
         echo "changelog: no release yet"
         return 0

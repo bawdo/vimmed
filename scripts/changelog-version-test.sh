@@ -155,8 +155,33 @@ FIXTURE
     fi
 }
 
+case_malformed_heading() {
+    local label heading d
+    for heading in '## [0.9.0] - 2026-11-5' '## [v0.9.0] - 2026-11-20' '## [0.9.0] - 2026-11-20 '; do
+        label="malformed heading '$heading'"
+        d=$(new_case malformed)
+        printf '%s\n## [Unreleased]\n\n%s\n\n- A thing.\n\n[0.9.0]: https://example.com/0.9.0\n' \
+            "$HEADER" "$heading" > "$d/CHANGELOG.md"
+
+        run_script "$d" check
+        if [ "$RC" -eq 1 ] && [[ "$OUT" == *"malformed release heading"* ]]; then
+            pass "$label: check fails"
+        else
+            fail "$label: check fails" "rc=$RC out=$OUT"
+        fi
+
+        run_script "$d" version
+        if [ "$RC" -eq 1 ]; then
+            pass "$label: version exits 1, not 3"
+        else
+            fail "$label: version exits 1, not 3" "rc=$RC out=$OUT"
+        fi
+    done
+}
+
 case_unreleased_only
 case_no_headings
+case_malformed_heading
 case_invalid_date
 case_missing_link
 case_behind_tag
