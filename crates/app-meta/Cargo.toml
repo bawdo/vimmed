@@ -12,4 +12,4 @@ build = "build.rs"
 workspace = true
 
 [build-dependencies]
-toml = "0.8"
+toml = "1.1"

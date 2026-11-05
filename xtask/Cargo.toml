@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 app-meta = { path = "../crates/app-meta" }
-png = "0.17"
+png = "0.18"
 marks = { path = "../crates/marks" }
 
 # The fixture's layout test opens the generated document in a headless view.
