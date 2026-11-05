@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use editor_core::config::{cache_appearance, cached_appearance};
-use editor_core::editor::{Config, Editor, OpenRequest};
+use editor_core::editor::{Config, Editor, OpenRequest, bench_enabled};
 use editor_core::effects::{Effects, Redraw};
 use editor_core::file::StateDir;
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
@@ -219,6 +219,8 @@ pub fn run(args: WindowArgs) -> i32 {
         display_name: args.display_name,
     };
     let (cfg, config_messages) = Config::load_from_env();
+    // A bench run paints light, so its numbers stay comparable.
+    let cfg = cfg.for_bench(bench_enabled());
     let mut editor = Editor::open(req, cfg, Platform::Linux, Box::new(host));
     editor.say_config(&config_messages);
     // The system's light or dark as last seen, so the first frame need
@@ -241,10 +243,10 @@ pub fn run(args: WindowArgs) -> i32 {
         return EXIT_NOT_STARTED;
     }
     marks::mark(names::TOOLKIT_INIT);
-    // GTK 4.20 and later knows the scheme already.
+    // GTK 4.20 and later knows the scheme already. It is cached after the
+    // first frame (`start_following`), off the start-up path.
     if let Some(theme) = theme::initial() {
         let _ = editor.handle(Input::Appearance(theme));
-        remember_appearance(theme);
     }
     let tokens = editor.tokens().clone();
 
@@ -648,7 +650,7 @@ fn on_after_paint(clock: &gdk::FrameClock) {
             st.editor.start_watching();
             // And the system's light or dark, which may ask D-Bus. Not
             // from inside this borrow of the state: it may report at once.
-            glib::idle_add_local_once(|| theme::follow(on_appearance));
+            glib::idle_add_local_once(start_following);
             st.glass.push((frame, Glass::First, 0));
             log_refresh(st);
             changed = true;
@@ -773,6 +775,15 @@ fn on_appearance(theme: Theme) {
     if let Some(Some(code)) = close {
         finish(code);
     }
+}
+
+/// Once the first frame is out: caches the scheme GTK 4.20 and later
+/// gave at start, and follows the system's light or dark from now on.
+fn start_following() {
+    if let Some(theme) = theme::initial() {
+        remember_appearance(theme);
+    }
+    theme::follow(on_appearance);
 }
 
 /// Caches `theme` in the state directory, unless it is there already.

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dispatch2::DispatchQueue;
-use editor_core::editor::{Config, Editor, OpenRequest};
+use editor_core::editor::{Config, Editor, OpenRequest, bench_enabled};
 use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
 use editor_core::input::{Input, MouseEvent, MouseKind, SignalKind};
@@ -192,6 +192,8 @@ pub fn run(args: WindowArgs) -> i32 {
         display_name: args.display_name,
     };
     let (cfg, config_messages) = Config::load_from_env();
+    // A bench run paints light, so its numbers stay comparable.
+    let cfg = cfg.for_bench(bench_enabled());
     let mut editor = Editor::open(req, cfg, Platform::Mac, Box::new(host));
     editor.say_config(&config_messages);
     let fonts = FontSet::with_lookup(Box::new(MacFonts::load()), cache_file(), waker.clone());

@@ -30,6 +30,21 @@
 //! `[tokens]`, then `[tokens.light]` or `[tokens.dark]`. So `[tokens]`
 //! beats a friendly key that names the same token.
 //!
+//! Font sizes (`font.size` and every `font.size.*` token) must be above
+//! zero and at most `MAX_FONT_SIZE` points, `column_width` (`space.column`)
+//! above zero and at most `MAX_COLUMN_WIDTH`, and line heights
+//! (`line.height.*`) within `LINE_HEIGHTS`; anything else is a bad value.
+//!
+//! What applies where, in v0.9:
+//! - `font.body` and `font.mono` apply on Linux; macOS uses the system
+//!   faces whatever they say.
+//! - A light/dark switch while the window is open changes colours, sizes
+//!   and spacing at once. Line heights and font families are taken when
+//!   the window opens, so a `line.height.*`, `font.body` or `font.mono`
+//!   override inside `[tokens.light]` or `[tokens.dark]` only shows when
+//!   the window opens in that theme.
+//! - A bench run (`<P>BENCH` set) always paints light (`for_bench`).
+//!
 //! The last appearance the system reported is kept in the state directory
 //! (`cached_appearance`), so a shell that learns it slowly (over D-Bus)
 //! paints its first frame in the right theme.
@@ -117,6 +132,15 @@ impl Config {
         )
     }
 
+    /// This config for a bench run (`bench` true): always the light theme,
+    /// whatever the system's appearance, so runs stay comparable.
+    pub fn for_bench(mut self, bench: bool) -> Config {
+        if bench {
+            self.theme = ThemePref::Light;
+        }
+        self
+    }
+
     /// `load` on the file the environment names (`path_from_env`); with
     /// none, the defaults.
     pub fn load_from_env() -> (Config, Vec<String>) {
@@ -161,7 +185,7 @@ impl Config {
                 "vim" => r.set(&mut cfg.vim, key, value, Reader::bool),
                 "autosave" => r.set(&mut cfg.autosave, key, value, Reader::bool),
                 "theme" => r.set(&mut cfg.theme, key, value, Reader::theme),
-                "column_width" => r.set(&mut cfg.column_width, key, value, Reader::positive),
+                "column_width" => r.set(&mut cfg.column_width, key, value, Reader::column_width),
                 "font" => r.font(&mut cfg, value),
                 "tokens" => r.tokens(&mut cfg.tokens, value),
                 _ => r.unknown(key),
@@ -222,10 +246,38 @@ impl Config {
     }
 }
 
+/// The largest font size, in points, any `font.size*` token may take.
+pub const MAX_FONT_SIZE: f32 = 200.0;
+/// The widest `space.column` (`column_width`), in points.
+pub const MAX_COLUMN_WIDTH: f32 = 4000.0;
+/// The line heights (`line.height.*`, a ratio of the font size) allowed.
+pub const LINE_HEIGHTS: std::ops::RangeInclusive<f32> = 0.5..=5.0;
+
+/// True when `value` is within what token `token` can be laid out with.
+/// A zero font size or line height panics the text layout, so those are
+/// kept above zero; sizes and widths have a ceiling. Tokens without a
+/// limit, and values that are not numbers (left to the token's own
+/// parse), pass.
+fn within_limits(token: &str, value: &str) -> bool {
+    let Ok(n) = value.trim().parse::<f32>() else {
+        return true;
+    };
+    let above_zero_to = |max: f32| n.is_finite() && n > 0.0 && n <= max;
+    if token.starts_with("font.size") {
+        above_zero_to(MAX_FONT_SIZE)
+    } else if token == "space.column" {
+        above_zero_to(MAX_COLUMN_WIDTH)
+    } else if token.starts_with("line.height") {
+        LINE_HEIGHTS.contains(&n)
+    } else {
+        true
+    }
+}
+
 /// Sets token `token` to `value`, or says why it cannot under `key`.
 fn apply(t: &mut Tokens, key: &str, token: &str, value: &str, messages: &mut Vec<String>) {
     let pair = [(token.to_owned(), value.to_owned())];
-    if !t.apply_overrides(&pair).is_empty() {
+    if !within_limits(token, value) || !t.apply_overrides(&pair).is_empty() {
         messages.push(strings::bad_setting(key, value));
     }
 }
@@ -279,14 +331,24 @@ impl Reader {
         }
     }
 
-    /// A number above zero, whole or not.
-    fn positive(value: &toml::Value) -> Option<f32> {
+    /// A number, whole or not, within `token`'s limits (`within_limits`).
+    fn number_for(token: &str, value: &toml::Value) -> Option<f32> {
         let n = match value {
             toml::Value::Integer(i) => *i as f32,
             toml::Value::Float(f) => *f as f32,
             _ => return None,
         };
-        (n.is_finite() && n > 0.0).then_some(n)
+        within_limits(token, &n.to_string()).then_some(n)
+    }
+
+    /// `font.size`: above zero, up to `MAX_FONT_SIZE`.
+    fn font_size(value: &toml::Value) -> Option<f32> {
+        Reader::number_for("font.size", value)
+    }
+
+    /// `column_width`: above zero, up to `MAX_COLUMN_WIDTH`.
+    fn column_width(value: &toml::Value) -> Option<f32> {
+        Reader::number_for("space.column", value)
     }
 
     /// A family name that is not blank.
@@ -305,7 +367,7 @@ impl Reader {
             match key.as_str() {
                 "body" => self.set(&mut cfg.font_body, &full, value, Reader::family),
                 "mono" => self.set(&mut cfg.font_mono, &full, value, Reader::family),
-                "size" => self.set(&mut cfg.font_size, &full, value, Reader::positive),
+                "size" => self.set(&mut cfg.font_size, &full, value, Reader::font_size),
                 _ => self.unknown(&full),
             }
         }
@@ -515,6 +577,77 @@ mod tests {
         }
         let (t, _) = cfg.tokens(Theme::Light);
         assert_eq!(t, Tokens::defaults(Theme::Light));
+    }
+
+    #[test]
+    fn zero_font_size_tokens_rejected() {
+        // A zero size or line height panics the text layout: never applied.
+        for table in ["[tokens]", "[tokens.dark]"] {
+            let key = match table {
+                "[tokens]" => "tokens",
+                _ => "tokens.dark",
+            };
+            let (cfg, messages) = load(&format!(
+                "{table}\n\"font.size\" = 0\n\"font.size.h1\" = 0\n\
+                 \"font.size.status\" = -1\n\"line.height.body\" = 0.000001\n"
+            ));
+            for want in [
+                format!("bad value for {key}.font.size: 0"),
+                format!("bad value for {key}.font.size.h1: 0"),
+                format!("bad value for {key}.font.size.status: -1"),
+                format!("bad value for {key}.line.height.body: 0.000001"),
+            ] {
+                assert!(messages.contains(&want), "{want}: {messages:?}");
+            }
+            for theme in [Theme::Light, Theme::Dark] {
+                let (t, _) = cfg.tokens(theme);
+                assert_eq!(t, Tokens::defaults(theme), "{table} {theme:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sizes_and_widths_have_ceilings() {
+        let (cfg, messages) = load(
+            "column_width = 4001\n[font]\nsize = 201\n\
+             [tokens]\n\"font.size.h2\" = 500\n\"space.column\" = 9000\n\
+             \"line.height.code\" = 50\n",
+        );
+        assert_eq!(cfg.column_width, 660.0);
+        assert_eq!(cfg.font_size, 16.0);
+        for want in [
+            "bad value for column_width: 4001",
+            "bad value for font.size: 201",
+            "bad value for tokens.font.size.h2: 500",
+            "bad value for tokens.space.column: 9000",
+            "bad value for tokens.line.height.code: 50",
+        ] {
+            assert!(messages.iter().any(|m| m == want), "{want}: {messages:?}");
+        }
+        assert_eq!(cfg.tokens(Theme::Light).0, Tokens::defaults(Theme::Light));
+        // The ceilings themselves are fine.
+        let (cfg, messages) =
+            load("column_width = 4000\n[font]\nsize = 200\n[tokens]\n\"line.height.body\" = 5\n");
+        assert!(messages.is_empty(), "{messages:?}");
+        let (t, _) = cfg.tokens(Theme::Light);
+        assert_eq!(t.px(TokenId::SpaceColumn), 4000.0);
+        assert_eq!(t.px(TokenId::FontSize), 200.0);
+        assert_eq!(t.ratio(TokenId::LineHeightBody), 5.0);
+    }
+
+    #[test]
+    fn bench_runs_paint_light() {
+        let cfg = Config {
+            theme: ThemePref::Dark,
+            ..Config::default()
+        };
+        assert_eq!(cfg.clone().for_bench(true).theme, ThemePref::Light);
+        assert_eq!(cfg.for_bench(false).theme, ThemePref::Dark);
+        let sys = Config::default().for_bench(true);
+        let mut e = build("text\n", sys, false);
+        let fx = e.handle(Input::Appearance(Theme::Dark));
+        assert_eq!(fx.redraw, Redraw::None);
+        assert_eq!(e.theme(), Theme::Light);
     }
 
     #[test]

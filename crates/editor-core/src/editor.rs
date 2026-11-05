@@ -178,7 +178,7 @@ enum Group {
 }
 
 /// True when the bench variable (`<P>BENCH`) is set and not empty.
-fn bench_enabled() -> bool {
+pub fn bench_enabled() -> bool {
     std::env::var_os(format!("{}BENCH", app_meta::ENV_PREFIX)).is_some_and(|v| !v.is_empty())
 }
 
