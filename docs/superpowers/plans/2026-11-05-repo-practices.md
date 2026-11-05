@@ -265,12 +265,12 @@ Add a note that rulesets are updated with `PUT repos/bawdo/vimmed/rulesets/<id>`
 - [x] Every Task 1 to 7 box above is ticked, the ticks are committed, `git status` is clean, and `git verify-commit HEAD` is good.
 - [x] Resume log entry added.
 - [x] Keith told what to do: push `chore/repo-tier-1`, open the PR, watch CI. Expect `macOS`, `Linux`, `Linux container smoke`, `cargo-deny`, `Changelog` and `CI result` to go green. Merge with a merge commit, then run `.github/settings.md` top to bottom, rulesets last.
-- [ ] **Context check asked; Keith's answer recorded in the Resume log.**
+- [x] **Context check asked; Keith's answer recorded in the Resume log.**
 
 **Ready to resume Tier 2 when:**
-- [ ] The Tier 1 PR is merged and `main` CI is green.
-- [ ] `gh api repos/bawdo/vimmed/rulesets` lists `main` and the tag ruleset (Keith runs it, or pastes the output).
-- [ ] The first Dependabot PRs (if any) ran CI green (Review Focus 5).
+- [x] The Tier 1 PR is merged and `main` CI is green. (PR #2 merged as 019888f with every check green. `main` itself has no CI run yet: `ci.yml` has no push trigger until `release.yml` calls it in Task 13.)
+- [x] `gh api repos/bawdo/vimmed/rulesets` lists `main` and the tag ruleset (Keith runs it, or pastes the output). (main id 26606401, tags id 26606413.)
+- [x] The first Dependabot PRs (if any) ran CI green (Review Focus 5). (None yet; Keith handles them separately.)
 
 ---
 
@@ -485,3 +485,4 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 | Date | Tier | Branch | Last commit | Notes for Keith |
 |---|---|---|---|---|
 | 2026-11-05 | 1 | chore/repo-tier-1 | ae14cc7 (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, cargo-deny, Changelog and CI result green, merge with a merge commit, then run .github/settings.md top to bottom (rulesets last). Local `cargo xtask ci` fails at fmt only because of the gitignored crates/editor-render/tests/demo_reel.rs: run `cargo fmt --all` locally. The git-guard reference-transaction hook blocks cargo-deny's advisory-db self-update (use `cargo deny check --offline` after the first fetch). RUSTSEC-2026-0192 (ttf-parser unmaintained) is ignored in deny.toml with a reason. Docker is unreachable from the sandbox, so `cargo xtask linux-check` with the pinned digest is first proven by the PR's container smoke job. Subagents no longer commit; the controller does (Keith, 2026-11-05). |
+| 2026-11-05 | 1 (context check) | chore/repo-tier-1 | c1837c3, merged as 019888f | Keith: stop here, resume in a fresh session. Tier 2 resumed on chore/repo-tier-2 from 019888f. |
