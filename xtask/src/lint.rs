@@ -57,12 +57,10 @@ const LINT_PATHS: [&str; 7] = [
 /// level 1 heading whose whole text is one of the name forms.
 pub fn is_allowed_hit(line: &str, forms: &[String]) -> bool {
     if let Some(rest) = line.strip_prefix("Cargo.toml:") {
-        return rest
-            .split_once(':')
-            .is_some_and(|(_, text)| {
-                let text = text.trim_start();
-                text.starts_with("name = ") || text.starts_with("repository = ")
-            });
+        return rest.split_once(':').is_some_and(|(_, text)| {
+            let text = text.trim_start();
+            text.starts_with("name = ") || text.starts_with("repository = ")
+        });
     }
     if let Some(rest) = line.strip_prefix("README.md:") {
         return rest.split_once(':').is_some_and(|(_, text)| {
