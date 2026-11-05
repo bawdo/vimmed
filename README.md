@@ -271,6 +271,7 @@ Paste each results directory the bench prints back into the session.
     Type ordinary prose, but switch modes often: Esc and `i`, `o` for new lines, a few `:w`
     saves, and `u` now and then. Checkpoint 2 missed once on a stall after switching modes, so
     the switches matter here. Expect key_ms p95 at or under 16 ms.
+    *Done 2026-11-05: p95 12.4 ms, PASS (light on mode switches; lean on them in step 32).*
 32. **Linux laptop run.** On the reference laptop (Wayland session, `wtype` installed), from the
     repository root, run `scripts/checkpoint-linux.sh 3` and paste back the directories it
     prints.
@@ -287,3 +288,31 @@ Paste each results directory the bench prints back into the session.
     and close the same as under Wayland.
 37. **R&D record.** Closing the branch's R&D record (`wombat-rnd`) is your call once the
     checkpoint is judged.
+
+### Fonts on macOS (Task 46)
+
+The config file is `${XDG_CONFIG_HOME:-$HOME/.config}/<name>/config.toml`. The font cache is
+`${XDG_CACHE_HOME:-$HOME/.cache}/<name>/font-paths`.
+
+38. **Configured families.** Write this config file:
+    ```toml
+    [font]
+    body = "Georgia"
+    mono = "Menlo"
+    ```
+    (`font.body = "Georgia"` and `font.mono = "Menlo"` as dotted keys at the top of the file
+    work the same.) Open a markdown file with a paragraph holding `*italic*` and `**bold**`
+    words, a heading, some `inline code` and a fenced code block. Expect body text and the
+    heading in Georgia (a serif), italics in true Georgia Italic (not a slanted sans), bold in
+    Georgia Bold, and code in Menlo. No status bar message.
+39. **The cache remembers them.** Close and reopen the same file. Expect the same faces. The
+    cache file's first line is `font-paths v2 macos`, and it holds `key	name	Georgia`,
+    `key	name	Menlo` and a `sans` line ending `Georgia.ttf`.
+40. **Changing a family.** With the window open, change `body` to `"Helvetica Neue"`. Expect no
+    change in the open window (families are taken at open). Close and reopen: body text is now
+    Helvetica Neue, code still Menlo.
+41. **Unknown families.** Change the table to `body = "No Such Face"` and `mono = "Nor This
+    One"`. Open a file. Expect the usual system faces (SF for text, SF Mono for code), exactly as
+    with no config, and no status bar message.
+42. **Defaults unchanged.** Delete the config file and reopen. Expect SF and SF Mono as before
+    this task, with italics still in SF Italic.
