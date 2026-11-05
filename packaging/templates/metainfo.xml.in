@@ -11,6 +11,10 @@
       one window per file.
     </p>
   </description>
+  <url type="homepage">{{homepage}}</url>
+  <developer id="{{developer_id}}">
+    <name>{{maintainer_name}}</name>
+  </developer>
   <launchable type="desktop-id">{{bundle_id}}.desktop</launchable>
   <icon type="stock">{{bundle_id}}</icon>
   <provides>
@@ -24,7 +28,7 @@
     <category>TextEditor</category>
   </categories>
   <releases>
-    <release version="{{version}}"/>
+    <release version="{{version}}" date="{{release_date}}" type="{{release_type}}"/>
   </releases>
   <content_rating type="oars-1.1"/>
 </component>
