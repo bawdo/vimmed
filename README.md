@@ -8,6 +8,13 @@
 
 # vimmed
 
+[![CI][ci-badge]][ci]
+[![Latest release][release-badge]][release]
+[![OpenSSF Scorecard][scorecard-badge]][scorecard]
+[![Coverage][coverage-badge]][coverage]
+[![REUSE status][reuse-badge]][reuse]
+[![Licence: MIT][licence-badge]](LICENSE)
+
 A fast, keyboard-driven Markdown editor with vim keys, one window per file, for macOS and Linux.
 
 ![Demo: Markdown rendering live as it is typed, then the :table grid picker inserting a table whose cells are filled in with Tab](docs/assets/demo.gif)
@@ -148,3 +155,19 @@ MIT, see [LICENSE](LICENSE). The bundled test fonts are under the SIL OFL 1.1:
 [NotoSans](crates/editor-render/tests/fonts/NotoSans-OFL.txt),
 [NotoSansMono](crates/editor-render/tests/fonts/NotoSansMono-OFL.txt) and
 [NotoSansSymbols2](crates/editor-render/tests/fonts/NotoSansSymbols2-OFL.txt).
+
+<!-- The badge URLs carry the project name, so they live here, the one
+     README block that `cargo xtask lint-name` allows to. -->
+<!-- name-lint:allow:start -->
+[ci-badge]: https://github.com/bawdo/vimmed/actions/workflows/ci.yml/badge.svg?branch=main
+[ci]: https://github.com/bawdo/vimmed/actions/workflows/ci.yml
+[release-badge]: https://img.shields.io/github/v/release/bawdo/vimmed
+[release]: https://github.com/bawdo/vimmed/releases/latest
+[scorecard-badge]: https://api.scorecard.dev/projects/github.com/bawdo/vimmed/badge
+[scorecard]: https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed
+[coverage-badge]: https://codecov.io/gh/bawdo/vimmed/branch/main/graph/badge.svg
+[coverage]: https://codecov.io/gh/bawdo/vimmed
+[reuse-badge]: https://api.reuse.software/badge/github.com/bawdo/vimmed
+[reuse]: https://api.reuse.software/info/github.com/bawdo/vimmed
+[licence-badge]: https://img.shields.io/github/license/bawdo/vimmed
+<!-- name-lint:allow:end -->
