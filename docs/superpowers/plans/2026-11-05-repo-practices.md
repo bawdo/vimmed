@@ -163,11 +163,11 @@ Jobs (`name:` in brackets, which is what the ruleset and the gate see):
 - Create: `.github/dependabot.yml`
 - Modify: `docker/Dockerfile.check` (the `FROM` line)
 
-- [ ] **Step 1:** Write `dependabot.yml` from jellyfish's (weekly, `day: monday`, `timezone: Australia/Sydney`, `cooldown: default-days: 7` with its comment, a group of `["*"]`, `commit-message: prefix: "Bumped"`, `labels: [dependencies]`) with three entries: `cargo` (directory `/`, group `cargo`), `github-actions` (directory `/`, group `actions`), and `docker` (directory `/docker`, group `docker`).
-- [ ] **Step 2:** Resolve the current digest of `rust:1-trixie` with `docker buildx imagetools inspect rust:1-trixie` (index digest) and change the line to `FROM rust:1-trixie@sha256:<digest>`. Keep the tag so Dependabot knows which track to follow.
-- [ ] **Step 3:** Validate the YAML with `python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' .github/dependabot.yml` (no output). Then `cargo xtask lint-name` (PASS; no name in the Dockerfile).
-- [ ] **Step 4 (Review Focus 5):** `cargo xtask linux-check` builds from the pinned digest and prints the `linux-check: build OK, ...` summary.
-- [ ] **Step 5:** Commit both files with "Added Dependabot and pinned the check image".
+- [x] **Step 1:** Write `dependabot.yml` from jellyfish's (weekly, `day: monday`, `timezone: Australia/Sydney`, `cooldown: default-days: 7` with its comment, a group of `["*"]`, `commit-message: prefix: "Bumped"`, `labels: [dependencies]`) with three entries: `cargo` (directory `/`, group `cargo`), `github-actions` (directory `/`, group `actions`), and `docker` (directory `/docker`, group `docker`).
+- [x] **Step 2:** Resolve the current digest of `rust:1-trixie` with `docker buildx imagetools inspect rust:1-trixie` (index digest) and change the line to `FROM rust:1-trixie@sha256:<digest>`. Keep the tag so Dependabot knows which track to follow.
+- [x] **Step 3:** Validate the YAML with `python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' .github/dependabot.yml` (no output). Then `cargo xtask lint-name` (PASS; no name in the Dockerfile).
+- [x] **Step 4 (Review Focus 5):** `cargo xtask linux-check` builds from the pinned digest and prints the `linux-check: build OK, ...` summary.
+- [x] **Step 5:** Commit both files with "Added Dependabot and pinned the check image".
 
 ### Task 5: Changelog and community documents
 

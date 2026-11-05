@@ -1,0 +1,55 @@
+name: Bug report
+description: Something in vimmed does not work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps to reproduce, with a small sample Markdown file if the bug depends on its content.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+      placeholder: macOS 27.2, Fedora 43
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Linux session
+      options:
+        - Wayland
+        - X11
+        - Not Linux
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop environment
+      description: For example GNOME or KDE. Leave blank on macOS.
+  - type: input
+    id: version
+    attributes:
+      label: vimmed version
+      description: The output of `vimmed --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config file contents
+      description: The contents of `~/.config/vimmed/config.toml`, if you have one.
+      render: toml
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
