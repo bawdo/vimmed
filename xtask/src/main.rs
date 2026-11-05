@@ -24,7 +24,11 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = &args[args.len().min(1)..];
     let result = match args.first().map(String::as_str) {
-        Some("ci") => ci::run(&root(), rest.iter().any(|a| a == "--linux")),
+        Some("ci") => ci::run(
+            &root(),
+            rest.iter().any(|a| a == "--linux"),
+            rest.iter().any(|a| a == "--coverage"),
+        ),
         Some("linux-check") => ci::linux_check(&root()),
         Some("lint-name") => ci::lint_name(&root()),
         Some("lint-literals") => literals::run(&root()),
@@ -65,6 +69,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | validate-packaging | bundle-mac [--release] | install-mac | package-linux [--container] | rename-test [--name SLUG] [--linux] | fixture [DIR] | bench ...>"
+        "usage: cargo xtask <ci [--linux] [--coverage] | linux-check | lint-name | lint-literals | shell-lines | validate-packaging | bundle-mac [--release] | install-mac | package-linux [--container] | rename-test [--name SLUG] [--linux] | fixture [DIR] | bench ...>"
     );
 }

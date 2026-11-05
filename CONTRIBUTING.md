@@ -70,6 +70,7 @@ results as CI:
 - cargo-deny: `cargo install --locked cargo-deny --version 0.20.2`
 - zizmor: `cargo install --locked zizmor --version 1.30.1`
 - typos: `cargo install --locked typos-cli --version 1.51.1`
+- cargo-llvm-cov: `cargo install --locked cargo-llvm-cov --version 0.9.1` (for `cargo xtask ci --coverage`; needs the `llvm-tools-preview` component, which `rust-toolchain.toml` lists)
 
 ## Licence
 

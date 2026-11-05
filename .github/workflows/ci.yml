@@ -74,8 +74,27 @@ jobs:
       - name: Check Cargo.lock is up to date
         run: cargo metadata --locked --format-version 1 > /dev/null
 
-      - name: Run the CI gate
-        run: cargo xtask ci
+      # The version matches CONTRIBUTING.md. llvm-tools-preview comes from
+      # rust-toolchain.toml.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      # The test step runs under cargo llvm-cov, so the suite runs once and
+      # writes target/lcov.info.
+      - name: Run the CI gate with coverage
+        run: cargo xtask ci --coverage
+
+      # Coverage is informational. A fork or Dependabot pull request has no
+      # secrets, so the token is empty there and the upload may fail; that
+      # must not fail the job (fail_ci_if_error is false).
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: target/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   # Builds docker/Dockerfile.check and runs the workspace plus a smoke run in
   # the container. Docker is already on the runner.

@@ -53,6 +53,10 @@ jobs:
     uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
+    # Only the Codecov token, not secrets: inherit, so the release
+    # environment's secrets stay out of the CI workflow.
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   plan:
     name: Plan

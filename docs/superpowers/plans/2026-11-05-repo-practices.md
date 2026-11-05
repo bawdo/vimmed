@@ -438,14 +438,14 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 **Interfaces:**
 - Produces: `pub fn run(root: &Path, linux: bool, coverage: bool) -> Result<(), String>` in `xtask/src/ci.rs`. When `coverage` is true, the `test` step runs `cargo llvm-cov --workspace --lcov --output-path target/lcov.info` in place of `cargo test --workspace`, so CI tests once rather than twice. `cargo xtask ci --coverage` parses the flag in `main.rs`.
 
-- [ ] **Step 1: Write the failing test** in `ci.rs`: `test_step_args(coverage: bool) -> Vec<&'static str>` returns `["test", "--workspace"]` for false and `["llvm-cov", "--workspace", "--lcov", "--output-path", "target/lcov.info"]` for true. Assert both.
-- [ ] **Step 2: Run** `cargo test -p xtask ci::`. Expected: FAIL.
-- [ ] **Step 3:** Implement `test_step_args`. Thread `coverage` through `run`, so the step list picks the test args at run time (the `STEPS` const becomes a function or the test step reads a flag). Update the `main.rs` parsing and usage string.
-- [ ] **Step 4:** Install with `cargo install --locked cargo-llvm-cov --version <latest, 14 days or older>` and add `llvm-tools-preview` to `rust-toolchain.toml` components. Run `cargo xtask ci --coverage`: `target/lcov.info` exists and all steps are OK. `cargo xtask ci` still passes.
-- [ ] **Step 5 (Review Focus 3):** In `ci.yml`, the `linux` job runs `cargo xtask ci --coverage` (installing cargo-llvm-cov with `taiki-e/install-action`, pinned), then `codecov/codecov-action` with `files: target/lcov.info`, `token: ${{ secrets.CODECOV_TOKEN }}` and `fail_ci_if_error: false`. Pass `CODECOV_TOKEN` through `workflow_call` from `release.yml`. `grep -n 'secrets\.' .github/workflows/ci.yml` shows only the declaration and this step.
-- [ ] **Step 6:** Write `.codecov.yml` from jellyfish's with every status `informational: true`, no 90% floor (`target: auto`), and `ignore: ["xtask/**", "crates/layout-bench/**", "**/tests/**"]`.
-- [ ] **Step 7:** `actionlint` and `zizmor` clean, `cargo xtask ci` (PASS). Commit with "Added informational coverage via cargo-llvm-cov".
-- [ ] **Step 8:** Tell Keith to add `CODECOV_TOKEN` as a repository secret (`gh secret set CODECOV_TOKEN -R bawdo/vimmed`) after enabling the repo at codecov.io.
+- [x] **Step 1: Write the failing test** in `ci.rs`: `test_step_args(coverage: bool) -> Vec<&'static str>` returns `["test", "--workspace"]` for false and `["llvm-cov", "--workspace", "--lcov", "--output-path", "target/lcov.info"]` for true. Assert both.
+- [x] **Step 2: Run** `cargo test -p xtask ci::`. Expected: FAIL.
+- [x] **Step 3:** Implement `test_step_args`. Thread `coverage` through `run`, so the step list picks the test args at run time (the `STEPS` const becomes a function or the test step reads a flag). Update the `main.rs` parsing and usage string.
+- [x] **Step 4:** Install with `cargo install --locked cargo-llvm-cov --version <latest, 14 days or older>` and add `llvm-tools-preview` to `rust-toolchain.toml` components. Run `cargo xtask ci --coverage`: `target/lcov.info` exists and all steps are OK. `cargo xtask ci` still passes.
+- [x] **Step 5 (Review Focus 3):** In `ci.yml`, the `linux` job runs `cargo xtask ci --coverage` (installing cargo-llvm-cov with `taiki-e/install-action`, pinned), then `codecov/codecov-action` with `files: target/lcov.info`, `token: ${{ secrets.CODECOV_TOKEN }}` and `fail_ci_if_error: false`. Pass `CODECOV_TOKEN` through `workflow_call` from `release.yml`. `grep -n 'secrets\.' .github/workflows/ci.yml` shows only the declaration and this step.
+- [x] **Step 6:** Write `.codecov.yml` from jellyfish's with every status `informational: true`, no 90% floor (`target: auto`), and `ignore: ["xtask/**", "crates/layout-bench/**", "**/tests/**"]`.
+- [x] **Step 7:** `actionlint` and `zizmor` clean, `cargo xtask ci` (PASS). Commit with "Added informational coverage via cargo-llvm-cov".
+- [x] **Step 8:** Tell Keith to add `CODECOV_TOKEN` as a repository secret (`gh secret set CODECOV_TOKEN -R bawdo/vimmed`) after enabling the repo at codecov.io. (Told at PAUSE 3. Review found `docker/Dockerfile.check` installed only rustfmt and clippy, so the image now installs `llvm-tools-preview` too.)
 
 ### Task 18: REUSE compliance
 
