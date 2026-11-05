@@ -8,6 +8,8 @@ so the process is light.
 Everyone taking part is expected to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
+If you use AI tools, read the [AI policy](AI_POLICY.md) first.
+
 Open an issue for anything bigger than a typo or a one-line fix, so the
 approach can be agreed before you spend time on it. Security problems go
 through [SECURITY.md](SECURITY.md), not the issue tracker.

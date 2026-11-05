@@ -425,9 +425,9 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 - Create: `AI_POLICY.md`
 - Modify: `CONTRIBUTING.md` (link it), `.github/PULL_REQUEST_TEMPLATE.md` (one checkbox)
 
-- [ ] **Step 1:** Draft `AI_POLICY.md` from ripgrep's points: AI tools for code are fine, the contributor is responsible for every line and must understand it, and the maintainer is accountable for releases. Fit the human-written-communication point to Keith's own practice: an AI-assisted PR must say so in its description. **Show Keith the draft and wait for his wording before committing.** It's his stance, not ours.
-- [ ] **Step 2:** Add the link in CONTRIBUTING.md and the checkbox "I have read AI_POLICY.md" to the PR template.
-- [ ] **Step 3:** `typos` clean. Commit with "Added an AI contribution policy".
+- [x] **Step 1:** Draft `AI_POLICY.md` from ripgrep's points: AI tools for code are fine, the contributor is responsible for every line and must understand it, and the maintainer is accountable for releases. Fit the human-written-communication point to Keith's own practice: an AI-assisted PR must say so in its description. **Show Keith the draft and wait for his wording before committing.** It's his stance, not ours. (Keith approved the draft after deleting its disclosure paragraph, so the policy has no PR-description disclosure rule.)
+- [x] **Step 2:** Add the link in CONTRIBUTING.md and the checkbox "I have read AI_POLICY.md" to the PR template.
+- [x] **Step 3:** `typos` clean. Commit with "Added an AI contribution policy".
 
 ### Task 17: Coverage, informational
 
