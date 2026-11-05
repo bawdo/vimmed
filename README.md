@@ -227,9 +227,37 @@ word_one   word_two, punct!
 
 ### Config and theme (Task 35)
 
-Steps for these are added when Task 35 merges.
+The config file is `${XDG_CONFIG_HOME:-$HOME/.config}/<name>/config.toml`. Steps 16 and 17
+need `vim = false` in it.
+
+22. **Live dark mode on macOS.** Remove any config file. Open a markdown file with a heading, a link, a fenced code block and a table. With the window open, switch System Settings > Appearance between Light and Dark. Expect the whole window to repaint in the new theme within a second: a charcoal page with light text in dark, the usual paper white in light, with no stale light or dark lines, patches or status bar.
+23. **Overlays follow the theme.** In dark, type `:help` and Enter: the help panel is the dark overlay colour. Press Esc, type `:table` and Enter: the grid picker is in dark overlay colours. Press Esc. Open `:help` again and toggle the system appearance while it's up: the panel repaints in the new theme and stays open.
+24. **Resizing in dark.** In dark, drag a window edge to resize. Expect the strip revealed during the drag to be dark, not white.
+25. **Theme overrides.** Write this config file:
+    ```toml
+    [tokens]
+    "color.caret" = "#E06C00"
+
+    [tokens.dark]
+    "color.bg" = "#000000"
+    "color.link" = "#FF5F87"
+    ```
+    Open a file with a link while the system is Light. Expect the normal light page, an orange caret and the usual blue link. Switch the system to Dark with the window open. Expect a pure black page, pink links and the caret still orange. Switch back: the light defaults return.
+26. **A fixed theme.** Add `theme = "dark"` at the top of that file and reopen. Expect dark from the first frame whatever the system says, and toggling the system appearance changes nothing. Remove the line afterwards.
+27. **Bad TOML.** Replace the config file with `vim = = false` and open a file. Expect the editor to open normally with default settings (vim keys, NORMAL shown) and a status bar warning starting `config error: ` with the parser's message, fading after the usual time.
+28. **Unknown keys and bad values.** Replace the config file with:
+    ```toml
+    wrap = true
+    column_width = -3
+    [tokens]
+    "color.nope" = "#000000"
+    "font.size" = 0
+    ```
+    Open a file. Expect it to open normally at the default column width and text size, with one status bar warning: `unknown setting: wrap; bad value for column_width: -3; unknown setting: tokens.color.nope; bad value for tokens.font.size: 0`. Delete the config file afterwards.
+29. **Linux desktop (GNOME or KDE).** Open a file and toggle the desktop's dark style. Expect a repaint in the new theme within a second. Close and reopen: the first frame is already in the last scheme seen, with no flash of the other theme (the scheme is kept in `${XDG_STATE_HOME:-$HOME/.local/state}/<name>/appearance`). With no portal (a bare container) the editor opens light with no message and no delay.
+30. **Bench runs stay light.** With the system in Dark, run a bench start (the usual `cargo xtask bench` run). Expect the bench window to paint light, so its numbers compare with earlier runs.
 
 ### Linux (Task 45)
 
-Repeat 1, 2, 3, 5, 7, 8 (Ctrl+click in Insert), 11 and 12 under GTK. On Linux a wheel notch
+Repeat 1, 2, 3, 5, 7, 8 (Ctrl+click in Insert), 11 and 12 under GTK, and 29. On Linux a wheel notch
 scrolls about the page height to the power 2/3, in points, as GTK's own scrolled windows do.
