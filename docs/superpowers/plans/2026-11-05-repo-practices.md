@@ -467,15 +467,15 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 
 ### Task 19: Whole branch review
 
-- [ ] **Step 1:** Run superpowers:requesting-code-review over `main..chore/repo-tier-3`, and over the merged Tier 1 and 2 changes if Keith asks.
-- [ ] **Step 2:** Re-run `cargo xtask ci` and `cargo xtask linux-check` yourself and paste the summary lines.
-- [ ] **Step 3:** Update the CONTRIBUTING.md Tool versions list against what was actually installed.
+- [x] **Step 1:** Run superpowers:requesting-code-review over `main..chore/repo-tier-3`, and over the merged Tier 1 and 2 changes if Keith asks. (Review over 813b2df..9312ef3, which also triaged the deferred minors from all three tiers. One fix wave, 84430dd: CODE_OF_CONDUCT.md licensed CC-BY-4.0 in REUSE.toml, session paths removed from docs/manual-checks.md, Codecov `disable_search`, a doctest note in xtask.)
+- [x] **Step 2:** Re-run `cargo xtask ci` and `cargo xtask linux-check` yourself and paste the summary lines. (`ci: all 7 steps OK` for both `cargo xtask ci` and `cargo xtask ci --coverage` on a clean tree of 84430dd. `linux-check` cannot run in the sandbox (no Docker): the PR's `Linux container smoke` job proves it, including the image's new `llvm-tools-preview` component.)
+- [x] **Step 3:** Update the CONTRIBUTING.md Tool versions list against what was actually installed. (Already matched: cargo-deny 0.20.2, zizmor 1.30.1, typos-cli 1.51.1, cargo-llvm-cov 0.9.1, reuse 6.2.0.)
 
 ## PAUSE 3: end of Tier 3
 
-- [ ] Every Task 14 to 19 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
-- [ ] Resume log entry added.
-- [ ] Keith told what to do: push `chore/repo-tier-3`, open the PR, CI green (now including `typos` and `reuse`), merge, set `CODECOV_TOKEN`. Scorecard results appear at `https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed` after the next weekly run or push to `main`.
+- [x] Every Task 14 to 19 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
+- [x] Resume log entry added.
+- [x] Keith told what to do: push `chore/repo-tier-3`, open the PR, CI green (now including `typos` and `reuse`), merge, set `CODECOV_TOKEN`. Scorecard results appear at `https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed` after the next weekly run or push to `main`.
 - [ ] **Context check asked; Keith's answer recorded in the Resume log.**
 
 ---
@@ -488,3 +488,4 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 | 2026-11-05 | 1 (context check) | chore/repo-tier-1 | c1837c3, merged as 019888f | Keith: stop here, resume in a fresh session. Tier 2 resumed on chore/repo-tier-2 from 019888f. |
 | 2026-11-05 | 2 | chore/repo-tier-2 | 110327a (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, MSRV (macOS and Ubuntu), cargo-deny, zizmor, Changelog and CI result green, merge with a merge commit. The merge runs release.yml for the first time: expect `plan` with due=false. Before cutting 0.9.0, add a deployment branch rule limiting the `release` environment to `main` (`gh api repos/bawdo/vimmed/environments/release` to check). To release, bump `[workspace.package] version` with the changelog heading (CI now fails a mismatch). Run `cargo xtask linux-check` locally once, plus Task 12's negative check (delete `<summary>` from metainfo.xml.in, expect failure, restore). zizmor is 1.30.1 because the pinned zizmor-action supports nothing newer. Inside the sandbox rustup needs `RUSTUP_USE_CURL=1`. |
 | 2026-11-05 | 2 (context check) | chore/repo-tier-2 | 925f74a, then 7599044, merged as 813b2df | Keith: stop here, resume in a fresh session. Tier 3 resumed on chore/repo-tier-3 from 813b2df. Still owed before 0.9.0: the `release` environment deployment branch rule (main only), and Task 12's negative check run locally. |
+| 2026-11-06 | 3 | chore/repo-tier-3 | 84430dd (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke (first build of the image with llvm-tools-preview), MSRV x2, cargo-deny, zizmor, typos, reuse, Changelog and CI result green, merge with a merge commit. Enable the repo at codecov.io, then `gh secret set CODECOV_TOKEN -R bawdo/vimmed` (until then the upload is a non-fatal no-op). Confirm `crates/layout-bench/src/prose.txt` and `packaging/icons` are your own work (REUSE.toml claims MIT, 2026 Keith Bawden, for everything not overridden). Still owed from Tier 2 before 0.9.0: the `release` environment deployment branch rule (main only), and Task 12's negative check run locally. Scorecard: https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed after the next weekly run or push to main. |
