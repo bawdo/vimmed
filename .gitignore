@@ -1,3 +1,4 @@
 target/
 bench-results/
 .superpowers/
+crates/editor-render/tests/demo_reel.rs
