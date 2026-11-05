@@ -12,22 +12,6 @@ A fast, keyboard-driven Markdown editor with vim keys, one window per file, for 
 
 It is MIT licensed: see `LICENSE`.
 
-## The name
-
-This README never spells the project's name. Wherever it says `<name>`, read the value of this
-line in the root `Cargo.toml`:
-
-```toml
-[workspace.metadata.app]
-name = "..."
-```
-
-That line is the only place the name is written. Every other form (the command, the bundle
-name, the bundle identifier, the environment variable prefix) is derived from it by the
-`app-meta` crate. `cargo xtask lint-name` fails if the name turns up anywhere else, including
-this file. Below, `<name>` is the slug as written on that line, and `<BundleName>` is its
-CamelCase form (each underscore-separated word capitalised, underscores dropped).
-
 ## Building
 
 You need the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it on first use).
