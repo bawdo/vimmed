@@ -1,0 +1,182 @@
+name: CI
+
+permissions:
+  contents: read
+
+# Pull requests run this workflow directly. A release workflow can run it
+# through workflow_call, where github.event_name is that of the caller.
+# There is no push trigger for other branches: with a pull request open it
+# would run every job a second time on the same commit. A branch with no
+# pull request can be run by hand (workflow_dispatch) or checked locally with
+# cargo xtask ci. The weekly schedule runs on the default branch and runs
+# only cargo-deny, because advisories change while the code does not.
+on:
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+  workflow_dispatch:
+
+# A literal prefix, not github.workflow: when this file runs as a reusable
+# workflow that context names the caller, which would put caller and callee
+# in the same group and deadlock the run. A scheduled run gets a group of
+# its own so it never holds up the CI of a push to main.
+concurrency:
+  group: ci-${{ github.event_name == 'schedule' && 'schedule-' || '' }}${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # The same gate as the local one: cargo xtask ci runs fmt, clippy, test and
+  # the repository lints. The toolchain comes from rust-toolchain.toml, which
+  # rustup on the runner honours.
+  macos:
+    name: macOS
+    if: github.event_name != 'schedule'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Run the CI gate
+        run: cargo xtask ci
+
+  linux:
+    name: Linux
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libfontconfig-dev
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Run the CI gate
+        run: cargo xtask ci
+
+  # Builds docker/Dockerfile.check and runs the workspace plus a smoke run in
+  # the container. Docker is already on the runner.
+  linux-smoke:
+    name: Linux container smoke
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the Linux container check
+        run: cargo xtask linux-check
+
+  # Runs on every trigger, including the weekly schedule.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  # Pure shell and git, so it needs nothing from macOS. fetch-depth 0 because
+  # the check reads tags and history.
+  changelog:
+    name: Changelog
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test the changelog script
+        run: bash scripts/changelog-version-test.sh
+
+      - name: Check the newest CHANGELOG.md version is releasable
+        run: scripts/changelog-version.sh check
+
+  # One stable check name for the main ruleset to require, so adding or
+  # renaming a job above does not mean editing the ruleset as well.
+  #
+  # Every job in needs is expected to succeed, except the ones a trigger
+  # skips on purpose:
+  #   workflow_dispatch: none
+  #   pull_request: none
+  #   push (a caller via workflow_call): none
+  #   schedule: macos, linux, linux-smoke and changelog (only deny runs)
+  # Any other event expects every job. A failed or cancelled job always
+  # fails the gate, and so does a skip that the event does not allow, so a
+  # job left out by a bad if: condition cannot pass unnoticed. A job added
+  # to needs is expected under every trigger unless it is listed as a
+  # permitted skip in the script below.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [macos, linux, linux-smoke, deny, changelog]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every expected job passed
+        env:
+          EVENT: ${{ github.event_name }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request|push|workflow_dispatch) may_skip='[]' ;;
+            schedule) may_skip='["macos","linux","linux-smoke","changelog"]' ;;
+            *)        may_skip='[]' ;;
+          esac
+          # Mirrors needs above, so a job missing from the results fails too.
+          all='["macos","linux","linux-smoke","deny","changelog"]'
+          echo "Event: $EVENT (may skip: $may_skip)"
+          jq -r 'to_entries[] | "  \(.key): \(.value.result)"' <<<"$NEEDS"
+          bad=$(jq -r --argjson all "$all" --argjson skip "$may_skip" '
+            if type != "object" then "job results are not an object"
+            else . as $needs | ($all + keys | unique)[]
+              | . as $job | ($needs[$job].result // "missing") as $r
+              | if $r == "success" then empty
+                elif $r == "skipped" and ($skip | any(. == $job)) then empty
+                else "\($job): \($r)" end
+            end' <<<"$NEEDS")
+          if [ -n "$bad" ]; then
+            echo "Not passed:"
+            nl=$'\n'
+            echo "  ${bad//"$nl"/"$nl"  }"
+            exit 1
+          fi
+          echo "Every expected job passed."

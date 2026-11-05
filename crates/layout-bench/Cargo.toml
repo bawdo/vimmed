@@ -3,6 +3,8 @@ name = "layout-bench"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 description = "Head-to-head text layout benchmark (cosmic-text against parley); not shipped"
 

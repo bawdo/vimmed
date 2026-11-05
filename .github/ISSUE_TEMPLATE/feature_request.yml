@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest a feature or an improvement to editing or rendering.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do
+      description: The problem you are trying to solve, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Suggested approach
+      description: How you think it could work, including any vim key or Markdown syntax it involves.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked README.md and `:help` and this is not already supported.
+          required: true

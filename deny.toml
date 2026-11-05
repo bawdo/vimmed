@@ -1,0 +1,45 @@
+# cargo-deny policy. Run with `cargo deny check`.
+
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+# An ignore entry needs a `reason` that someone can check against the code.
+# The ttf-parser claim below can be checked against Source::File in crates/editor-render/src/fonts.rs.
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "Unmaintained notice, not a vulnerability. ttf-parser arrives through cosmic-text 0.19 and fontdb 0.23 and only parses font files installed on the system, which the config picks by family name (font.body, font.mono); markdown content never reaches it. Revisit when cosmic-text moves off ttf-parser." },
+]
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+
+# The workspace crates are `publish = false`, so they need no licence check.
+[licenses.private]
+ignore = true
+
+[bans]
+# The GTK and cosmic-text graphs carry duplicates, so `deny` would be noise.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies within the workspace are not wildcards.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
