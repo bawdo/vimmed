@@ -120,16 +120,16 @@ Update the existing callers and tests of `is_allowed_hit` to pass `&forms`.
 - Create: `deny.toml`
 - Modify: `Cargo.toml` (`[workspace.package]`), each `crates/*/Cargo.toml` and `xtask/Cargo.toml`
 
-- [ ] **Step 1:** Add `license = "MIT"` and `repository = "https://github.com/bawdo/vimmed"` to `[workspace.package]`, and `license.workspace = true` plus `repository.workspace = true` to every member's `[package]`. Lint-name check: the URL contains the name, but `Cargo.toml` (root) is linted only through its `name = ` rule. Run `cargo xtask lint-name`. If it flags the `repository` line, extend `is_allowed_hit` to allow the root manifest's `repository = ` line too (add a test like Task 1's), and note this in the commit.
-- [ ] **Step 2:** Install with `cargo install --locked cargo-deny --version <latest, 14 days or older>`.
-- [ ] **Step 3:** Write `deny.toml` with these values:
+- [x] **Step 1:** Add `license = "MIT"` and `repository = "https://github.com/bawdo/vimmed"` to `[workspace.package]`, and `license.workspace = true` plus `repository.workspace = true` to every member's `[package]`. Lint-name check: the URL contains the name, but `Cargo.toml` (root) is linted only through its `name = ` rule. Run `cargo xtask lint-name`. If it flags the `repository` line, extend `is_allowed_hit` to allow the root manifest's `repository = ` line too (add a test like Task 1's), and note this in the commit.
+- [x] **Step 2:** Install with `cargo install --locked cargo-deny --version <latest, 14 days or older>`.
+- [x] **Step 3:** Write `deny.toml` with these values:
   - `[graph] targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]`
   - `[advisories] unmaintained = "all"`, `unsound = "all"`, `ignore = []`. Any ignore entry needs a `reason` that someone can check against the code, as in jellyfish's `osv-scanner.toml`.
   - `[licenses] confidence-threshold = 0.93`. Start `allow` with `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, and add only what `cargo deny check licenses` actually reports. Add `[licenses.private] ignore = true` for the `publish = false` crates.
   - `[bans] multiple-versions = "warn"` (the GTK and cosmic-text graphs carry duplicates, so `deny` would be noise) and `wildcards = "deny"`. Path dependencies within the workspace are not wildcards, so set `allow-wildcard-paths = true`.
   - `[sources] unknown-registry = "deny"`, `unknown-git = "deny"`.
-- [ ] **Step 4: Run** `cargo deny check`. Expected: `advisories ok, bans ok, licenses ok, sources ok`. Fix the config, not the dependency graph, unless an advisory is real. Raise a real advisory with Keith.
-- [ ] **Step 5: Run** `cargo xtask ci` (PASS), then commit `deny.toml` and the manifests with "Added cargo-deny and licence metadata".
+- [x] **Step 4: Run** `cargo deny check`. Expected: `advisories ok, bans ok, licenses ok, sources ok`. Fix the config, not the dependency graph, unless an advisory is real. Raise a real advisory with Keith.
+- [x] **Step 5: Run** `cargo xtask ci` (PASS), then commit `deny.toml` and the manifests with "Added cargo-deny and licence metadata".
 
 ### Task 3: CI workflow
 
