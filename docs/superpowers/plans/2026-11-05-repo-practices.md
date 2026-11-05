@@ -386,11 +386,11 @@ Jobs, each with jellyfish's comments on why it is split this way:
 - [x] Every Task 8 to 13 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
 - [x] Resume log entry added.
 - [x] Keith told what to do: push `chore/repo-tier-2`, open the PR, CI green (now including `MSRV` and `zizmor`), merge. Merging does **not** release, because `CHANGELOG.md` has only `[Unreleased]`. To cut 0.9.0, open a PR that renames `[Unreleased]` to `[0.9.0] - <date>` with the compare link, and merge it. Then check the release page, download the zip and run the `SECURITY.md` verify commands.
-- [ ] **Context check asked; Keith's answer recorded in the Resume log.**
+- [x] **Context check asked; Keith's answer recorded in the Resume log.**
 
 **Ready to resume Tier 3 when:**
-- [ ] The Tier 2 PR is merged and the `main` release run shows `plan` with `due=false` (or a successful release, if Keith cut 0.9.0).
-- [ ] If a release was cut: `spctl` on the downloaded `.app` says `Notarized Developer ID`, and `gh attestation verify` passes.
+- [x] The Tier 2 PR is merged and the `main` release run shows `plan` with `due=false` (or a successful release, if Keith cut 0.9.0). (PR #4 merged as 813b2df. Release run 42028549524 succeeded: every CI job and `plan` green, build-mac, build-linux, sign-mac and publish skipped.)
+- [x] If a release was cut: `spctl` on the downloaded `.app` says `Notarized Developer ID`, and `gh attestation verify` passes. (Not applicable: no release was cut.)
 
 ---
 
@@ -487,3 +487,4 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 | 2026-11-05 | 1 | chore/repo-tier-1 | ae14cc7 (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, cargo-deny, Changelog and CI result green, merge with a merge commit, then run .github/settings.md top to bottom (rulesets last). Local `cargo xtask ci` fails at fmt only because of the gitignored crates/editor-render/tests/demo_reel.rs: run `cargo fmt --all` locally. The git-guard reference-transaction hook blocks cargo-deny's advisory-db self-update (use `cargo deny check --offline` after the first fetch). RUSTSEC-2026-0192 (ttf-parser unmaintained) is ignored in deny.toml with a reason. Docker is unreachable from the sandbox, so `cargo xtask linux-check` with the pinned digest is first proven by the PR's container smoke job. Subagents no longer commit; the controller does (Keith, 2026-11-05). |
 | 2026-11-05 | 1 (context check) | chore/repo-tier-1 | c1837c3, merged as 019888f | Keith: stop here, resume in a fresh session. Tier 2 resumed on chore/repo-tier-2 from 019888f. |
 | 2026-11-05 | 2 | chore/repo-tier-2 | 110327a (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, MSRV (macOS and Ubuntu), cargo-deny, zizmor, Changelog and CI result green, merge with a merge commit. The merge runs release.yml for the first time: expect `plan` with due=false. Before cutting 0.9.0, add a deployment branch rule limiting the `release` environment to `main` (`gh api repos/bawdo/vimmed/environments/release` to check). To release, bump `[workspace.package] version` with the changelog heading (CI now fails a mismatch). Run `cargo xtask linux-check` locally once, plus Task 12's negative check (delete `<summary>` from metainfo.xml.in, expect failure, restore). zizmor is 1.30.1 because the pinned zizmor-action supports nothing newer. Inside the sandbox rustup needs `RUSTUP_USE_CURL=1`. |
+| 2026-11-05 | 2 (context check) | chore/repo-tier-2 | 925f74a, then 7599044, merged as 813b2df | Keith: stop here, resume in a fresh session. Tier 3 resumed on chore/repo-tier-3 from 813b2df. Still owed before 0.9.0: the `release` environment deployment branch rule (main only), and Task 12's negative check run locally. |
