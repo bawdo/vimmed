@@ -182,6 +182,24 @@ jobs:
           fi
           echo "changelog: $version matches Cargo.toml"
 
+  # Spell check with typos, using typos.toml. Prose in Markdown is held to
+  # Australian English; code is checked without a locale. The action version
+  # matches CONTRIBUTING.md, because the action runs the typos release of
+  # its own tag.
+  typos:
+    name: typos
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run typos
+        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+
   # Checks the workspace on the oldest Rust the manifest promises
   # (rust-version in Cargo.toml), so that promise is tested and not just
   # written down. It reads the version from the manifest, so there is no
@@ -233,7 +251,7 @@ jobs:
   #   workflow_dispatch: none
   #   pull_request: none
   #   push (a caller via workflow_call): none
-  #   schedule: macos, linux, linux-smoke, msrv and changelog (only deny and
+  #   schedule: macos, linux, linux-smoke, msrv, changelog and typos (only deny and
   #     zizmor run)
   # Any other event expects every job. A failed or cancelled job always
   # fails the gate, and so does a skip that the event does not allow, so a
@@ -243,7 +261,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [macos, linux, linux-smoke, msrv, deny, zizmor, changelog]
+    needs: [macos, linux, linux-smoke, msrv, deny, zizmor, changelog, typos]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -255,11 +273,11 @@ jobs:
           set -euo pipefail
           case "$EVENT" in
             pull_request|push|workflow_dispatch) may_skip='[]' ;;
-            schedule) may_skip='["macos","linux","linux-smoke","msrv","changelog"]' ;;
+            schedule) may_skip='["macos","linux","linux-smoke","msrv","changelog","typos"]' ;;
             *)        may_skip='[]' ;;
           esac
           # Mirrors needs above, so a job missing from the results fails too.
-          all='["macos","linux","linux-smoke","msrv","deny","zizmor","changelog"]'
+          all='["macos","linux","linux-smoke","msrv","deny","zizmor","changelog","typos"]'
           echo "Event: $EVENT (may skip: $may_skip)"
           jq -r 'to_entries[] | "  \(.key): \(.value.result)"' <<<"$NEEDS"
           bad=$(jq -r --argjson all "$all" --argjson skip "$may_skip" '

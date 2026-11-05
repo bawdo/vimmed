@@ -404,11 +404,11 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 - Create: `typos.toml`
 - Modify: `.github/workflows/ci.yml`, and whatever files contain real typos
 
-- [ ] **Step 1:** Write `typos.toml` with no `locale` under `[default]`, because code uses US API names such as `Color` from dependencies. Add `[type.md] extend-glob = ["*.md"]` with `locale = "en-au"`. Add `[files] extend-exclude = ["Cargo.lock", "*.svg", "packaging/icons/**", "docs/superpowers/**", "research_notes/**", "reports/**", "bench-results/**"]`.
-- [ ] **Step 2:** Install with `cargo install --locked typos-cli --version <latest, 14 days or older>` and run `typos`. Fix real typos. Add genuine words (crate names, the project name) to `[default.extend-words]` with the word mapped to itself. Never add a misspelling.
-- [ ] **Step 3:** Add a `typos` job (`crate-ci/typos` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`.
-- [ ] **Step 4:** `typos` prints nothing. `actionlint` and `zizmor` are clean. `cargo xtask ci` (PASS).
-- [ ] **Step 5:** Commit with "Added typos checks with Australian English prose".
+- [x] **Step 1:** Write `typos.toml` with no `locale` under `[default]`, because code uses US API names such as `Color` from dependencies. Add `[type.md] extend-glob = ["*.md"]` with `locale = "en-au"`. Add `[files] extend-exclude = ["Cargo.lock", "*.svg", "packaging/icons/**", "docs/superpowers/**", "research_notes/**", "reports/**", "bench-results/**"]`.
+- [x] **Step 2:** Install with `cargo install --locked typos-cli --version <latest, 14 days or older>` and run `typos`. Fix real typos. Add genuine words (crate names, the project name) to `[default.extend-words]` with the word mapped to itself. Never add a misspelling.
+- [x] **Step 3:** Add a `typos` job (`crate-ci/typos` pinned) to `ci.yml`, skipped on `schedule`, and add it to `needs`, `all` and the schedule `may_skip`.
+- [x] **Step 4:** `typos` prints nothing. `actionlint` and `zizmor` are clean. `cargo xtask ci` (PASS).
+- [x] **Step 5:** Commit with "Added typos checks with Australian English prose".
 
 ### Task 15: .gitattributes
 

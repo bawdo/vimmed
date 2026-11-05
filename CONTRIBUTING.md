@@ -67,6 +67,7 @@ results as CI:
 
 - cargo-deny: `cargo install --locked cargo-deny --version 0.20.2`
 - zizmor: `cargo install --locked zizmor --version 1.30.1`
+- typos: `cargo install --locked typos-cli --version 1.51.1`
 
 ## Licence
 
