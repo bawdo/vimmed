@@ -17,6 +17,10 @@
 //!
 //! cargo-deb and cargo-generate-rpm then package the staged files, without
 //! building, into `<target>/dist/`.
+//!
+//! `cargo xtask package-linux --container` does the same in the Linux check
+//! image (`docker/Dockerfile.check`), with `<target>` at `CONTAINER_TARGET`
+//! in the workspace. The release workflow builds the Linux assets this way.
 
 use crate::bundle_mac::target_dir;
 use crate::templates;
@@ -44,10 +48,55 @@ fn cargo(dir: &Path, args: &[String]) -> Result<(), String> {
     }
 }
 
+/// `--container` runs the same command in the check image, with the target
+/// directory on the workspace mount (see `container_env`), so the packages
+/// land in the checkout rather than on the image's cargo volume.
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
-    if !args.is_empty() {
-        return Err("usage: cargo xtask package-linux".into());
+    match args {
+        [] => package(root),
+        [a] if a == "--container" => in_container(root),
+        _ => Err("usage: cargo xtask package-linux [--container]".into()),
     }
+}
+
+/// Where `--container` builds, relative to the workspace: its own directory,
+/// so the container's build never touches the host's `target/` (the xtask
+/// binary running on the host included). The `.deb` and the `.rpm` end up
+/// in `<this>/dist/` and the PKGBUILD in `<this>/pkg/arch/`.
+pub const CONTAINER_TARGET: &str = "target/linux-package";
+
+/// The environment `--container` runs `package-linux` with: the target
+/// directory under the `/work` mount, and the checkout marked safe for git
+/// (it belongs to the host user, not the container's root), so the source
+/// tarball is made from what git tracks.
+pub fn container_env() -> Vec<(&'static str, String)> {
+    let work = crate::ci::WORK;
+    vec![
+        ("CARGO_TARGET_DIR", format!("{work}/{CONTAINER_TARGET}")),
+        ("GIT_CONFIG_COUNT", "1".into()),
+        ("GIT_CONFIG_KEY_0", "safe.directory".into()),
+        ("GIT_CONFIG_VALUE_0", work.into()),
+    ]
+}
+
+fn in_container(root: &Path) -> Result<(), String> {
+    let (image, volume) =
+        crate::ci::check_image(root).map_err(|e| format!("package-linux: {e}"))?;
+    crate::ci::run_in_container(
+        root,
+        &image,
+        &volume,
+        &container_env(),
+        "cargo xtask package-linux",
+    )
+    .map_err(|e| format!("package-linux: the container run failed: {e}"))?;
+    let out = root.join(CONTAINER_TARGET);
+    println!("packages: {}", out.join("dist").display());
+    println!("PKGBUILD: {}", out.join("pkg/arch/PKGBUILD").display());
+    Ok(())
+}
+
+fn package(root: &Path) -> Result<(), String> {
     let build: Vec<String> = ["build", "--release", "-p", "window", "-p", "launcher"]
         .map(String::from)
         .to_vec();
@@ -282,6 +331,34 @@ mod tests {
 
     fn root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+    }
+
+    #[test]
+    fn container_builds_into_the_checkout() {
+        let env = container_env();
+        let get = |k: &str| {
+            env.iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| v.clone())
+        };
+        let target = get("CARGO_TARGET_DIR").unwrap();
+        assert_eq!(target, format!("{}/{CONTAINER_TARGET}", crate::ci::WORK));
+        assert!(
+            target.starts_with(&format!("{}/target/", crate::ci::WORK)),
+            "{target} is not under the mounted target directory"
+        );
+        assert_ne!(target, format!("{}/target", crate::ci::WORK));
+        assert_eq!(get("GIT_CONFIG_COUNT").as_deref(), Some("1"));
+        assert_eq!(get("GIT_CONFIG_KEY_0").as_deref(), Some("safe.directory"));
+        assert_eq!(get("GIT_CONFIG_VALUE_0").as_deref(), Some(crate::ci::WORK));
+    }
+
+    #[test]
+    fn run_rejects_unknown_arguments() {
+        let e = run(Path::new("/nonexistent"), &["--bogus".into()]).unwrap_err();
+        assert!(e.contains("--container"), "{e}");
+        let two = ["--container".to_string(), "x".to_string()];
+        assert!(run(Path::new("/nonexistent"), &two).is_err());
     }
 
     #[test]

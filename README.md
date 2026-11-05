@@ -30,6 +30,16 @@ which the launcher starts). Packaging renames them.
 
 ## macOS install
 
+On Apple silicon you can skip the build: download the `_macos_arm64.zip` asset from the latest
+release on this repository's Releases page, unzip it and move the app to `/Applications`. The
+app is signed with a Developer ID certificate and notarised by Apple, so it opens without a
+Gatekeeper warning. `SECURITY.md` shows how to check the download's attestation and
+notarisation. The command inside the app is `<BundleName>.app/Contents/MacOS/<name>`; link it
+onto your `PATH` (for example into `~/.local/bin`) to open files from a terminal. There is no
+Intel build: macOS 26 was the last release to support Intel Macs, so build from source there.
+
+To build and install it yourself instead:
+
 ```sh
 cargo xtask install-mac
 ```

@@ -135,13 +135,15 @@ jobs:
           advanced-security: false
           version: 1.30.1
 
-  # Pure shell and git, so it needs nothing from macOS. fetch-depth 0 because
-  # the check reads tags and history.
+  # Shell, git and cargo metadata (for the version comparison), so it needs
+  # nothing from macOS. fetch-depth 0 because the check reads tags and
+  # history. The timeout allows for rustup installing the pinned toolchain
+  # before cargo metadata runs.
   changelog:
     name: Changelog
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -154,6 +156,31 @@ jobs:
 
       - name: Check the newest CHANGELOG.md version is releasable
         run: scripts/changelog-version.sh check
+
+      # A release heading must name the version the workspace builds, or
+      # the release run on main fails after merge. Exit 3 from version
+      # means there is no release heading yet, so there is nothing to
+      # compare; any other failure fails the step.
+      - name: Check Cargo.toml has the newest CHANGELOG.md version
+        run: |
+          set -euo pipefail
+          rc=0
+          version=$(scripts/changelog-version.sh version) || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "changelog: no release yet; no version to compare"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "changelog-version.sh version failed with exit $rc" >&2
+            exit "$rc"
+          fi
+          cargo_versions=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '[.packages[].version] | unique | join(" ")')
+          if [ "$cargo_versions" != "$version" ]; then
+            echo "CHANGELOG.md says $version, Cargo.toml says $cargo_versions" >&2
+            exit 1
+          fi
+          echo "changelog: $version matches Cargo.toml"
 
   # Checks the workspace on the oldest Rust the manifest promises
   # (rust-version in Cargo.toml), so that promise is tested and not just

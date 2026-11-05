@@ -65,6 +65,6 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | validate-packaging | bundle-mac [--release] | install-mac | package-linux | rename-test [--name SLUG] [--linux] | fixture [DIR] | bench ...>"
+        "usage: cargo xtask <ci [--linux] | linux-check | lint-name | lint-literals | shell-lines | validate-packaging | bundle-mac [--release] | install-mac | package-linux [--container] | rename-test [--name SLUG] [--linux] | fixture [DIR] | bench ...>"
     );
 }

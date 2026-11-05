@@ -78,7 +78,8 @@ pub fn run(root: &Path, linux: bool) -> Result<(), String> {
 // runs are incremental and the host's own target directory is untouched.
 // The smoke run leaves its evidence in target/linux-check on the host.
 
-const WORK: &str = "/work";
+/// Where the workspace is mounted in the check container.
+pub const WORK: &str = "/work";
 /// Where the smoke run leaves its evidence, relative to the workspace.
 const CHECK_OUT: &str = "target/linux-check";
 
