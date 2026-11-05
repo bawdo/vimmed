@@ -59,7 +59,10 @@ pub fn is_allowed_hit(line: &str, forms: &[String]) -> bool {
     if let Some(rest) = line.strip_prefix("Cargo.toml:") {
         return rest
             .split_once(':')
-            .is_some_and(|(_, text)| text.trim_start().starts_with("name = "));
+            .is_some_and(|(_, text)| {
+                let text = text.trim_start();
+                text.starts_with("name = ") || text.starts_with("repository = ")
+            });
     }
     if let Some(rest) = line.strip_prefix("README.md:") {
         return rest.split_once(':').is_some_and(|(_, text)| {
@@ -150,6 +153,20 @@ mod tests {
         assert!(!is_allowed_hit("README.md:3:## abc_def", &forms));
         assert!(!is_allowed_hit("README.md:3:# abc_def editor", &forms));
         assert!(!is_allowed_hit("docs/README.md:1:# abc_def", &forms));
+    }
+
+    #[test]
+    fn root_manifest_repository_line_is_allowed() {
+        let url = "Cargo.toml:14:repository = \"https://github.com/x/abc_def\"";
+        assert!(is_allowed_hit(url, &[]));
+        assert!(!is_allowed_hit(
+            "crates/x/Cargo.toml:5:repository = \"https://github.com/x/abc_def\"",
+            &[]
+        ));
+        assert!(!is_allowed_hit(
+            "Cargo.toml:14:homepage = \"https://github.com/x/abc_def\"",
+            &[]
+        ));
     }
 
     #[test]

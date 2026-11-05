@@ -81,8 +81,8 @@ Branch: `git switch -c chore/repo-tier-1` from `main`. Commit this plan file as 
 **Interfaces:**
 - Produces: `pub fn is_allowed_hit(line: &str, forms: &[String]) -> bool`, where `line` is a `git grep -n` line (`path:lineno:text`).
 
-- [ ] **Step 1: Present the diagnosis above to Keith and wait for confirmation.**
-- [ ] **Step 2: Write the failing tests** in `lint.rs`'s test module:
+- [x] **Step 1: Present the diagnosis above to Keith and wait for confirmation.**
+- [x] **Step 2: Write the failing tests** in `lint.rs`'s test module:
 
 ```rust
 #[test]
@@ -109,10 +109,10 @@ fn manifest_name_line_still_allowed() {
 
 Update the existing callers and tests of `is_allowed_hit` to pass `&forms`.
 
-- [ ] **Step 3: Run** `cargo test -p xtask lint`. Expected: the new tests fail to compile or fail.
-- [ ] **Step 4: Implement** the new `is_allowed_hit`. Match on the `README.md:` prefix (exact path), skip the line number, then compare the text with `"# " + form` for each form, case insensitively, as a whole line match. Pass `&forms` from `run`.
-- [ ] **Step 5: Run** `cargo test -p xtask lint` (PASS), then `cargo xtask ci`. Expected: `ci: all 7 steps OK`.
-- [ ] **Step 6: Commit** `xtask/src/lint.rs` with the message "Allowed the README title in the name lint".
+- [x] **Step 3: Run** `cargo test -p xtask lint`. Expected: the new tests fail to compile or fail.
+- [x] **Step 4: Implement** the new `is_allowed_hit`. Match on the `README.md:` prefix (exact path), skip the line number, then compare the text with `"# " + form` for each form, case insensitively, as a whole line match. Pass `&forms` from `run`.
+- [x] **Step 5: Run** `cargo test -p xtask lint` (PASS), then `cargo xtask ci`. Expected: `ci: all 7 steps OK`.
+- [x] **Step 6: Commit** `xtask/src/lint.rs` with the message "Allowed the README title in the name lint".
 
 ### Task 2: cargo-deny and licence metadata
 
