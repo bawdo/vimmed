@@ -674,7 +674,7 @@ mod tests {
             let p = e.cursor();
             let text = e.text();
             let l = text.lines().nth(p.line).unwrap_or("");
-            assert_eq!(crate::grapheme::floor(l, p.col), p.col, "{p:?} in {l:?}");
+            assert_eq!(grapheme::floor(l, p.col), p.col, "{p:?} in {l:?}");
         };
         // Delete the cluster, then undo and redo it.
         let mut e = ed(&line);
@@ -1123,7 +1123,7 @@ mod tests {
         keys(&mut e, "<C-r>");
         let text = e.text();
         let line = text.lines().nth(e.cursor().line).unwrap_or("");
-        assert_eq!(crate::grapheme::floor(line, e.cursor().col), e.cursor().col);
+        assert_eq!(grapheme::floor(line, e.cursor().col), e.cursor().col);
     }
 
     #[test]
@@ -1191,7 +1191,7 @@ mod tests {
 
     #[test]
     fn reader_mode_does_not_undo_or_repeat() {
-        let mut e = crate::testkit::build_reader("abc");
+        let mut e = build_reader("abc");
         keys(&mut e, "x.u<C-r>");
         assert_eq!(e.text(), "abc");
         assert_eq!(e.last_change(), None);

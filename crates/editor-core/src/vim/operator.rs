@@ -746,7 +746,7 @@ mod tests {
         (buf, history, at, touched)
     }
 
-    fn edit(range: std::ops::Range<Pos>, text: &str) -> Edit {
+    fn edit(range: Range<Pos>, text: &str) -> Edit {
         Edit {
             range,
             text: text.into(),

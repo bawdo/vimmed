@@ -1073,9 +1073,9 @@ mod tests {
         );
         // Raw numbers are ignored; unordered siblings neither count nor break.
         assert_eq!(displays("7. a\n- b\n3. c"), ["1.", "", "2."]);
-        assert_eq!(super::alpha(26), "z");
-        assert_eq!(super::alpha(27), "aa");
-        assert_eq!(super::roman(1994), "mcmxciv");
+        assert_eq!(alpha(26), "z");
+        assert_eq!(alpha(27), "aa");
+        assert_eq!(roman(1994), "mcmxciv");
     }
 
     // ---- fenced code block tracking ----

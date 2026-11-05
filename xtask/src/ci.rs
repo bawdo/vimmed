@@ -78,7 +78,8 @@ pub fn run(root: &Path, linux: bool) -> Result<(), String> {
 // runs are incremental and the host's own target directory is untouched.
 // The smoke run leaves its evidence in target/linux-check on the host.
 
-const WORK: &str = "/work";
+/// Where the workspace is mounted in the check container.
+pub const WORK: &str = "/work";
 /// Where the smoke run leaves its evidence, relative to the workspace.
 const CHECK_OUT: &str = "target/linux-check";
 
@@ -252,6 +253,8 @@ pub fn linux_check(root: &Path) -> Result<(), String> {
     let run = |script: &str| in_container(root, &image, &volume, script);
     run("cargo build --workspace --all-targets")
         .map_err(|e| format!("linux-check: build failed: {e}"))?;
+    run("cargo xtask validate-packaging")
+        .map_err(|e| format!("linux-check: packaging validation failed: {e}"))?;
     run("cargo clippy --workspace --all-targets -- -D warnings")
         .map_err(|e| format!("linux-check: clippy failed: {e}"))?;
     run("cargo test --workspace").map_err(|e| format!("linux-check: tests failed: {e}"))?;

@@ -357,7 +357,7 @@ mod tests {
         unsafe { libc::geteuid() == 0 }
     }
 
-    fn chmod(path: &std::path::Path, mode: u32) {
+    fn chmod(path: &Path, mode: u32) {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
@@ -425,7 +425,7 @@ mod tests {
             if w.checks() > after {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(5));
         }
         panic!("the watcher never looked at the file");
     }
@@ -437,7 +437,7 @@ mod tests {
         fs::write(&path, "hello").unwrap();
         let stat = DiskStat::of(&fs::metadata(&path).unwrap());
         let (tx, rx) = mpsc::channel();
-        let tx = std::sync::Mutex::new(tx);
+        let tx = Mutex::new(tx);
         let waker: Waker = Arc::new(move || {
             let _ = tx.lock().unwrap().send(());
         });
@@ -466,9 +466,9 @@ mod tests {
     }
 
     /// A waker that signals `rx` on each call.
-    fn signal_waker() -> (Waker, mpsc::Receiver<()>) {
+    fn signal_waker() -> (Waker, Receiver<()>) {
         let (tx, rx) = mpsc::channel();
-        let tx = std::sync::Mutex::new(tx);
+        let tx = Mutex::new(tx);
         let waker: Waker = Arc::new(move || {
             let _ = tx.lock().unwrap().send(());
         });
@@ -476,7 +476,7 @@ mod tests {
     }
 
     /// Looks at once and takes the event that look reports.
-    fn look(w: &mut Watcher, rx: &mpsc::Receiver<()>) -> Option<DiskEvent> {
+    fn look(w: &mut Watcher, rx: &Receiver<()>) -> Option<DiskEvent> {
         w.check_now();
         rx.recv_timeout(Duration::from_secs(5)).ok()?;
         w.poll()
@@ -519,8 +519,8 @@ mod tests {
         // dead network mount would.
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
-        let entered_tx = std::sync::Mutex::new(entered_tx);
-        let release_rx = std::sync::Mutex::new(release_rx);
+        let entered_tx = Mutex::new(entered_tx);
+        let release_rx = Mutex::new(release_rx);
         let waker: Waker = Arc::new(move || {
             let _ = entered_tx.lock().unwrap().send(());
             let _ = release_rx
@@ -533,7 +533,7 @@ mod tests {
         let probe = w.probe();
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let (done_tx, done_rx) = mpsc::channel();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             drop(w);
             let _ = done_tx.send(());
         });

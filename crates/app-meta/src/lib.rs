@@ -12,5 +12,7 @@ pub const ENV_PREFIX: &str = env!("APP_META_ENV_PREFIX");
 pub const WINDOW_BIN: &str = env!("APP_META_WINDOW_BIN");
 pub const LINUX_LIBEXEC_DIR: &str = env!("APP_META_LINUX_LIBEXEC_DIR");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The workspace `repository` URL, used as the project homepage.
+pub const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 /// Wire protocol version. Not derived from the name.
 pub const PROTOCOL: u32 = 1;

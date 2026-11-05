@@ -1,0 +1,585 @@
+name: Release
+
+# Runs on every push to main. The CI jobs run first (reused from ci.yml).
+# A release is then cut only when the newest "## [X.Y.Z] - date" heading in
+# CHANGELOG.md names a version with no published release. While the
+# changelog has only "## [Unreleased]" nothing is due and the run stops
+# after planning. If vX.Y.Z is not tagged, the pushed commit is tagged and
+# built. If the tag already exists (made by hand), its commit is built
+# instead and a stale draft of the same name is replaced; the run fails if
+# that commit is not on main. The release carries the notarised macOS app
+# (arm64 only), the .deb, the .rpm and the PKGBUILD with its sources, with
+# a checksums file, and the assets listed in it are attested with build
+# provenance so anyone can run:
+#   gh attestation verify <asset> --repo <owner>/<repo> \
+#     --signer-workflow <owner>/<repo>/.github/workflows/release.yml \
+#     --source-ref refs/heads/main --deny-self-hosted-runners
+# The attestation's Sigstore bundle is attached too, so --bundle can check
+# it without the attestation API. That still fetches the Sigstore trusted
+# root; a fully offline check also needs --custom-trusted-root (see
+# SECURITY.md).
+#
+# Only the publish job can write to the repository, and it has no checkout
+# and runs no project code. The build jobs compile with a read-only token,
+# no secrets and no cargo cache, so neither a token, a signing key nor a
+# poisoned cache entry is in reach of the code that ends up in the release.
+# Signing is a job of its own for the same reason: sign-mac holds the
+# Developer ID certificate and the notary key (the release environment's
+# secrets), but checks out nothing and runs no project code, so the code
+# being built never runs where those secrets are.
+#
+# Nothing is public until publish: the build and sign jobs hand their
+# outputs on as workflow artifacts, and publish uploads every asset to a
+# draft release before it publishes the draft.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The workspace-relative form, not zizmor's preferred $/ self-repository
+  # form: actionlint (1.7.12) does not accept $/ yet, and a reusable
+  # workflow called from the same repository runs at this run's commit
+  # either way. Switch once actionlint understands it.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  plan:
+    name: Plan
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      due: ${{ steps.plan.outputs.due }}
+      version: ${{ steps.plan.outputs.version }}
+      commit: ${{ steps.plan.outputs.commit }}
+      slug: ${{ steps.slug.outputs.slug }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether a release is due
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Exit 3 means CHANGELOG.md has no released heading yet (only
+          # [Unreleased]): nothing to release. Any other failure is a
+          # broken changelog and fails the run.
+          rc=0
+          version=$(./scripts/changelog-version.sh version) || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "CHANGELOG.md has no released version yet; nothing to release"
+            echo "due=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "changelog-version.sh version failed with exit $rc" >&2
+            exit "$rc"
+          fi
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # Build from the tag's commit when the tag was made by hand,
+          # otherwise from the pushed commit, which the release will tag. A
+          # hand-made tag must point at a commit on main, or the run fails:
+          # the attestation says main, so the build must come from main.
+          commit=$(./scripts/release-commit.sh "$tag" "$GITHUB_SHA")
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+          # A published release ends it. Drafts are invisible to this
+          # read-only token; the publish job deals with them.
+          if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            echo "$tag already has a published release; nothing to release"
+            echo "due=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$tag has no published release; releasing"
+            echo "due=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read the project slug
+        # The asset names start with [workspace.metadata.app] name, read
+        # here once so the sign and publish jobs, which run no project
+        # code, can use it. The same metadata gives the package versions,
+        # which must all be the changelog's: otherwise the builds would
+        # report another version than the assets are named for, and that
+        # is better found here than after both builds.
+        id: slug
+        if: steps.plan.outputs.due == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          metadata=$(cargo metadata --no-deps --format-version 1)
+          cargo_versions=$(jq -r '[.packages[].version] | unique | join(" ")' <<<"$metadata")
+          if [ "$cargo_versions" != "$VERSION" ]; then
+            echo "CHANGELOG.md says $VERSION, Cargo.toml says $cargo_versions" >&2
+            exit 1
+          fi
+          slug=$(jq -r .metadata.app.name <<<"$metadata")
+          if ! [[ "$slug" =~ ^[a-z][a-z0-9_]*$ ]]; then
+            echo "[workspace.metadata.app] name is '$slug', not a slug" >&2
+            exit 1
+          fi
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        # From main, where the changelog script and section both exist, even
+        # when the release builds an older hand-made tag.
+        if: steps.plan.outputs.due == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          SLUG: ${{ steps.slug.outputs.slug }}
+        run: |
+          set -euo pipefail
+          # The highest tag below this version, whether or not this version is
+          # tagged yet. Sorted on the numbers, so v1.x orders after v0.x.
+          previous=$( { git tag -l 'v[0-9]*' | sed 's/^v//'; echo "$VERSION"; } \
+            | sort -u -t. -k1,1n -k2,2n -k3,3n \
+            | grep -B1 -x "$VERSION" | sed -n '1p' | grep -v -x "$VERSION" \
+            | sed 's/^/v/' || true)
+          zip="${SLUG}_${VERSION}_macos_arm64.zip"
+          {
+            ./scripts/changelog-version.sh notes "$VERSION"
+            echo
+            echo "Verify a downloaded asset (here the macOS app; the .deb, .rpm and"
+            echo "PKGBUILD tarball are checked the same way) with:"
+            echo
+            echo '```'
+            echo "gh attestation verify $zip --repo $GITHUB_REPOSITORY \\"
+            echo "  --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml \\"
+            echo "  --source-ref refs/heads/main --deny-self-hosted-runners"
+            echo "# or from the attached Sigstore bundle, without the attestation API:"
+            echo "gh attestation verify $zip --repo $GITHUB_REPOSITORY \\"
+            echo "  --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml \\"
+            echo "  --source-ref refs/heads/main --deny-self-hosted-runners \\"
+            echo "  --bundle ${SLUG}_${VERSION}_provenance.intoto.jsonl"
+            echo "shasum -a 256 -c checksums.txt --ignore-missing"
+            echo "# and, once unzipped, the notarisation:"
+            echo "spctl --assess --type execute -vv <App>.app"
+            echo '```'
+            if [ -n "$previous" ]; then
+              echo
+              echo "**Full Changelog**: https://github.com/$GITHUB_REPOSITORY/compare/$previous...v$VERSION"
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Keep the release notes for the publish job
+        if: steps.plan.outputs.due == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes.md
+          if-no-files-found: error
+          retention-days: 1
+
+  # Builds the .app unsigned. It has no secrets, so the project code and its
+  # build scripts never run beside the signing certificate; sign-mac signs
+  # what this job uploads.
+  build-mac:
+    name: Build macOS app
+    needs: plan
+    if: needs.plan.outputs.due == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the commit to release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Build the app bundle
+        run: cargo xtask bundle-mac --release
+
+      - name: Smoke test the bundle and zip it
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SLUG: ${{ needs.plan.outputs.slug }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=(target/dist/*.app)
+          if [ "${#apps[@]}" -ne 1 ]; then
+            echo "expected exactly one .app in target/dist, found ${#apps[@]}: ${apps[*]}" >&2
+            exit 1
+          fi
+          app=${apps[0]}
+          # The same strict name check sign-mac makes, so a bad name fails
+          # here, before anything reaches the job with the secrets.
+          name=$(basename "$app")
+          if ! LC_ALL=C bash -c '[[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.app$ ]]' _ "$name"; then
+            echo "refusing a bundle named '$name'" >&2
+            exit 1
+          fi
+          output=$("$app/Contents/MacOS/$SLUG" --version)
+          echo "$output"
+          # The launcher prints exactly "<slug> <version>".
+          [ "$output" = "$SLUG $VERSION" ] \
+            || { echo "the built launcher reports '$output', not '$SLUG $VERSION'"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/out"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/out/unsigned-app.zip"
+
+      - name: Keep the unsigned app for the sign job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-unsigned
+          path: ${{ runner.temp }}/out/unsigned-app.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  # Builds the .deb, the .rpm and the PKGBUILD in the Linux check image
+  # (docker/Dockerfile.check), the same image the CI container check uses,
+  # with no secrets and no cache. ubuntu-latest is x86_64, so the packages
+  # are amd64 and x86_64. package-linux --container keeps its target
+  # directory in the checkout (target/linux-package), so the outputs reach
+  # this runner.
+  build-linux:
+    name: Build Linux packages
+    needs: plan
+    if: needs.plan.outputs.due == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the commit to release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Build the packages in the check container
+        run: cargo xtask package-linux --container
+
+      - name: Smoke test the packages and name them
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SLUG: ${{ needs.plan.outputs.slug }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          out=target/linux-package
+          one() {
+            if [ "$#" -ne 1 ]; then
+              echo "expected exactly one match, found $#: $*" >&2
+              exit 1
+            fi
+            echo "$1"
+          }
+          deb=$(one "$out"/dist/*.deb)
+          rpm=$(one "$out"/dist/*.rpm)
+          test -f "$out/pkg/arch/PKGBUILD"
+
+          dpkg-deb -I "$deb"
+          arch=$(dpkg-deb -f "$deb" Architecture)
+          [ "$arch" = amd64 ] || { echo "the .deb is $arch, not amd64" >&2; exit 1; }
+          ver=$(dpkg-deb -f "$deb" Version)
+          case "$ver" in
+            "$VERSION"|"$VERSION"-*) ;;
+            *) echo "the .deb is version $ver, not $VERSION" >&2; exit 1 ;;
+          esac
+          if command -v rpm > /dev/null; then
+            rpm -qip "$rpm"
+          else
+            echo "rpm is not installed on this runner; skipping rpm -qip"
+          fi
+
+          # The container wrote these as root, so they are copied, not moved.
+          mkdir -p assets
+          cp "$deb" "assets/${SLUG}_${VERSION}_amd64.deb"
+          cp "$rpm" "assets/${SLUG}_${VERSION}_x86_64.rpm"
+          tar -C "$out/pkg" -czf "assets/${SLUG}_${VERSION}_PKGBUILD.tar.gz" arch
+          ls -l assets
+
+      - name: Keep the packages for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-packages
+          path: assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The only job with the signing certificate and the notary key, which live
+  # in the release environment. It checks out nothing and runs no project
+  # code: it signs, notarises and staples the .app build-mac uploaded, with
+  # Apple's own tools, in a throwaway keychain deleted when the job ends.
+  sign-mac:
+    name: Sign and notarise macOS app
+    needs: [plan, build-mac]
+    if: needs.plan.outputs.due == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch the unsigned app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-unsigned
+          path: ${{ runner.temp }}/in
+
+      - name: Unpack the app
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p "$RUNNER_TEMP/work"
+          ditto -x -k "$RUNNER_TEMP/in/unsigned-app.zip" "$RUNNER_TEMP/work"
+          # The bundle's name comes from the build-mac artifact, which the
+          # project's code could have tampered with, and it goes into
+          # GITHUB_ENV below. A newline in it could set BASH_ENV (or any
+          # other variable) for the steps that hold the secrets, so it must
+          # be the only entry and strictly shaped before it is written.
+          entries=()
+          while IFS= read -r -d '' entry; do
+            entries+=("$entry")
+          done < <(find "$RUNNER_TEMP/work" -mindepth 1 -maxdepth 1 -print0)
+          if [ "${#entries[@]}" -ne 1 ]; then
+            echo "expected exactly one top-level entry in the artifact, found ${#entries[@]}" >&2
+            exit 1
+          fi
+          app=${entries[0]}
+          name=${app##*/}
+          if ! LC_ALL=C bash -c '[[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.app$ ]]' _ "$name"; then
+            printf 'refusing a bundle named %q\n' "$name" >&2
+            exit 1
+          fi
+          if [ -L "$app" ] || ! [ -d "$app" ]; then
+            echo "$name is not a directory" >&2
+            exit 1
+          fi
+          echo "APP=$app" >> "$GITHUB_ENV"
+          echo "KEYCHAIN=$RUNNER_TEMP/release-signing.keychain-db" >> "$GITHUB_ENV"
+
+      - name: Import the signing certificate into a temporary keychain
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          [ -n "$APPLE_TEAM_ID" ] || { echo "vars.APPLE_TEAM_ID is not set on the release environment" >&2; exit 1; }
+          kc_pass=$(openssl rand -base64 24)
+          echo "::add-mask::$kc_pass"
+          security create-keychain -p "$kc_pass" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$kc_pass" "$KEYCHAIN"
+          p12="$RUNNER_TEMP/certificate.p12"
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$p12"
+          security import "$p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$kc_pass" "$KEYCHAIN" > /dev/null
+          # Put it on the search list (ahead of the login keychain) so
+          # codesign and spctl can find the identity and its chain.
+          existing=()
+          while IFS= read -r line; do
+            line=${line#"${line%%[![:space:]]*}"}
+            existing+=("${line//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN" "${existing[@]}"
+
+          # Exactly one Developer ID Application identity for the team, or
+          # stop: signing with the wrong one would only fail at notarisation.
+          ids=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -F 'Developer ID Application' \
+            | grep -F "($APPLE_TEAM_ID)\"" || true)
+          count=$(printf '%s' "$ids" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "expected one Developer ID Application identity for team $APPLE_TEAM_ID, found $count" >&2
+            security find-identity -v -p codesigning "$KEYCHAIN" >&2
+            exit 1
+          fi
+          # The SHA-1 hash names the identity without any ambiguity.
+          hash=$(awk '{print $2}' <<<"$ids")
+          echo "Signing as: $(sed -E 's/^[^"]*"(.*)"$/\1/' <<<"$ids")"
+          echo "SIGN_IDENTITY=$hash" >> "$GITHUB_ENV"
+
+      - name: Sign the app
+        run: |
+          set -euo pipefail
+          sign() {
+            codesign --force --options runtime --timestamp \
+              --keychain "$KEYCHAIN" --sign "$SIGN_IDENTITY" "$1"
+          }
+          # Inside out: the executables first, then the bundle, which seals
+          # them.
+          for bin in "$APP"/Contents/MacOS/*; do
+            sign "$bin"
+          done
+          sign "$APP"
+          codesign --verify --strict --deep --verbose=2 "$APP"
+          codesign -dvv "$APP" 2>&1 | sed -n '/^Authority=/p;/^TeamIdentifier=/p;/^Timestamp=/p'
+
+      - name: Notarise and staple the app
+        env:
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/AuthKey_${NOTARY_API_KEY_ID}.p8"
+          printf '%s' "$NOTARY_API_KEY_P8" | base64 --decode > "$key"
+          auth=(--key "$key" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID")
+          upload="$RUNNER_TEMP/notarise.zip"
+          ditto -c -k --keepParent "$APP" "$upload"
+          rc=0
+          result=$(xcrun notarytool submit "$upload" "${auth[@]}" --wait \
+            --timeout 30m --output-format json) || rc=$?
+          echo "$result"
+          id=$(jq -r '.id // empty' <<<"$result" 2>/dev/null || true)
+          status=$(jq -r '.status // empty' <<<"$result" 2>/dev/null || true)
+          if [ "$rc" -ne 0 ] || [ "$status" != Accepted ]; then
+            echo "notarisation did not succeed (exit $rc, status '${status:-none}')" >&2
+            if [ -n "$id" ]; then
+              xcrun notarytool log "$id" "${auth[@]}" || true
+            fi
+            exit 1
+          fi
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+
+      - name: Check Gatekeeper accepts the app and zip it
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SLUG: ${{ needs.plan.outputs.slug }}
+        run: |
+          set -euo pipefail
+          # A rejection exits non-zero; keep its output so the reason is
+          # shown, and let the grep decide.
+          assessment=$(spctl --assess --type execute -vv "$APP" 2>&1) || true
+          echo "$assessment"
+          grep -qF 'source=Notarized Developer ID' <<<"$assessment" \
+            || { echo "Gatekeeper does not see a notarised Developer ID app" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/signed"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/signed/${SLUG}_${VERSION}_macos_arm64.zip"
+
+      - name: Keep the signed app for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-signed
+          path: ${{ runner.temp }}/signed/*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove the keychain and the notary key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/release-signing.keychain-db" 2> /dev/null || true
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/certificate.p12"
+
+  publish:
+    name: Publish
+    needs: [plan, build-linux, sign-mac]
+    if: needs.plan.outputs.due == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Fetch the signed macOS app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-signed
+          path: dist
+
+      - name: Fetch the Linux packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-packages
+          path: dist
+
+      - name: Fetch the release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Check the assets and write their checksums
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SLUG: ${{ needs.plan.outputs.slug }}
+        run: |
+          set -euo pipefail
+          cd dist
+          want=(
+            "${SLUG}_${VERSION}_macos_arm64.zip"
+            "${SLUG}_${VERSION}_amd64.deb"
+            "${SLUG}_${VERSION}_x86_64.rpm"
+            "${SLUG}_${VERSION}_PKGBUILD.tar.gz"
+          )
+          # Exactly the expected assets: none missing and nothing extra.
+          diff <(printf '%s\n' "${want[@]}" | sort) <(find . -mindepth 1 -maxdepth 1 -printf '%P\n' | sort)
+          sha256sum "${want[@]}" > checksums.txt
+          cat checksums.txt
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+          SLUG: ${{ needs.plan.outputs.slug }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          # The attestation as a Sigstore bundle wrapping the in-toto SLSA
+          # provenance statement, compacted onto one line so it is a valid
+          # JSON lines file: .jsonl is what gh attestation download writes
+          # and gh attestation verify --bundle reads, and .intoto.jsonl is
+          # the SLSA name for provenance, which Scorecard scores as such.
+          bundle="dist/${SLUG}_${VERSION}_provenance.intoto.jsonl"
+          jq -c . "$BUNDLE_PATH" > "$bundle"
+          test "$(wc -l < "$bundle")" -eq 1
+          # A draft is stale (it has no attested assets) and is replaced. A
+          # published release that appeared since the plan job is left alone.
+          draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)
+          case "$draft" in
+            false) echo "$tag was published since planning; leaving it"; exit 0 ;;
+            true)  echo "$tag has a draft release; replacing it"; gh release delete "$tag" --yes ;;
+          esac
+          # Created as a draft, assets uploaded, then published, so an
+          # immutable release never exists without its assets. --target is
+          # ignored when the tag already exists.
+          gh release create "$tag" \
+            --draft \
+            --target "$COMMIT" \
+            --title "$tag" \
+            --notes-file notes/notes.md \
+            dist/"${SLUG}_${VERSION}"_* dist/checksums.txt
+          gh release edit "$tag" --draft=false --latest
+          gh release view "$tag" --json url --jq .url

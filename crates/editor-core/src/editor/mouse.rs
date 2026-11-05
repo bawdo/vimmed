@@ -565,7 +565,7 @@ mod tests {
         Some(MouseHit {
             pos: at,
             under,
-            zone: crate::input::Zone::Text,
+            zone: Zone::Text,
         })
     }
 

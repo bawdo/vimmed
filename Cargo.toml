@@ -37,6 +37,15 @@ repository = "https://github.com/bawdo/vimmed"
 name = "vimmed"
 id_prefix = "com.bawdo"
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

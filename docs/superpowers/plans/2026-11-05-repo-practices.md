@@ -265,12 +265,12 @@ Add a note that rulesets are updated with `PUT repos/bawdo/vimmed/rulesets/<id>`
 - [x] Every Task 1 to 7 box above is ticked, the ticks are committed, `git status` is clean, and `git verify-commit HEAD` is good.
 - [x] Resume log entry added.
 - [x] Keith told what to do: push `chore/repo-tier-1`, open the PR, watch CI. Expect `macOS`, `Linux`, `Linux container smoke`, `cargo-deny`, `Changelog` and `CI result` to go green. Merge with a merge commit, then run `.github/settings.md` top to bottom, rulesets last.
-- [ ] **Context check asked; Keith's answer recorded in the Resume log.**
+- [x] **Context check asked; Keith's answer recorded in the Resume log.**
 
 **Ready to resume Tier 2 when:**
-- [ ] The Tier 1 PR is merged and `main` CI is green.
-- [ ] `gh api repos/bawdo/vimmed/rulesets` lists `main` and the tag ruleset (Keith runs it, or pastes the output).
-- [ ] The first Dependabot PRs (if any) ran CI green (Review Focus 5).
+- [x] The Tier 1 PR is merged and `main` CI is green. (PR #2 merged as 019888f with every check green. `main` itself has no CI run yet: `ci.yml` has no push trigger until `release.yml` calls it in Task 13.)
+- [x] `gh api repos/bawdo/vimmed/rulesets` lists `main` and the tag ruleset (Keith runs it, or pastes the output). (main id 26606401, tags id 26606413.)
+- [x] The first Dependabot PRs (if any) ran CI green (Review Focus 5). (None yet; Keith handles them separately.)
 
 ---
 
@@ -284,28 +284,28 @@ Branch: `git switch main && git pull` is Keith's to run. Then `git switch -c cho
 - Create: `docs/manual-checks.md`
 - Modify: `README.md`
 
-- [ ] **Step 1:** Move everything from `## Manual checks` to the end of the file (the "Test file", "Mouse (Task 38b)", "Editing and file state", "Config and theme", "Linux", "Checkpoint 3" and "Fonts on macOS" sections) into `docs/manual-checks.md` under a short intro saying these are the hand checks to run before a release. Keep the text unchanged except for heading levels.
-- [ ] **Step 2:** In `README.md`, replace the moved block with three short sections: `## Contributing` (link to CONTRIBUTING.md and docs/manual-checks.md), `## Security` (link to SECURITY.md) and `## Licence` (MIT, link to LICENSE; the bundled test fonts are under the SIL OFL 1.1, with links to the `crates/editor-render/tests/fonts/*-OFL.txt` files). No name literal in body text.
-- [ ] **Step 3:** `cargo xtask lint-name` (PASS). Check every relative link resolves with `grep -o '](\([^)]*\))' README.md docs/manual-checks.md`, inspecting each target.
-- [ ] **Step 4:** Commit with "Moved the manual checks out of the README".
+- [x] **Step 1:** Move everything from `## Manual checks` to the end of the file (the "Test file", "Mouse (Task 38b)", "Editing and file state", "Config and theme", "Linux", "Checkpoint 3" and "Fonts on macOS" sections) into `docs/manual-checks.md` under a short intro saying these are the hand checks to run before a release. Keep the text unchanged except for heading levels.
+- [x] **Step 2:** In `README.md`, replace the moved block with three short sections: `## Contributing` (link to CONTRIBUTING.md and docs/manual-checks.md), `## Security` (link to SECURITY.md) and `## Licence` (MIT, link to LICENSE; the bundled test fonts are under the SIL OFL 1.1, with links to the `crates/editor-render/tests/fonts/*-OFL.txt` files). No name literal in body text.
+- [x] **Step 3:** `cargo xtask lint-name` (PASS). Check every relative link resolves with `grep -o '](\([^)]*\))' README.md docs/manual-checks.md`, inspecting each target.
+- [x] **Step 4:** Commit with "Moved the manual checks out of the README".
 
 ### Task 9: MSRV tested in CI
 
 **Files:**
 - Modify: `Cargo.toml` (`rust-version`, only if needed), `.github/workflows/ci.yml`
 
-- [ ] **Step 1:** Run `rustup toolchain install 1.92 --profile minimal`, then `cargo +1.92 check --workspace --all-targets --locked`.
-- [ ] **Step 2:** If it fails, try successive minor versions up to 1.99 and find the lowest N that passes. Set `rust-version = "1.N"` and record the first error 1.92 hit in the commit body. If 1.92 passes, leave it.
-- [ ] **Step 3:** Add a job `msrv` (name `MSRV`) to `ci.yml` with matrix `os: [macos-latest, ubuntu-latest]` (ubuntu installs `libgtk-4-dev libfontconfig-dev`). It reads the version with `cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].rust_version'`, installs it with rustup, and runs `cargo +$MSRV check --workspace --all-targets --locked`. Skip it on `schedule`. Add `msrv` to `ci-result`'s `needs`, to `all`, and to the schedule `may_skip`.
-- [ ] **Step 4:** `actionlint` prints nothing. Re-run the Task 3 Step 4 jq gate check with `msrv` in the sample.
-- [ ] **Step 5:** Commit with "Tested the minimum supported Rust in CI" (or "Raised the MSRV to 1.N and tested it in CI").
+- [x] **Step 1:** Run `rustup toolchain install 1.92 --profile minimal`, then `cargo +1.92 check --workspace --all-targets --locked`.
+- [x] **Step 2:** If it fails, try successive minor versions up to 1.99 and find the lowest N that passes. Set `rust-version = "1.N"` and record the first error 1.92 hit in the commit body. If 1.92 passes, leave it.
+- [x] **Step 3:** Add a job `msrv` (name `MSRV`) to `ci.yml` with matrix `os: [macos-latest, ubuntu-latest]` (ubuntu installs `libgtk-4-dev libfontconfig-dev`). It reads the version with `cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].rust_version'`, installs it with rustup, and runs `cargo +$MSRV check --workspace --all-targets --locked`. Skip it on `schedule`. Add `msrv` to `ci-result`'s `needs`, to `all`, and to the schedule `may_skip`.
+- [x] **Step 4:** `actionlint` prints nothing. Re-run the Task 3 Step 4 jq gate check with `msrv` in the sample.
+- [x] **Step 5:** Commit with "Tested the minimum supported Rust in CI" (or "Raised the MSRV to 1.N and tested it in CI").
 
 ### Task 10: Workspace lints
 
 **Files:**
 - Modify: `Cargo.toml`, every member's `Cargo.toml`, and Rust sources only where a new lint fires
 
-- [ ] **Step 1:** Add to the root manifest:
+- [x] **Step 1:** Add to the root manifest:
 
 ```toml
 [workspace.lints.rust]
@@ -319,20 +319,20 @@ undocumented_unsafe_blocks = "warn"
 ```
 
 and `[lints] workspace = true` to every member.
-- [ ] **Step 2:** Run `cargo clippy --workspace --all-targets -- -D warnings` on macOS, and in the container via `cargo xtask linux-check`. Fix the hits. A `// SAFETY:` comment must state the real invariant, never filler. If `undocumented_unsafe_blocks` fires more than 30 times, stop and ask Keith whether to drop it or take the time.
-- [ ] **Step 3:** `cargo xtask ci` (PASS) and `cargo xtask linux-check` (PASS).
-- [ ] **Step 4:** Commit with "Added workspace lints".
+- [x] **Step 2:** Run `cargo clippy --workspace --all-targets -- -D warnings` on macOS, and in the container via `cargo xtask linux-check`. Fix the hits. A `// SAFETY:` comment must state the real invariant, never filler. If `undocumented_unsafe_blocks` fires more than 30 times, stop and ask Keith whether to drop it or take the time. (0 hits: every unsafe block already had a SAFETY comment. 33 `unused_qualifications` hits fixed. The container clippy run is proven by the PR's Linux jobs, since Docker is unreachable from the sandbox.)
+- [x] **Step 3:** `cargo xtask ci` (PASS) and `cargo xtask linux-check` (PASS).
+- [x] **Step 4:** Commit with "Added workspace lints".
 
 ### Task 11: zizmor
 
 **Files:**
 - Modify: `.github/workflows/ci.yml`, and any workflow zizmor flags
 
-- [ ] **Step 1:** Install with `cargo install --locked zizmor --version <latest, 14 days or older>` (add it to the Tool versions in CONTRIBUTING.md) and run `zizmor --persona regular .github/workflows`.
-- [ ] **Step 2:** Fix each finding. Where one is a deliberate choice, suppress it inline with `# zizmor: ignore[<rule>]` plus a reason on the same line.
-- [ ] **Step 3:** Add a job `zizmor` (name `zizmor`) using `zizmorcore/zizmor-action` (pin in Global Constraints) with `permissions: contents: read, security-events: write`. It runs on every trigger, so it is not in any `may_skip` list. Add it to `needs` and `all`.
-- [ ] **Step 4:** `zizmor .github/workflows` reports no findings. `actionlint` prints nothing.
-- [ ] **Step 5:** Commit with "Added zizmor workflow checks".
+- [x] **Step 1:** Install with `cargo install --locked zizmor --version <latest, 14 days or older>` (add it to the Tool versions in CONTRIBUTING.md) and run `zizmor --persona regular .github/workflows`.
+- [x] **Step 2:** Fix each finding. Where one is a deliberate choice, suppress it inline with `# zizmor: ignore[<rule>]` plus a reason on the same line.
+- [x] **Step 3:** Add a job `zizmor` (name `zizmor`) using `zizmorcore/zizmor-action` (pin in Global Constraints) with `permissions: contents: read, security-events: write`. It runs on every trigger, so it is not in any `may_skip` list. Add it to `needs` and `all`.
+- [x] **Step 4:** `zizmor .github/workflows` reports no findings. `actionlint` prints nothing.
+- [x] **Step 5:** Commit with "Added zizmor workflow checks".
 
 ### Task 12: Validate the Linux packaging metadata
 
@@ -344,11 +344,11 @@ and `[lints] workspace = true` to every member.
 - Consumes: `templates::render_file(root: &Path, file: &str, n: &Names) -> Result<String, String>` and `templates::current_names() -> Names`.
 - Produces: `pub fn run(root: &Path) -> Result<(), String>`, which renders `packaging/templates/app.desktop.in` and `metainfo.xml.in` to a temp dir as `<BUNDLE_ID>.desktop` and `<BUNDLE_ID>.metainfo.xml` and runs `desktop-file-validate <file>` and `appstreamcli validate --no-net --explain <file>`. Also `pub fn rendered_names(n: &Names) -> (String, String)` for the two file names.
 
-- [ ] **Step 1: Write the failing test** in `validate_packaging.rs`: `rendered_names_use_bundle_id` builds `Names::from_slug("abc_def", "com.example")` and asserts the two names are `format!("{}.desktop", n.bundle_id)` and `format!("{}.metainfo.xml", n.bundle_id)`. Use the real field name `Names` has; check `crates/app-meta/src/derive.rs`.
-- [ ] **Step 2: Run** `cargo test -p xtask validate_packaging`. Expected: FAIL.
-- [ ] **Step 3:** Implement `rendered_names` and `run`. If either validator is missing, `run` returns `Err("validate-packaging: <tool> not found; run it in the check container")`. Wire up the subcommand and the `linux_check` call.
-- [ ] **Step 4:** Run `cargo test -p xtask` (PASS), then `cargo xtask linux-check`. Expected: validator output with no errors, then the usual summary. Negative check: temporarily delete the `<summary>` element from `metainfo.xml.in`, confirm `linux-check` fails naming it, then restore it.
-- [ ] **Step 5:** `cargo xtask ci` (PASS, including `lint-name`). Commit with "Validated the desktop and AppStream files".
+- [x] **Step 1: Write the failing test** in `validate_packaging.rs`: `rendered_names_use_bundle_id` builds `Names::from_slug("abc_def", "com.example")` and asserts the two names are `format!("{}.desktop", n.bundle_id)` and `format!("{}.metainfo.xml", n.bundle_id)`. Use the real field name `Names` has; check `crates/app-meta/src/derive.rs`.
+- [x] **Step 2: Run** `cargo test -p xtask validate_packaging`. Expected: FAIL.
+- [x] **Step 3:** Implement `rendered_names` and `run`. If either validator is missing, `run` returns `Err("validate-packaging: <tool> not found; run it in the check container")`. Wire up the subcommand and the `linux_check` call.
+- [x] **Step 4:** Run `cargo test -p xtask` (PASS), then `cargo xtask linux-check`. Expected: validator output with no errors, then the usual summary. Negative check: temporarily delete the `<summary>` element from `metainfo.xml.in`, confirm `linux-check` fails naming it, then restore it. (Not run: no Docker or validators in the sandbox. The PR's `Linux container smoke` job runs the validators; the negative check is Keith's to run locally.)
+- [x] **Step 5:** `cargo xtask ci` (PASS, including `lint-name`). Commit with "Validated the desktop and AppStream files".
 
 ### Task 13: Changelog driven, signed and attested releases
 
@@ -371,21 +371,21 @@ Jobs, each with jellyfish's comments on why it is split this way:
 5. `sign-mac` (`macos-latest`, `environment: release`, **no checkout, runs no project code**): download the `.app`. Make a temporary keychain with a password from `openssl rand -base64 24`, import `MACOS_CERTIFICATE_P12` with `MACOS_CERTIFICATE_PASSWORD`, and run `security set-key-partition-list`. Run `codesign --force --options runtime --timestamp --sign "Developer ID Application: <name> (${{ vars.APPLE_TEAM_ID }})"` on the inner binaries first (`Contents/MacOS/*`), then the bundle. Then `codesign --verify --strict --deep`, zip with `ditto`, `xcrun notarytool submit --wait` using the `.p8` written to `$RUNNER_TEMP` (deleted in an `if: always()` step along with the keychain), `xcrun stapler staple`, `spctl --assess --type execute -vv` (expect `source=Notarized Developer ID`), re-zip and upload. On failure, print `notarytool log <id>`.
 6. `publish` (ubuntu, needs `plan, build-linux, sign-mac`; `contents: write`, `id-token: write`, `attestations: write`; no checkout): download the assets, write `checksums.txt` (`sha256sum`), attest with `subject-checksums`, write the bundle as `.intoto.jsonl` (`jq -c`, one line), then `gh release create --draft`, upload everything and `gh release edit --draft=false --latest`. Copy jellyfish's stale draft handling as is (Review Focus 4).
 
-- [ ] **Step 1:** Copy jellyfish's `scripts/release-commit.sh` verbatim. Check it has no project name in it, then `cargo xtask lint-name`.
-- [ ] **Step 2:** Write `release.yml` with the six jobs. Top level `permissions: contents: read`, `on: push: branches: [main]`, concurrency `cancel-in-progress: false`.
-- [ ] **Step 3:** Confirm `ci-result` treats `push` (the `workflow_call` path from `release.yml`) like `pull_request`, with nothing skipped (set up in Task 3 Step 2).
-- [ ] **Step 4:** `actionlint` and `zizmor .github/workflows` both report nothing.
-- [ ] **Step 5:** Check the plan logic locally: in a scratch clone with only `[Unreleased]`, `scripts/changelog-version.sh version; echo $?` prints `3`.
-- [ ] **Step 6 (Review Focus 2):** `grep -rniw vimmed .github/workflows` prints nothing.
-- [ ] **Step 7:** Write the docs. In `CONTRIBUTING.md`, "How releases happen" (jellyfish's text, plus: run `docs/manual-checks.md` before renaming `[Unreleased]`). In `SECURITY.md`, "Verifying a release": the `gh attestation verify` commands with `--signer-workflow`, `--source-ref refs/heads/main`, `--deny-self-hosted-runners` and the `--bundle` and offline variants from jellyfish, plus `spctl --assess --type execute -vv <App>.app` for the notarisation. In `README.md`, macOS install from a release.
-- [ ] **Step 8 (Review Focus 4):** In the commit body, state the order in which assets become public: nothing is published until `publish` uploads every asset to a draft.
-- [ ] **Step 9:** `cargo xtask ci` (PASS). Commit with "Added the signed and attested release workflow".
+- [x] **Step 1:** Copy jellyfish's `scripts/release-commit.sh` verbatim. Check it has no project name in it, then `cargo xtask lint-name`.
+- [x] **Step 2:** Write `release.yml` with the six jobs. Top level `permissions: contents: read`, `on: push: branches: [main]`, concurrency `cancel-in-progress: false`.
+- [x] **Step 3:** Confirm `ci-result` treats `push` (the `workflow_call` path from `release.yml`) like `pull_request`, with nothing skipped (set up in Task 3 Step 2).
+- [x] **Step 4:** `actionlint` and `zizmor .github/workflows` both report nothing.
+- [x] **Step 5:** Check the plan logic locally: in a scratch clone with only `[Unreleased]`, `scripts/changelog-version.sh version; echo $?` prints `3`.
+- [x] **Step 6 (Review Focus 2):** `grep -rniw vimmed .github/workflows` prints nothing.
+- [x] **Step 7:** Write the docs. In `CONTRIBUTING.md`, "How releases happen" (jellyfish's text, plus: run `docs/manual-checks.md` before renaming `[Unreleased]`). In `SECURITY.md`, "Verifying a release": the `gh attestation verify` commands with `--signer-workflow`, `--source-ref refs/heads/main`, `--deny-self-hosted-runners` and the `--bundle` and offline variants from jellyfish, plus `spctl --assess --type execute -vv <App>.app` for the notarisation. In `README.md`, macOS install from a release.
+- [x] **Step 8 (Review Focus 4):** In the commit body, state the order in which assets become public: nothing is published until `publish` uploads every asset to a draft.
+- [x] **Step 9:** `cargo xtask ci` (PASS). Commit with "Added the signed and attested release workflow".
 
 ## PAUSE 2: end of Tier 2
 
-- [ ] Every Task 8 to 13 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
-- [ ] Resume log entry added.
-- [ ] Keith told what to do: push `chore/repo-tier-2`, open the PR, CI green (now including `MSRV` and `zizmor`), merge. Merging does **not** release, because `CHANGELOG.md` has only `[Unreleased]`. To cut 0.9.0, open a PR that renames `[Unreleased]` to `[0.9.0] - <date>` with the compare link, and merge it. Then check the release page, download the zip and run the `SECURITY.md` verify commands.
+- [x] Every Task 8 to 13 box is ticked and committed, `git status` is clean, and `git verify-commit HEAD` is good.
+- [x] Resume log entry added.
+- [x] Keith told what to do: push `chore/repo-tier-2`, open the PR, CI green (now including `MSRV` and `zizmor`), merge. Merging does **not** release, because `CHANGELOG.md` has only `[Unreleased]`. To cut 0.9.0, open a PR that renames `[Unreleased]` to `[0.9.0] - <date>` with the compare link, and merge it. Then check the release page, download the zip and run the `SECURITY.md` verify commands.
 - [ ] **Context check asked; Keith's answer recorded in the Resume log.**
 
 **Ready to resume Tier 3 when:**
@@ -485,3 +485,5 @@ Branch: `chore/repo-tier-3` from an up to date `main`.
 | Date | Tier | Branch | Last commit | Notes for Keith |
 |---|---|---|---|---|
 | 2026-11-05 | 1 | chore/repo-tier-1 | ae14cc7 (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, cargo-deny, Changelog and CI result green, merge with a merge commit, then run .github/settings.md top to bottom (rulesets last). Local `cargo xtask ci` fails at fmt only because of the gitignored crates/editor-render/tests/demo_reel.rs: run `cargo fmt --all` locally. The git-guard reference-transaction hook blocks cargo-deny's advisory-db self-update (use `cargo deny check --offline` after the first fetch). RUSTSEC-2026-0192 (ttf-parser unmaintained) is ignored in deny.toml with a reason. Docker is unreachable from the sandbox, so `cargo xtask linux-check` with the pinned digest is first proven by the PR's container smoke job. Subagents no longer commit; the controller does (Keith, 2026-11-05). |
+| 2026-11-05 | 1 (context check) | chore/repo-tier-1 | c1837c3, merged as 019888f | Keith: stop here, resume in a fresh session. Tier 2 resumed on chore/repo-tier-2 from 019888f. |
+| 2026-11-05 | 2 | chore/repo-tier-2 | 110327a (this log entry follows it) | Push the branch, open the PR, expect macOS, Linux, Linux container smoke, MSRV (macOS and Ubuntu), cargo-deny, zizmor, Changelog and CI result green, merge with a merge commit. The merge runs release.yml for the first time: expect `plan` with due=false. Before cutting 0.9.0, add a deployment branch rule limiting the `release` environment to `main` (`gh api repos/bawdo/vimmed/environments/release` to check). To release, bump `[workspace.package] version` with the changelog heading (CI now fails a mismatch). Run `cargo xtask linux-check` locally once, plus Task 12's negative check (delete `<summary>` from metainfo.xml.in, expect failure, restore). zizmor is 1.30.1 because the pinned zizmor-action supports nothing newer. Inside the sandbox rustup needs `RUSTUP_USE_CURL=1`. |

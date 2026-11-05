@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn underline_draws_a_solid_line_below_the_baseline() {
-        let fonts = crate::fonts::FontSet::load(&crate::fonts::FontPaths {
+        let fonts = FontSet::load(&crate::fonts::FontPaths {
             sans: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fonts/NotoSans-Regular.ttf"),
             mono: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

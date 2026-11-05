@@ -244,7 +244,7 @@ mod tests {
         let state = StateDir::at(tmp.path());
         let mut s = RegisterStore::new(&state);
         s.set('a', Register::lines("say \"hi\"\n")).unwrap();
-        let text = std::fs::read_to_string(state.root().join("registers.toml")).unwrap();
+        let text = fs::read_to_string(state.root().join("registers.toml")).unwrap();
         let table: toml::Table = text.parse().unwrap();
         let a = table["a"].as_table().unwrap();
         assert_eq!(a["text"].as_str(), Some("say \"hi\"\n"));
@@ -310,12 +310,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = StateDir::at(tmp.path());
         let file = state.root().join("registers.toml");
-        std::fs::write(&file, "[a\ntext = ").unwrap();
+        fs::write(&file, "[a\ntext = ").unwrap();
         let (mut e, host) = ed_with_state("x", &state);
         host.state().now = 1_000;
         let fx = keys(&mut e, "\"ap");
         assert_eq!(e.text(), "x");
-        assert_eq!(std::fs::read_to_string(bad(&state)).unwrap(), "[a\ntext = ");
+        assert_eq!(fs::read_to_string(bad(&state)).unwrap(), "[a\ntext = ");
         assert!(!file.exists());
         assert_eq!(e.message(), Some(strings::NAMED_REGISTERS_RESET));
         assert_eq!(
@@ -341,7 +341,7 @@ mod tests {
     fn a_wrongly_shaped_file_is_set_aside_too() {
         let tmp = tempfile::tempdir().unwrap();
         let state = StateDir::at(tmp.path());
-        std::fs::write(state.root().join("registers.toml"), "[a]\ntext = 3\n").unwrap();
+        fs::write(state.root().join("registers.toml"), "[a]\ntext = 3\n").unwrap();
         let mut s = RegisterStore::new(&state);
         assert_eq!(s.get('a'), None);
         assert!(s.take_reset());
@@ -353,7 +353,7 @@ mod tests {
     fn a_write_over_a_corrupt_file_sets_it_aside() {
         let tmp = tempfile::tempdir().unwrap();
         let state = StateDir::at(tmp.path());
-        std::fs::write(state.root().join("registers.toml"), "not toml [").unwrap();
+        fs::write(state.root().join("registers.toml"), "not toml [").unwrap();
         let mut s = RegisterStore::new(&state);
         s.set('c', Register::chars("ok")).unwrap();
         assert!(s.take_reset());
