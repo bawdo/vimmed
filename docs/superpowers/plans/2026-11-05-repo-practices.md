@@ -150,12 +150,12 @@ Jobs (`name:` in brackets, which is what the ruleset and the gate see):
 | `changelog` | `Changelog` | `ubuntu-latest` | `fetch-depth: 0`, `bash scripts/changelog-version-test.sh`, `scripts/changelog-version.sh check` (scripts from Task 5) |
 | `ci-result` | `CI result` | `ubuntu-latest` | `if: always()`, a gate over every job above |
 
-- [ ] **Step 1:** Write `ci.yml` with the table's jobs. The schedule trigger runs only `deny` (advisories change while code doesn't), so every other job has `if: github.event_name != 'schedule'`. Concurrency: copy jellyfish's group expression with the `ci-` literal prefix and its comment about `workflow_call` deadlocks.
-- [ ] **Step 2:** Write `ci-result` by adapting jellyfish's script (`.github/workflows/ci.yml`, job `ci-result`). Use `may_skip` of `[]` for `pull_request`, `push` and `workflow_dispatch`, and of `["macos","linux","linux-smoke","changelog"]` for `schedule`. Keep the `all` list mirroring `needs`.
-- [ ] **Step 3:** Install with `brew install actionlint` (or `go install`) and run `actionlint .github/workflows/ci.yml`. Expected: no output.
-- [ ] **Step 4:** Check the gate logic by hand. Running `jq` on a sample `NEEDS` JSON where `deny` is `failure` must print `deny: failure`. A sample with every job `success` must print nothing. Paste the two runs into the task report.
-- [ ] **Step 5 (Review Focus 3):** `grep -n 'secrets\.' .github/workflows/ci.yml` lists only the `workflow_call` declaration (and later Task 17's Codecov step).
-- [ ] **Step 6:** Commit `.github/workflows/ci.yml` with "Added the CI workflow". Real verification is the first PR run at Pause 1.
+- [x] **Step 1:** Write `ci.yml` with the table's jobs. The schedule trigger runs only `deny` (advisories change while code doesn't), so every other job has `if: github.event_name != 'schedule'`. Concurrency: copy jellyfish's group expression with the `ci-` literal prefix and its comment about `workflow_call` deadlocks.
+- [x] **Step 2:** Write `ci-result` by adapting jellyfish's script (`.github/workflows/ci.yml`, job `ci-result`). Use `may_skip` of `[]` for `pull_request`, `push` and `workflow_dispatch`, and of `["macos","linux","linux-smoke","changelog"]` for `schedule`. Keep the `all` list mirroring `needs`.
+- [x] **Step 3:** Install with `brew install actionlint` (or `go install`) and run `actionlint .github/workflows/ci.yml`. Expected: no output.
+- [x] **Step 4:** Check the gate logic by hand. Running `jq` on a sample `NEEDS` JSON where `deny` is `failure` must print `deny: failure`. A sample with every job `success` must print nothing. Paste the two runs into the task report.
+- [x] **Step 5 (Review Focus 3):** `grep -n 'secrets\.' .github/workflows/ci.yml` lists only the `workflow_call` declaration (and later Task 17's Codecov step).
+- [x] **Step 6:** Commit `.github/workflows/ci.yml` with "Added the CI workflow". Real verification is the first PR run at Pause 1.
 
 ### Task 4: Dependabot and a pinned container base
 

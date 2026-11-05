@@ -5,7 +5,7 @@
 # workspace is mounted at /work and the cargo registry and target directory
 # live on a named volume, so this image holds only the toolchain, the
 # packagers and system packages.
-FROM rust:1-trixie
+FROM rust:1-trixie@sha256:4c4c8ec55be09785e6d6ac45ea9853525a73c15db74009100ac08952e773dfb8
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
