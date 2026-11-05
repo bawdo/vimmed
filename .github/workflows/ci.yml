@@ -129,6 +129,49 @@ jobs:
       - name: Check the newest CHANGELOG.md version is releasable
         run: scripts/changelog-version.sh check
 
+  # Checks the workspace on the oldest Rust the manifest promises
+  # (rust-version in Cargo.toml), so that promise is tested and not just
+  # written down. It reads the version from the manifest, so there is no
+  # second copy to keep in step. Both platforms, as each builds its own shell.
+  msrv:
+    name: MSRV
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libfontconfig-dev
+
+      - name: Read the MSRV from Cargo.toml
+        run: |
+          msrv=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].rust_version')
+          if [ -z "$msrv" ] || [ "$msrv" = null ]; then
+            echo "rust-version is not set in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+
+      - name: Install the MSRV toolchain
+        run: rustup toolchain install "$MSRV" --profile minimal
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Check the workspace on the MSRV
+        run: cargo "+$MSRV" check --workspace --all-targets --locked
+
   # One stable check name for the main ruleset to require, so adding or
   # renaming a job above does not mean editing the ruleset as well.
   #
@@ -137,7 +180,7 @@ jobs:
   #   workflow_dispatch: none
   #   pull_request: none
   #   push (a caller via workflow_call): none
-  #   schedule: macos, linux, linux-smoke and changelog (only deny runs)
+  #   schedule: macos, linux, linux-smoke, msrv and changelog (only deny runs)
   # Any other event expects every job. A failed or cancelled job always
   # fails the gate, and so does a skip that the event does not allow, so a
   # job left out by a bad if: condition cannot pass unnoticed. A job added
@@ -146,7 +189,7 @@ jobs:
   ci-result:
     name: CI result
     if: always()
-    needs: [macos, linux, linux-smoke, deny, changelog]
+    needs: [macos, linux, linux-smoke, msrv, deny, changelog]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -158,11 +201,11 @@ jobs:
           set -euo pipefail
           case "$EVENT" in
             pull_request|push|workflow_dispatch) may_skip='[]' ;;
-            schedule) may_skip='["macos","linux","linux-smoke","changelog"]' ;;
+            schedule) may_skip='["macos","linux","linux-smoke","msrv","changelog"]' ;;
             *)        may_skip='[]' ;;
           esac
           # Mirrors needs above, so a job missing from the results fails too.
-          all='["macos","linux","linux-smoke","deny","changelog"]'
+          all='["macos","linux","linux-smoke","msrv","deny","changelog"]'
           echo "Event: $EVENT (may skip: $may_skip)"
           jq -r 'to_entries[] | "  \(.key): \(.value.result)"' <<<"$NEEDS"
           bad=$(jq -r --argjson all "$all" --argjson skip "$may_skip" '
