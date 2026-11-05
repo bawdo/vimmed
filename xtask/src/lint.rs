@@ -1,4 +1,6 @@
 //! `lint-name`: the project name may appear in one place only, the root manifest.
+//! The root `README.md` may also carry it in its title and in link reference
+//! definitions inside a `name-lint:allow` block (the badge URLs).
 
 use app_meta::derive::Names;
 use std::path::Path;
@@ -73,8 +75,82 @@ pub fn is_allowed_hit(line: &str, forms: &[String]) -> bool {
     false
 }
 
+/// Markers around the root `README.md` block of link reference definitions
+/// (badge and link URLs) that may carry the name.
+const ALLOW_START: &str = "<!-- name-lint:allow:start -->";
+const ALLOW_END: &str = "<!-- name-lint:allow:end -->";
+
+/// The 1-based, inclusive line ranges between each pair of allow markers.
+/// A marker out of order or left unclosed is an error, so a broken block
+/// can never exempt more than it shows.
+pub fn readme_allow_ranges(text: &str) -> Result<Vec<(usize, usize)>, String> {
+    let mut ranges = Vec::new();
+    let mut open: Option<usize> = None;
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
+        match (line.trim(), open) {
+            (ALLOW_START, None) => open = Some(n),
+            (ALLOW_START, Some(at)) => {
+                return Err(format!(
+                    "README.md:{n}: allow block opened again (opened at line {at})"
+                ));
+            }
+            (ALLOW_END, Some(at)) => {
+                ranges.push((at + 1, n - 1));
+                open = None;
+            }
+            (ALLOW_END, None) => {
+                return Err(format!(
+                    "README.md:{n}: allow block closed but never opened"
+                ));
+            }
+            _ => {}
+        }
+    }
+    match open {
+        Some(at) => Err(format!("README.md:{at}: allow block never closed")),
+        None => Ok(ranges),
+    }
+}
+
+/// A Markdown link reference definition and nothing else: `[id]: url`, at
+/// the start of the line, with a non-empty id and a single URL token.
+pub fn is_link_definition(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('[') else {
+        return false;
+    };
+    let Some((id, url)) = rest.split_once("]: ") else {
+        return false;
+    };
+    !id.is_empty()
+        && !id.contains(['[', ']'])
+        && !url.is_empty()
+        && !url.contains(char::is_whitespace)
+}
+
+/// A `git grep -n` line from the root `README.md` that is a link reference
+/// definition inside an allow block.
+pub fn is_allowed_block_hit(line: &str, ranges: &[(usize, usize)]) -> bool {
+    let Some(rest) = line.strip_prefix("README.md:") else {
+        return false;
+    };
+    let Some((lineno, text)) = rest.split_once(':') else {
+        return false;
+    };
+    let Ok(n) = lineno.parse::<usize>() else {
+        return false;
+    };
+    ranges.iter().any(|&(a, b)| (a..=b).contains(&n)) && is_link_definition(text.trim_end())
+}
+
 pub fn run(root: &Path, names: &Names) -> Result<(), String> {
     let forms = name_forms(names);
+    let readme = match std::fs::read_to_string(root.join("README.md")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read README.md: {e}")),
+    };
+    let ranges = readme_allow_ranges(&readme)?;
     let mut cmd = Command::new("git");
     cmd.current_dir(root).args(["grep", "-I", "-i", "-n", "-F"]);
     for f in &forms {
@@ -94,7 +170,7 @@ pub fn run(root: &Path, names: &Names) -> Result<(), String> {
     let text = String::from_utf8_lossy(&out.stdout);
     let bad: Vec<&str> = text
         .lines()
-        .filter(|l| !is_allowed_hit(l, &forms))
+        .filter(|l| !is_allowed_hit(l, &forms) && !is_allowed_block_hit(l, &ranges))
         .collect();
     if bad.is_empty() {
         println!("lint-name: OK");
@@ -104,7 +180,7 @@ pub fn run(root: &Path, names: &Names) -> Result<(), String> {
             eprintln!("{l}");
         }
         Err(format!(
-            "lint-name: {} hit(s) outside the root manifest and README title",
+            "lint-name: {} hit(s) outside the root manifest, README title and README allow block",
             bad.len()
         ))
     }
@@ -163,6 +239,86 @@ mod tests {
         ));
         assert!(!is_allowed_hit(
             "Cargo.toml:14:homepage = \"https://github.com/x/abc_def\"",
+            &[]
+        ));
+    }
+
+    const BLOCK: &str = "# abc_def\n\
+        \n\
+        [![CI][ci-badge]][ci]\n\
+        \n\
+        <!-- name-lint:allow:start -->\n\
+        [ci-badge]: https://example.com/abc_def/badge.svg\n\
+        [ci]: https://example.com/abc_def\n\
+        <!-- name-lint:allow:end -->\n";
+
+    #[test]
+    fn allow_block_covers_the_lines_between_the_markers() {
+        assert_eq!(readme_allow_ranges(BLOCK), Ok(vec![(6, 7)]));
+        assert_eq!(readme_allow_ranges("# abc_def\n"), Ok(vec![]));
+    }
+
+    #[test]
+    fn allow_block_markers_must_pair() {
+        let unclosed = "<!-- name-lint:allow:start -->\n[a]: https://x/abc_def\n";
+        assert!(readme_allow_ranges(unclosed).is_err());
+        let stray_end = "<!-- name-lint:allow:end -->\n";
+        assert!(readme_allow_ranges(stray_end).is_err());
+        let nested = "<!-- name-lint:allow:start -->\n<!-- name-lint:allow:start -->\n";
+        assert!(readme_allow_ranges(nested).is_err());
+    }
+
+    #[test]
+    fn link_definition_shape() {
+        assert!(is_link_definition(
+            "[ci-badge]: https://example.com/abc_def/badge.svg"
+        ));
+        assert!(is_link_definition("[ci]: https://example.com/abc_def"));
+        assert!(!is_link_definition(
+            "Install abc_def from [ci]: https://example.com"
+        ));
+        assert!(!is_link_definition(
+            "[ci]: https://example.com/abc_def and more"
+        ));
+        assert!(!is_link_definition("[]: https://example.com/abc_def"));
+        assert!(!is_link_definition("[ci]:https://example.com/abc_def"));
+        assert!(!is_link_definition(" [ci]: https://example.com/abc_def"));
+    }
+
+    #[test]
+    fn link_definitions_inside_the_block_are_allowed() {
+        let ranges = readme_allow_ranges(BLOCK).unwrap();
+        assert!(is_allowed_block_hit(
+            "README.md:6:[ci-badge]: https://example.com/abc_def/badge.svg",
+            &ranges
+        ));
+        assert!(is_allowed_block_hit(
+            "README.md:7:[ci]: https://example.com/abc_def",
+            &ranges
+        ));
+    }
+
+    #[test]
+    fn block_hits_outside_the_block_or_not_definitions_fail() {
+        let ranges = vec![(6, 7)];
+        // A definition outside the block.
+        assert!(!is_allowed_block_hit(
+            "README.md:9:[ci]: https://example.com/abc_def",
+            &ranges
+        ));
+        // Prose inside the block.
+        assert!(!is_allowed_block_hit(
+            "README.md:6:Install abc_def",
+            &ranges
+        ));
+        // Another file with the same line numbers.
+        assert!(!is_allowed_block_hit(
+            "docs/README.md:6:[ci]: https://example.com/abc_def",
+            &ranges
+        ));
+        // No block at all.
+        assert!(!is_allowed_block_hit(
+            "README.md:6:[ci]: https://example.com/abc_def",
             &[]
         ));
     }
