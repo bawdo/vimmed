@@ -8,6 +8,9 @@ repository.workspace = true
 publish = false
 description = "Head-to-head text layout benchmark (cosmic-text against parley); not shipped"
 
+[lints]
+workspace = true
+
 [dependencies]
 cosmic-text = "0.19"
 parley = "0.12"

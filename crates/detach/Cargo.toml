@@ -8,5 +8,8 @@ repository.workspace = true
 publish = false
 
 # libc only: the launcher links this, and the launcher links nothing else.
+[lints]
+workspace = true
+
 [dependencies]
 libc = "0.2"

@@ -64,12 +64,12 @@ fn image_doc(dir: &Path) -> String {
 }
 
 /// The image lines when the first image is on line `first`.
-fn image_lines(first: usize) -> std::ops::Range<usize> {
+fn image_lines(first: usize) -> Range<usize> {
     first..first + IMAGES
 }
 
 /// Polls the workers until every image line holds its resampled copy.
-fn settle(v: &mut DocView, lines: std::ops::Range<usize>) {
+fn settle(v: &mut DocView, lines: Range<usize>) {
     let start = Instant::now();
     while !lines.clone().all(|i| v.has_scaled_image(i)) {
         assert!(
@@ -94,7 +94,7 @@ fn images_on_screen(dir: &TempDir, t: &Tokens) -> (Editor, DocView) {
 
 /// Every image line in `lines` kept its copy through the last paint (checked
 /// before any poll could hand one over) and no resample was asked for.
-fn assert_kept(v: &DocView, lines: std::ops::Range<usize>, what: &str) {
+fn assert_kept(v: &DocView, lines: Range<usize>, what: &str) {
     for i in lines {
         assert!(v.has_scaled_image(i), "{what}: line {i} lost its copy");
     }

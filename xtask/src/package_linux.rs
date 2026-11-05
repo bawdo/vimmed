@@ -448,7 +448,7 @@ mod tests {
         assert!(text.starts_with("MIT License\n"));
         assert!(text.contains("Copyright (c) 2026 Keith Bawden"));
         assert!(text.contains("THE SOFTWARE IS PROVIDED \"AS IS\""));
-        let n = crate::templates::current_names();
+        let n = templates::current_names();
         assert!(crate::lint::find_forms(text.as_bytes(), &crate::lint::name_forms(&n)).is_empty());
     }
 

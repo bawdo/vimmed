@@ -8,5 +8,8 @@ repository.workspace = true
 publish = false
 build = "build.rs"
 
+[lints]
+workspace = true
+
 [build-dependencies]
 toml = "0.8"

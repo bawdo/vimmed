@@ -441,18 +441,9 @@ mod tests {
         assert_eq!(lines(&buf), ["```bash", "", "```"]);
         assert_eq!(c, pos(1, 0));
         let blocks = Blocks::new(&buf);
-        assert!(matches!(
-            blocks.kind(0),
-            crate::markdown::LineKind::FenceOpen { .. }
-        ));
-        assert!(matches!(
-            blocks.kind(1),
-            crate::markdown::LineKind::Code { .. }
-        ));
-        assert!(matches!(
-            blocks.kind(2),
-            crate::markdown::LineKind::FenceClose { .. }
-        ));
+        assert!(matches!(blocks.kind(0), LineKind::FenceOpen { .. }));
+        assert!(matches!(blocks.kind(1), LineKind::Code { .. }));
+        assert!(matches!(blocks.kind(2), LineKind::FenceClose { .. }));
     }
 
     #[test]
@@ -480,10 +471,7 @@ mod tests {
         assert_eq!(lines(&buf), ["```bash", "", "```", "- item 1", "- item 2"]);
         assert_eq!(c, pos(1, 0));
         let blocks = Blocks::new(&buf);
-        assert!(matches!(
-            blocks.kind(3),
-            crate::markdown::LineKind::ListItem { .. }
-        ));
+        assert!(matches!(blocks.kind(3), LineKind::ListItem { .. }));
     }
 
     // indentLine (document_controller_test.dart)

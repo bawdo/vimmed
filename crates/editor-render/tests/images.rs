@@ -217,12 +217,12 @@ fn scrolled_off_images_release_their_pixmaps_and_keep_heights() {
     assert!(v.has_scaled_image(1), "on screen and decoded");
     let height = v.line_height_px(1).unwrap();
 
-    assert!(v.scroll_to_cursor(editor_core::buffer::Pos { line: 190, col: 0 }));
+    assert!(v.scroll_to_cursor(Pos { line: 190, col: 0 }));
     v.paint_all(&src);
     assert!(!v.has_scaled_image(1), "off screen holds no resampled copy");
     assert_eq!(v.line_height_px(1), Some(height), "measured height kept");
 
-    assert!(v.scroll_to_cursor(editor_core::buffer::Pos { line: 0, col: 0 }));
+    assert!(v.scroll_to_cursor(Pos { line: 0, col: 0 }));
     v.paint_all(&src);
     assert!(
         v.has_scaled_image(1),
