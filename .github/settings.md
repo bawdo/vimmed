@@ -30,10 +30,10 @@ Vulnerability alerts feed Dependabot security updates.
 gh api -X PUT repos/bawdo/vimmed/vulnerability-alerts
 ```
 
-CodeQL default setup turns on code scanning without a workflow file.
+Code scanning runs from `.github/workflows/codeql.yml` (CodeQL advanced setup), so leave CodeQL default setup off: while it is on, GitHub rejects the results the workflow uploads. Check it reads `not-configured`.
 
 ```sh
-gh api -X PATCH repos/bawdo/vimmed/code-scanning/default-setup -f state=configured
+gh api repos/bawdo/vimmed/code-scanning/default-setup --jq .state
 ```
 
 Rulesets go last. The "CI result" required check must already exist on main, so run these only after the Tier 1 PR has merged.
