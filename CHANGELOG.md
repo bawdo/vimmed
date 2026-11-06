@@ -24,7 +24,6 @@ All notable changes to vimmed are documented here. The format follows
 
 - Keys at the end of a long line (moving, typing, `j` and `k` between long lines) no longer take time in proportion to the line's length: about 1 to 10 µs a key on a 64 KiB line, down from 230 to 1,250 µs.
 - Moving inside a big code block, and typing inside a cell of a big table, no longer take time in proportion to the block's size: under 1 µs a key in a 200,000-line code block (was 174) and about 1 µs in a 100,000-row table (was about 10 ms).
-
 - Moving by grapheme (`h`, `l`, `b`, `w` and friends) on a long line no longer takes time proportional to the square of the line length.
 - `:s` with a line break in the replacement puts later replacements in the right place, with or without `c`, and leaves the cursor where vim does.
 - `:s` no longer drops a stray carriage return that sits next to a line break it inserts.
