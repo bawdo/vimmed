@@ -1,0 +1,3 @@
+mpath = "/fuzz.md"
+pid = 1
+written_at_ns = 42

@@ -16,8 +16,9 @@ rustup toolchain install nightly-2026-10-23 --profile minimal --component llvm-t
 cargo install cargo-fuzz --locked
 ```
 
-The ClusterFuzzLite image installs the same nightly (`.clusterfuzzlite/Dockerfile`), so
-the two dates move together and are bumped by hand.
+The same nightly is named in three places: the ClusterFuzzLite image
+(`.clusterfuzzlite/Dockerfile`), `fuzz/rust-toolchain.toml` and this README.
+They move together and are bumped by hand.
 
 Run everything below from `fuzz/`. `rustup` picks the pinned nightly there.
 
@@ -25,15 +26,13 @@ Run everything below from `fuzz/`. `rustup` picks the pinned nightly there.
 
 ```sh
 cd fuzz
-cargo fuzz run <target> corpus/<target> -- -max_len=<N> -timeout=10
+cargo fuzz run <target> "$TMPDIR/corpus-<target>" corpus/<target> -- -max_len=<N> -timeout=10
 ```
 
-Add `-max_total_time=60` for a short run. To keep the committed seeds clean,
-give libFuzzer a scratch directory first, so new inputs land there:
-
-```sh
-cargo fuzz run <target> "$TMPDIR/corpus-<target>" corpus/<target> -- -max_total_time=60 -max_len=<N> -timeout=10
-```
+libFuzzer writes every new input it finds into the first corpus directory it
+is given, so always put a scratch directory first: naming `corpus/<target>`
+first fills the committed seeds with generated inputs. Add
+`-max_total_time=60` for a short run.
 
 | Target                 | `-max_len` |
 | ---------------------- | ---------- |
@@ -55,42 +54,54 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   UTF-8 is ignored, as `Config::load` falls back to the defaults for it.
 - `state_files`: the first byte picks a parser. `r` is the registers file (the
   rest is its bytes), `m` is recovery metadata (the rest, decoded lossily).
-  Anything else, or empty input, is ignored.
+  Anything else, or empty input, is ignored. Registers that parse must
+  survive being serialised and parsed again unchanged.
 - `ex_command`: `cmd 0x00 text 0x00 tail`. `cmd` is the ex command (`:s` and
   friends), `text` is the buffer, and a missing part is empty. `tail[0..4]` are
   `cursor, vflag, v0, v1` (zero when missing): the cursor line wraps onto the
   buffer, and when `vflag & 1` is set the last Visual selection is
-  `(v0 % n, v1 % n)`. `tail[4..]` are confirm answers, one key each.
+  `(v0 % n, v1 % n)`. `tail[4..]` are confirm answers, one key each. Only a
+  `:s` substitute goes past parsing: any other command returns straight after
+  `ex::parse`.
 - `markdown_incremental`: the initial text up to the first `0x00`, then edit
   records. A record is six bytes `[flags, l0, c0, l1, c1, len]` followed by
   `len` bytes of replacement text. A truncated record ends the sequence.
   Positions wrap onto the buffer and snap down to a char boundary. When
   `flags & 0x0f` is zero the incremental update is handed an edited range that
   cannot fit and must fall back to a full rebuild. The high nibble of `flags`
-  places the cursor for cursor-relative reveal.
+  places the cursor for cursor-relative reveal. At most 256 edit records are
+  applied, and the run also ends once the harness's own checking passes a
+  per-run budget (`ORACLE_BUDGET`), so the timeout reflects the product, not
+  the oracle.
 - `editor_keys`: `text SEP keys`, where `SEP` is the first `0x00` (Mac) or
   `0x01` (Linux) and sets the platform. With neither, all of it is keys on an
   empty text, on the Mac. A leading `R` in the keys opens the document in
   reader mode and is not pressed. The keys use the tests' `<Esc>` notation
   (`keyseq::parse_keys`). The editor has no saver and no state directory, so
-  `:w`, `:e!` and closing touch no file.
+  `:w`, `:e!` and closing touch no file. After every key the cursor must sit
+  on a char boundary of the buffer, and a key that closes the window ends the
+  run.
 
   Limitation: a run stops, without failing, once the cursor line is longer
   than 2048 bytes. The editor's cost per key grows with the length of the
   cursor line, and a counted put builds a huge line from a tiny input, so
   such a run hits the timeout. That is a known performance limitation, not a
-  crash; see the long-line performance issue. The cap bounds the work a run
-  can create, as the input cap does. A run also stops once the buffer passes
-  65,536 lines, because yank and put double a document within a few keys. The input
+  crash; see the long-line performance issue (link to be added once it is
+  filed). Like `-max_len`, the cap bounds the work one run can create. A run
+  also stops once the buffer passes 65,536 lines, because yank and put double
+  a document within a few keys.
+
   `fuzz/known/editor_keys/long_line_per_key_cost` is kept as the reference
-  input for that work.
+  input for the line-index work. It only reproduces the slowdown once the
+  2 KiB guard is raised or removed, which that work must do.
 
 ## Replay under `cargo test`
 
 `editor-core` replays `fuzz/corpus/`, `fuzz/regressions/` and `fuzz/known/`
 under plain `cargo test` on stable, so it runs in the normal CI with no
-nightly. Every subdirectory of those three must name a target, so keep stray
-files and directories out of `fuzz/corpus/`.
+nightly. Every subdirectory of those three must name a target, so a stray
+directory fails the test, as does a missing or empty target directory under
+`fuzz/corpus/`. Stray files beside the target directories are skipped.
 
 ## Fuzz-build limits
 
@@ -98,7 +109,9 @@ cargo-fuzz and ClusterFuzzLite build with `cfg(fuzzing)`. Under it vimmed
 lowers its own limits (count ceiling 1,000; put caps 1 MiB and 16,384 lines),
 so runs exercise the same limit-handling code without spending time on huge
 counts. Normal builds and `cargo test` use the real limits, so committed
-regression inputs replay against the product's behaviour.
+regression inputs replay against the product's behaviour. The limits follow
+the rustc `cfg(fuzzing)`, not the `fuzzing` cargo feature: enabling only the
+feature keeps the real limits.
 
 ## When a run finds a crash
 
@@ -107,11 +120,16 @@ libFuzzer writes it to `fuzz/artifacts/<target>/` (untracked).
 
 1. Reproduce: `cargo fuzz run <target> <file>`.
 2. Minimise: `cargo fuzz tmin <target> <file>`.
-3. Fix the bug.
-4. Commit the minimised input as `fuzz/regressions/<target>/<short-description>`
+3. Check the input also reproduces, and terminates quickly, under
+   `cargo test` (copy it into `regressions/<target>/` and run
+   `cargo test -p editor-core replay_corpus_and_regressions`). Fuzz builds
+   use the lowered limits under `cfg(fuzzing)`, while the stable replay uses
+   the real ones, so an input can behave differently in the two.
+4. Fix the bug.
+5. Commit the minimised input as `fuzz/regressions/<target>/<short-description>`
    in the same commit as the fix. A crash input never lands in `regressions/`
    without its fix, or `cargo test` goes red.
-5. If it cannot be fixed straight away, put it in `fuzz/known/<target>/`
+6. If it cannot be fixed straight away, put it in `fuzz/known/<target>/`
    instead and open an issue. `known/` is replayed only by the `#[ignore]`d
    `replay_known` test (`cargo test -- --ignored replay_known`). Move the file
    to `regressions/` when the fix lands.
