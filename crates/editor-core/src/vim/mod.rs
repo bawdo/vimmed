@@ -61,7 +61,7 @@ impl Cursor {
     pub fn at(buf: &Buffer, pos: Pos) -> Cursor {
         Cursor {
             pos,
-            want: Want::Col(grapheme::display_col(buf.line(pos.line), pos.col)),
+            want: Want::Col(buf.display_col(pos)),
         }
     }
 }

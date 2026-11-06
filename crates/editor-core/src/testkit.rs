@@ -18,6 +18,18 @@ use crate::saver::Saver;
 
 pub(crate) use crate::view_model::ViewSource;
 
+/// Held by the tests that build a document at the normal-build budgets
+/// (hundreds of MiB each), so at most one such document exists at a time
+/// while the test threads run in parallel.
+static BIG_DOC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes the big-document lock, recovering it if a failed test poisoned it.
+pub(crate) fn big_doc_lock() -> std::sync::MutexGuard<'static, ()> {
+    BIG_DOC
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// What a `FakeHost` has been asked, shared between its clones so a test
 /// can watch it after the editor owns the host.
 #[derive(Default)]

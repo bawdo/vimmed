@@ -87,7 +87,7 @@ pub fn apply(m: Motion, buf: &Buffer, cur: Cursor, count: usize) -> MotionResult
                 Cursor {
                     pos: Pos {
                         line: target,
-                        col: col_for(buf.line(target), cur.want),
+                        col: col_for(buf, target, cur.want),
                     },
                     want: cur.want,
                 }
@@ -221,13 +221,12 @@ fn line_start(buf: &Buffer, line: usize) -> Pos {
 }
 
 /// The byte column on `line` for `want`, on the last grapheme at most.
-pub fn col_for(line: &str, want: Want) -> usize {
+pub fn col_for(buf: &Buffer, line: usize, want: Want) -> usize {
     match want {
-        Want::End => last_col(line),
-        Want::Col(g) => line
-            .grapheme_indices(true)
-            .nth(g)
-            .map_or_else(|| last_col(line), |(i, _)| i),
+        Want::End => last_col(buf.line(line)),
+        Want::Col(g) => buf
+            .grapheme_start(line, g)
+            .unwrap_or_else(|| last_col(buf.line(line))),
     }
 }
 

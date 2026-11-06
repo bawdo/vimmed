@@ -9,10 +9,12 @@
 //! keeps the last `SHIFT_LOG_LEN` shifts; asking from further back, or with
 //! a mark from another buffer, gives "unknown".
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::colindex::LineCols;
 use crate::grapheme;
 
 /// A position: `line` index and `col` byte offset into that line.
@@ -83,11 +85,17 @@ pub struct Buffer {
     seq: u64,
     /// The last edits' shifts, oldest first, at most `SHIFT_LOG_LEN`.
     shifts: VecDeque<LineShift>,
+    /// Column indexes for up to two lines, `(line, index)`, most recently
+    /// used first. `replace` keeps them true to the text.
+    cols: RefCell<[Option<(usize, LineCols)>; 2]>,
+    /// The sum of the lines' lengths, without line breaks. `replace` keeps
+    /// it true to the text.
+    bytes: usize,
 }
 
 /// A clone is a new buffer: it edits on its own from here, so it takes a
-/// new identity and an empty log, and no mark taken on the original applies
-/// to it.
+/// new identity, an empty log and no column index, and no mark taken on the
+/// original applies to it.
 impl Clone for Buffer {
     fn clone(&self) -> Buffer {
         Buffer::new(
@@ -119,6 +127,7 @@ impl Buffer {
     }
 
     fn new(lines: Vec<String>, eol: Eol, bom: bool, trailing_newline: bool) -> Buffer {
+        let bytes = lines.iter().map(String::len).sum();
         Buffer {
             lines,
             eol,
@@ -127,6 +136,8 @@ impl Buffer {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             seq: 0,
             shifts: VecDeque::new(),
+            cols: RefCell::default(),
+            bytes,
         }
     }
 
@@ -171,9 +182,48 @@ impl Buffer {
         self.lines.get(i).map_or("", String::as_str)
     }
 
+    /// The bytes the lines hold, line breaks not counted.
+    pub fn byte_count(&self) -> usize {
+        self.bytes
+    }
+
     /// The number of lines, at least 1.
     pub fn line_count(&self) -> usize {
         self.lines.len()
+    }
+
+    /// The number of graphemes before `pos.col` on `pos.line`; always equal
+    /// to `grapheme::display_col(self.line(pos.line), pos.col)`.
+    pub fn display_col(&self, pos: Pos) -> usize {
+        self.with_cols(pos.line, |cols, line| cols.display_col(line, pos.col))
+    }
+
+    /// The byte where grapheme `g` (0-based) of `line` starts, or `None` when
+    /// the line has `g` or fewer graphemes.
+    pub fn grapheme_start(&self, line: usize, g: usize) -> Option<usize> {
+        self.with_cols(line, |cols, text| cols.grapheme_start(text, g))
+    }
+
+    /// Runs `f` on the column index for `line`, making it the most recently
+    /// used entry (or, for a line not cached, a fresh entry in place of the
+    /// least recently used one). A line past the end gets a throwaway index.
+    fn with_cols<R>(&self, line: usize, f: impl FnOnce(&mut LineCols, &str) -> R) -> R {
+        let Some(text) = self.lines.get(line) else {
+            return f(&mut LineCols::default(), "");
+        };
+        let mut cols = self.cols.borrow_mut();
+        let found = cols
+            .iter()
+            .position(|e| matches!(e, Some((l, _)) if *l == line));
+        let mut index = found
+            .and_then(|i| cols[i].take())
+            .map_or_else(LineCols::default, |(_, c)| c);
+        let answer = f(&mut index, text);
+        if found != Some(0) {
+            cols[1] = cols[0].take();
+        }
+        cols[0] = Some((line, index));
+        answer
     }
 
     /// Clamps the line, then the column, then snaps back to a grapheme boundary.
@@ -251,12 +301,43 @@ impl Buffer {
             removed: end.line - start.line + 1,
             inserted: pieces.len(),
         };
+        // Line breaks are not counted: `removed` held one per line joined,
+        // `inserted` one per line split.
+        self.bytes = self.bytes - (removed.len() - (end.line - start.line))
+            + (inserted.len() - (shift.inserted - 1));
         self.lines.splice(start.line..=end.line, pieces);
         self.log(shift);
+        self.update_cols(start, end, shift);
 
         Edit {
             range: start..new_end,
             text: removed,
+        }
+    }
+
+    /// Keeps the column indexes true after `start..end` (old coordinates)
+    /// was replaced as `shift` describes. An edit within one line, with no
+    /// line break inserted, keeps that line's checkpoints before `start.col`:
+    /// a boundary there depends only on the unchanged text up to and
+    /// including the character at it. An edit wholly above a line moves its
+    /// index by the change in line count; one wholly below leaves it alone.
+    /// Any other edit touching the line drops its index.
+    fn update_cols(&mut self, start: Pos, end: Pos, shift: LineShift) {
+        let same_line = start.line == end.line && shift.inserted == 1;
+        for entry in self.cols.get_mut().iter_mut() {
+            let Some((line, index)) = entry else {
+                continue;
+            };
+            if *line < start.line {
+                continue;
+            }
+            if *line > end.line {
+                *line = *line + shift.inserted - shift.removed;
+            } else if same_line {
+                index.keep_before(start.col);
+            } else {
+                *entry = None;
+            }
         }
     }
 
@@ -279,6 +360,8 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::colindex;
+    use unicode_segmentation::UnicodeSegmentation;
 
     fn pos(line: usize, col: usize) -> Pos {
         Pos { line, col }
@@ -308,6 +391,35 @@ mod tests {
         let inv2 = b.replace(inv.range, &inv.text);
         assert_eq!(b.to_text(), original);
         assert_eq!(inv2.text, "there");
+    }
+
+    /// The byte count, recounted from the lines.
+    fn recount(b: &Buffer) -> usize {
+        (0..b.line_count()).map(|i| b.line(i).len()).sum()
+    }
+
+    #[test]
+    fn byte_count_tracks_edits() {
+        let mut b = Buffer::from_text("\u{FEFF}héllo\r\nworld\r\n");
+        assert_eq!(b.byte_count(), recount(&b));
+        assert_eq!(b.byte_count(), 11);
+        // Same-line insert, multi-line insert, a CRLF insert, a deletion
+        // across lines, a replacement across lines and an edit past the end.
+        let edits: [(Range<Pos>, &str); 7] = [
+            (pos(0, 1)..pos(0, 1), "XY"),
+            (pos(1, 2)..pos(1, 2), "one\ntwo\nthree"),
+            (pos(0, 0)..pos(0, 0), "a\r\nb\r\n"),
+            (pos(1, 3)..pos(4, 2), ""),
+            (pos(0, 0)..pos(1, 1), "p\nq\nr"),
+            (pos(9, 99)..pos(9, 99), "\nend"),
+            (pos(0, 0)..pos(99, 999), ""),
+        ];
+        for (r, text) in edits {
+            b.replace(r.clone(), text);
+            assert_eq!(b.byte_count(), recount(&b), "{r:?} {text:?}");
+        }
+        assert_eq!(b.byte_count(), 0);
+        assert_eq!(b.clone().byte_count(), 0);
     }
 
     #[test]
@@ -459,5 +571,276 @@ mod tests {
         let b = Buffer::from_text("abc\ndef\nghi");
         assert_eq!(b.text_range(pos(0, 1)..pos(2, 2)), "bc\ndef\ngh");
         assert_eq!(b.text_range(pos(1, 1)..pos(1, 3)), "ef");
+    }
+    /// `unit` repeated until the result is at least `bytes` long.
+    fn fill(unit: &str, bytes: usize) -> String {
+        unit.repeat(bytes.div_ceil(unit.len()))
+    }
+
+    /// The mixed string from the column index tests: ASCII, a precomposed
+    /// letter, a flag pair, a ZWJ family and a lone `\r`.
+    fn mixed(bytes: usize) -> String {
+        fill("aé🇦🇺👩‍👩‍👧\r", bytes)
+    }
+
+    /// The reference answer for `grapheme_start`.
+    fn nth_start(line: &str, g: usize) -> Option<usize> {
+        line.grapheme_indices(true).nth(g).map(|(i, _)| i)
+    }
+
+    /// The line each cached entry names, most recently used first.
+    fn cached_lines(b: &Buffer) -> Vec<Option<usize>> {
+        b.cols
+            .borrow()
+            .iter()
+            .map(|e| e.as_ref().map(|(l, _)| *l))
+            .collect()
+    }
+
+    /// The cached entry for `line`, printed, so a test can see whether it
+    /// changed without reaching into the index's own fields.
+    fn cached(b: &Buffer, line: usize) -> Option<String> {
+        b.cols
+            .borrow()
+            .iter()
+            .flatten()
+            .find(|(l, _)| *l == line)
+            .map(|(_, c)| format!("{c:?}"))
+    }
+
+    /// A seeded LCG, so the random order needs no new dependency.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((self.0 >> 33) as usize) % n
+        }
+    }
+
+    /// A random char boundary in `line`, the end included.
+    fn boundary(rng: &mut Lcg, line: &str) -> usize {
+        floor_char(line, rng.below(line.len() + 1))
+    }
+
+    fn assert_cols(b: &Buffer, line: usize, col: usize) {
+        assert_eq!(
+            b.display_col(pos(line, col)),
+            grapheme::display_col(b.line(line), col),
+            "display_col @ {line}:{col}"
+        );
+    }
+
+    /// The char boundary at or before `col`, within `line`.
+    fn floor_char(line: &str, col: usize) -> usize {
+        let mut c = col.min(line.len());
+        while !line.is_char_boundary(c) {
+            c -= 1;
+        }
+        c
+    }
+
+    #[test]
+    fn display_col_matches_after_random_edits() {
+        let text = [mixed(5_000), mixed(3_000), mixed(4_000)].join("\n");
+        let mut b = Buffer::from_text(&text);
+        let mut rng = Lcg(0xb0ff);
+        let inserts = ["", "x", "é", "🇦", "🇺", "\u{301}", "\u{200d}", "👩", "\r"];
+        let (mut edits, mut deep) = (0, 0);
+        for step in 0..2_000 {
+            let line = rng.below(b.line_count());
+            let s = b.line(line).to_owned();
+            let col = boundary(&mut rng, &s);
+            // Deletions stay short, so lines stay long enough to hold
+            // checkpoints.
+            let near = floor_char(&s, col + rng.below(64));
+            match rng.below(10) {
+                0..=3 => {
+                    assert_cols(&b, line, col);
+                    assert_cols(&b, line, s.len());
+                    deep += usize::from(col > 2 * colindex::COL_STEP);
+                }
+                4 => {
+                    let n = s.graphemes(true).count();
+                    let g = rng.below(n + 2);
+                    assert_eq!(
+                        b.grapheme_start(line, g),
+                        nth_start(&s, g),
+                        "grapheme_start {line} {g} at step {step}"
+                    );
+                }
+                5 => {
+                    // Inside one line.
+                    let t = inserts[rng.below(inserts.len())].repeat(1 + rng.below(3));
+                    b.replace(pos(line, col)..pos(line, near), &t);
+                    edits += 1;
+                }
+                6 if line + 1 < b.line_count() => {
+                    // Across lines: from near this line's end to near the
+                    // next one's start, or the one after.
+                    let to = (line + 1 + rng.below(2)).min(b.line_count() - 1);
+                    let from = floor_char(&s, s.len().saturating_sub(rng.below(64)));
+                    let till = floor_char(b.line(to), rng.below(64));
+                    let t = inserts[rng.below(inserts.len())];
+                    b.replace(pos(line, from)..pos(to, till), t);
+                    edits += 1;
+                }
+                7 if b.line_count() < 5 => {
+                    // Inserting a line break, alone or among other text.
+                    let t = ["\n", "é\n🇦", "\r\n", "a\nb\nc"][rng.below(4)];
+                    b.replace(pos(line, col)..pos(line, col), t);
+                    edits += 1;
+                }
+                8 if s.len() < 8_000 => {
+                    // Growing the line, so splits do not wear it down.
+                    b.replace(pos(line, col)..pos(line, col), &mixed(rng.below(3_000)));
+                    edits += 1;
+                }
+                _ => {
+                    // A combining mark, which joins the grapheme before it.
+                    b.replace(pos(line, col)..pos(line, near.min(col + 4)), "\u{301}");
+                    edits += 1;
+                }
+            }
+        }
+        assert!(edits > 500, "too few edits: {edits}");
+        assert!(deep > 100, "too few queries past a checkpoint: {deep}");
+        let long = (0..b.line_count())
+            .filter(|&l| b.line(l).len() > 2 * colindex::COL_STEP)
+            .count();
+        assert!(long >= 2, "the lines wore down: {long} long");
+        for line in 0..b.line_count() {
+            let s = b.line(line).to_owned();
+            for col in (0..=s.len()).filter(|&c| s.is_char_boundary(c)).step_by(7) {
+                assert_cols(&b, line, col);
+            }
+        }
+    }
+
+    #[test]
+    fn combining_mark_at_a_checkpoint() {
+        let mut b = Buffer::from_text(&"é".repeat(2_048));
+        assert_eq!(b.line(0).len(), 4_096);
+        assert_cols(&b, 0, 4_096);
+        let before = cached(&b, 0).unwrap_or_default();
+        assert!(before.contains("(2048, 1024)"), "no checkpoint: {before}");
+        b.replace(pos(0, 2_048)..pos(0, 2_048), "\u{301}");
+        assert_cols(&b, 0, b.line(0).len());
+        assert_eq!(b.display_col(pos(0, b.line(0).len())), 2_048);
+        assert_eq!(b.grapheme_start(0, 1_024), Some(2_050));
+        assert_eq!(b.grapheme_start(0, 1_023), Some(2_046));
+    }
+
+    #[test]
+    fn undo_restores_then_queries() {
+        let mut b = Buffer::from_text(&"é".repeat(5_000));
+        let end = |b: &Buffer| pos(0, b.line(0).len());
+        assert_cols(&b, 0, end(&b).col);
+        let inv = b.replace(pos(0, 0)..end(&b), &"a".repeat(7_000));
+        assert_cols(&b, 0, end(&b).col);
+        assert_eq!(b.display_col(end(&b)), 7_000);
+        b.replace(inv.range, &inv.text);
+        assert_eq!(b.line(0), "é".repeat(5_000));
+        assert_cols(&b, 0, end(&b).col);
+        assert_eq!(b.display_col(end(&b)), 5_000);
+        assert_eq!(b.grapheme_start(0, 4_999), Some(9_998));
+    }
+
+    #[test]
+    fn line_shift_moves_the_index() {
+        let long = "é".repeat(3_000);
+        let text = ["a", "b", "c", "d", "e", long.as_str(), "g"].join("\n");
+        let mut b = Buffer::from_text(&text);
+        assert_cols(&b, 5, long.len());
+        let before = cached(&b, 5).expect("line 5 is cached");
+        b.replace(pos(1, 0)..pos(1, 0), "x\ny\n");
+        assert_eq!(b.line(7), long);
+        assert_eq!(cached_lines(&b), vec![Some(7), None]);
+        assert_eq!(cached(&b, 7), Some(before), "the checkpoints moved whole");
+        assert_cols(&b, 7, long.len());
+        assert_eq!(b.grapheme_start(7, 2_999), Some(5_998));
+
+        // A join above moves it back up.
+        b.replace(pos(0, 1)..pos(1, 0), "");
+        assert_eq!(cached_lines(&b), vec![Some(6), None]);
+        assert_cols(&b, 6, long.len());
+    }
+
+    #[test]
+    fn edit_below_keeps_the_index() {
+        let long = "é".repeat(3_000);
+        let text = [long.as_str(), "b", "c"].join("\n");
+        let mut b = Buffer::from_text(&text);
+        assert_cols(&b, 0, long.len());
+        let before = cached(&b, 0).expect("line 0 is cached");
+        assert!(!before.contains("checkpoints: []"), "{before}");
+        b.replace(pos(1, 0)..pos(2, 1), "x\ny\nz");
+        assert_eq!(cached(&b, 0), Some(before.clone()), "an edit below");
+        b.replace(pos(2, 0)..pos(2, 0), "\u{301}");
+        assert_eq!(cached(&b, 0), Some(before), "a same-line edit below");
+        assert_cols(&b, 0, long.len());
+    }
+
+    #[test]
+    fn edits_touching_the_line_drop_or_trim_it() {
+        let long = "é".repeat(3_000);
+        let text = ["a", long.as_str(), "c"].join("\n");
+
+        // A same-line edit keeps only the checkpoints before it.
+        let mut b = Buffer::from_text(&text);
+        assert_cols(&b, 1, long.len());
+        b.replace(pos(1, 3_000)..pos(1, 3_002), "🇦");
+        let kept = cached(&b, 1).expect("still cached");
+        assert!(
+            kept.contains("(2048, 1024)") && !kept.contains("(3072"),
+            "{kept}"
+        );
+        assert_cols(&b, 1, b.line(1).len());
+
+        // A line break inside the line, or an edit spanning into it from
+        // above, drops it.
+        for (r, t) in [
+            (pos(1, 10)..pos(1, 10), "\n"),
+            (pos(0, 1)..pos(1, 4), ""),
+            (pos(1, 4)..pos(2, 0), "x"),
+        ] {
+            let mut b = Buffer::from_text(&text);
+            assert_cols(&b, 1, long.len());
+            b.replace(r.clone(), t);
+            assert_eq!(cached_lines(&b), vec![None, None], "{r:?}");
+            for l in 0..b.line_count() {
+                assert_cols(&b, l, b.line(l).len());
+            }
+        }
+    }
+
+    #[test]
+    fn a_third_line_replaces_the_least_recent() {
+        let long = "é".repeat(2_000);
+        let text = [long.as_str(), long.as_str(), long.as_str()].join("\n");
+        let b = Buffer::from_text(&text);
+        assert_cols(&b, 0, 100);
+        assert_cols(&b, 1, 100);
+        assert_eq!(cached_lines(&b), vec![Some(1), Some(0)]);
+        assert_cols(&b, 0, 200);
+        assert_eq!(cached_lines(&b), vec![Some(0), Some(1)]);
+        assert_cols(&b, 2, 300);
+        assert_eq!(cached_lines(&b), vec![Some(2), Some(0)]);
+        assert_eq!(b.grapheme_start(1, 5), Some(10));
+        assert_eq!(cached_lines(&b), vec![Some(1), Some(2)]);
+        // A line past the end is answered, not cached.
+        assert_eq!(b.display_col(pos(9, 4)), 0);
+        assert_eq!(b.grapheme_start(9, 0), None);
+        assert_eq!(cached_lines(&b), vec![Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn clone_has_no_index() {
+        let b = Buffer::from_text(&"é".repeat(3_000));
+        assert_cols(&b, 0, 6_000);
+        assert_eq!(cached_lines(&b), vec![Some(0), None]);
+        let c = b.clone();
+        assert_eq!(cached_lines(&c), vec![None, None]);
+        assert_cols(&c, 0, 6_000);
     }
 }

@@ -202,6 +202,21 @@ impl Blocks {
         }
         let old_e = old_e as usize;
 
+        // In-row fast path: a one-line edit to a body row that keeps its cell
+        // count changes nothing else. `find_tables` extends a table while the
+        // cell count matches the header's, and `TableInfo` holds only the
+        // extent and alignments, so the table's extent, alignments, ids and
+        // every other line's kind stay as they are. The line cannot open a
+        // fence (it must start with `|` once trimmed, fences start with
+        // backticks) and it follows a table line, so no fence state carries in.
+        if delta == 0
+            && e == s + 1
+            && let LineKind::TableRow { table } = &self.kinds[s]
+            && parse_cells(buf.line(s)).map(|c| c.len()) == Some(self.tables[table].aligns.len())
+        {
+            return s..s + 1;
+        }
+
         let mut r = Rescan::default();
         let removed: Vec<LineKind> = self
             .kinds
@@ -1586,5 +1601,68 @@ mod tests {
             with_code > 300 && with_table > 300,
             "seed {label}: {with_code} {with_table}"
         );
+    }
+
+    /// Replaces line `l` with `text` and checks `update` against a fresh parse.
+    fn checked_set_line(b: &mut Buffer, bl: &mut Blocks, l: usize, text: &str) -> Range<usize> {
+        let snap = snapshot(b, bl);
+        let before = b.line_count();
+        let len = b.line(l).len();
+        let e = b.replace(p(l, 0)..p(l, len), text);
+        let delta = b.line_count() as isize - before as isize;
+        let edited = e.range.start.line..e.range.end.line + 1;
+        let changed = bl.update(b, edited.clone(), delta);
+        check_update(&snap, b, bl, edited, delta, changed.clone(), text);
+        changed
+    }
+
+    const TABLE: &str = "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |\nafter";
+
+    #[test]
+    fn editing_a_body_row_in_place_repaints_one_line() {
+        let (mut b, mut bl) = blocks(TABLE);
+        let changed = checked_set_line(&mut b, &mut bl, 4, "| 3 | 44 |");
+        assert_eq!(changed, 4..5);
+    }
+
+    #[test]
+    fn a_body_row_losing_a_cell_takes_the_general_path() {
+        let (mut b, mut bl) = blocks(TABLE);
+        let changed = checked_set_line(&mut b, &mut bl, 4, "| 3 |");
+        assert!(changed.contains(&4));
+    }
+
+    #[test]
+    fn editing_the_header_takes_the_general_path() {
+        let (mut b, mut bl) = blocks(TABLE);
+        checked_set_line(&mut b, &mut bl, 1, "| a | bb |");
+        checked_set_line(&mut b, &mut bl, 1, "| a |");
+    }
+
+    #[test]
+    fn editing_the_separator_takes_the_general_path() {
+        let (mut b, mut bl) = blocks(TABLE);
+        checked_set_line(&mut b, &mut bl, 2, "|:--|--:|");
+        checked_set_line(&mut b, &mut bl, 2, "|---|");
+    }
+
+    #[test]
+    fn splitting_a_row_takes_the_general_path() {
+        let (mut b, mut bl) = blocks(TABLE);
+        let snap = snapshot(&b, &bl);
+        let before = b.line_count();
+        let e = b.replace(p(4, 5)..p(4, 5), "|\n|");
+        let delta = b.line_count() as isize - before as isize;
+        let edited = e.range.start.line..e.range.end.line + 1;
+        let changed = bl.update(&b, edited.clone(), delta);
+        check_update(&snap, &b, &bl, edited, delta, changed, "split");
+    }
+
+    #[test]
+    fn a_body_row_that_looks_like_a_separator_keeps_its_cell_count() {
+        let (mut b, mut bl) = blocks(TABLE);
+        let changed = checked_set_line(&mut b, &mut bl, 4, "|---|---|");
+        assert_eq!(changed, 4..5);
+        checked_set_line(&mut b, &mut bl, 5, "  | ``` | x |  ");
     }
 }

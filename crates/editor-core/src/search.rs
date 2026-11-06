@@ -156,6 +156,22 @@ pub fn literal_matches(line: &str, pattern: &str, ignore_case: bool) -> Vec<Rang
     Matcher::with_case(pattern, !ignore_case).line(line)
 }
 
+/// `literal_matches` made ready for line after line, giving each line's
+/// matches one at a time rather than collected, so counting them (`:s`
+/// before it builds anything) holds no memory per match.
+pub struct Literal<'q>(Matcher<'q>);
+
+impl<'q> Literal<'q> {
+    pub fn new(pattern: &'q str, ignore_case: bool) -> Literal<'q> {
+        Literal(Matcher::with_case(pattern, !ignore_case))
+    }
+
+    /// The matches on `line`, in order, as `literal_matches` gives them.
+    pub fn matches<'a>(&'a self, line: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
+        self.0.iter(line)
+    }
+}
+
 /// U+212A KELVIN SIGN, the only char beyond ASCII that folds to an ASCII
 /// one (`k`); `only_the_kelvin_sign_folds_to_ascii` checks that.
 const KELVIN: char = '\u{212A}';
@@ -244,32 +260,22 @@ impl<'q> Matcher<'q> {
     /// The matches on `line`, each checked for grapheme boundaries at its
     /// two ends only (R12).
     fn line(&self, line: &str) -> Vec<Range<usize>> {
-        let mut out = Vec::new();
-        if self.query.is_empty() || !self.may_match(line.as_bytes()) {
-            return out;
-        }
+        self.iter(line).collect()
+    }
+
+    /// The matches on `line` one at a time, as `line` gives them.
+    fn iter<'a>(&'a self, line: &'a str) -> LineMatches<'a, 'q> {
+        let done = self.query.is_empty() || !self.may_match(line.as_bytes());
         // Ignoring case, an ASCII query matches only ASCII bytes unless
         // the line holds a Kelvin sign, so whole bytes can be compared.
-        let bytewise = !self.sensitive && self.ascii && !(self.has_k && line.contains(KELVIN));
-        let mut at = 0;
-        while at < line.len() {
-            let found = if bytewise {
-                self.ascii_match(line.as_bytes(), at)
-            } else {
-                self.next_match(line, at)
-            };
-            let Some(r) = found else {
-                break;
-            };
-            if grapheme_boundary(line, r.start) && grapheme_boundary(line, r.end) {
-                at = r.end;
-                out.push(r);
-            } else {
-                // It splits a grapheme: look again from the next char.
-                at = r.start + line[r.start..].chars().next().map_or(1, char::len_utf8);
-            }
+        let bytewise =
+            !done && !self.sensitive && self.ascii && !(self.has_k && line.contains(KELVIN));
+        LineMatches {
+            m: self,
+            line,
+            at: if done { line.len() } else { 0 },
+            bytewise,
         }
-        out
     }
 
     /// False when no match can be on `line`: it lacks a byte every match
@@ -337,6 +343,41 @@ impl<'q> Matcher<'q> {
             while o < bytes.len() && !rest.is_char_boundary(o) {
                 o += 1;
             }
+        }
+        None
+    }
+}
+
+/// A line's matches in order, found as they are asked for: `Matcher::iter`.
+struct LineMatches<'a, 'q> {
+    m: &'a Matcher<'q>,
+    line: &'a str,
+    /// Where the next search starts; the line's length once done.
+    at: usize,
+    bytewise: bool,
+}
+
+impl Iterator for LineMatches<'_, '_> {
+    type Item = Range<usize>;
+
+    fn next(&mut self) -> Option<Range<usize>> {
+        let line = self.line;
+        while self.at < line.len() {
+            let found = if self.bytewise {
+                self.m.ascii_match(line.as_bytes(), self.at)
+            } else {
+                self.m.next_match(line, self.at)
+            };
+            let Some(r) = found else {
+                self.at = line.len();
+                return None;
+            };
+            if grapheme_boundary(line, r.start) && grapheme_boundary(line, r.end) {
+                self.at = r.end;
+                return Some(r);
+            }
+            // It splits a grapheme: look again from the next char.
+            self.at = r.start + line[r.start..].chars().next().map_or(1, char::len_utf8);
         }
         None
     }

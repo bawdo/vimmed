@@ -1,21 +1,9 @@
 //! The count typed before a command, and the one typed between an operator
 //! and its motion.
 
-/// The largest value a count part may reach.
-///
-/// Fuzz builds (`cfg(fuzzing)`, set by cargo-fuzz and ClusterFuzzLite) lower
-/// it to 1,000 so a few input bytes cannot mean tens of millions of
-/// operations (`yy30000000p`). The same limit-handling code runs, with a
-/// smaller constant. Every other build uses `usize::MAX`, so the arithmetic
-/// below only saturates. A ceiling on the product of the two parts for normal
-/// builds is tracked separately.
-#[cfg(fuzzing)]
-const MAX_COUNT: usize = 1_000;
-#[cfg(not(fuzzing))]
-const MAX_COUNT: usize = usize::MAX;
+use crate::limits::MAX_COUNT;
 
-/// Clamps `n` to `MAX_COUNT`. A no-op outside fuzz builds.
-#[allow(clippy::unnecessary_min_or_max)]
+/// Clamps `n` to `MAX_COUNT`.
 fn ceiling(n: usize) -> usize {
     n.min(MAX_COUNT)
 }
@@ -122,13 +110,21 @@ mod tests {
 
     #[cfg(not(fuzzing))]
     #[test]
-    fn huge_counts_saturate() {
+    fn count_clamps_at_vim_ceiling() {
         let mut c = Count::default();
-        for _ in 0..40 {
-            c.push(9, false);
+        for d in [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9] {
+            c.push(d, false);
         }
-        assert_eq!(c.pre, Some(usize::MAX));
-        c.push(9, true);
-        assert_eq!(c.effective(), usize::MAX);
+        assert_eq!(c.effective(), 999_999_999);
+        let c = Count {
+            pre: Some(2),
+            post: Some(999_999_999),
+        };
+        assert_eq!(c.effective(), 999_999_999);
+        let c = Count {
+            pre: Some(999_999_999),
+            post: Some(2),
+        };
+        assert_eq!(c.effective(), 999_999_999);
     }
 }

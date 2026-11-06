@@ -62,7 +62,10 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   buffer, and when `vflag & 1` is set the last Visual selection is
   `(v0 % n, v1 % n)`. `tail[4..]` are confirm answers, one key each. Only a
   `:s` substitute goes past parsing: any other command returns straight after
-  `ex::parse`.
+  `ex::parse`. The applied `run` and the confirm session's result are both
+  compared with an oracle that rebuilds each line from strings, without
+  working out any position, and the session's current match must hold the
+  text it asks about.
 - `markdown_incremental`: the initial text up to the first `0x00`, then edit
   records. A record is six bytes `[flags, l0, c0, l1, c1, len]` followed by
   `len` bytes of replacement text. A truncated record ends the sequence.
@@ -82,18 +85,17 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   on a char boundary of the buffer, and a key that closes the window ends the
   run.
 
-  Limitation: a run stops, without failing, once the cursor line is longer
-  than 2048 bytes. The editor's cost per key grows with the length of the
-  cursor line, and a counted put builds a huge line from a tiny input, so
-  such a run hits the timeout. That is a known performance limitation, not a
-  crash; see the long-line performance issue (link to be added once it is
-  filed). Like `-max_len`, the cap bounds the work one run can create. A run
-  also stops once the buffer passes 65,536 lines, because yank and put double
-  a document within a few keys.
-
-  `fuzz/known/editor_keys/long_line_per_key_cost` is kept as the reference
-  input for the line-index work. It only reproduces the slowdown once the
-  2 KiB guard is raised or removed, which that work must do.
+  Four long-line inputs live in `fuzz/regressions/editor_keys/`.
+  `long_line_per_key_cost` is the original reduction and
+  `long_non_ascii_line_per_key_cost` its non-ASCII counterpart. Both are
+  trivial under `cfg(fuzzing)`: counts clamp at 1,000, so the 51,111,110 count
+  builds only a 1,000-byte line and each runs in a millisecond or two under
+  ASan. `long_line_1mb_keys` and `long_non_ascii_line_1mb_keys` build a line of
+  about 1 MB within the fuzz limits, press `h` 1,500 times back from its end
+  and type 1,500 characters there, so they show the long-line per-key cost
+  under ASan (about 1 s each, and over a minute before the column index). A
+  plain `cargo test` replay of any of the four proves only that the run
+  terminates, not that it is fast.
 
 ## Replay under `cargo test`
 
@@ -106,12 +108,31 @@ directory fails the test, as does a missing or empty target directory under
 ## Fuzz-build limits
 
 cargo-fuzz and ClusterFuzzLite build with `cfg(fuzzing)`. Under it vimmed
-lowers its own limits (count ceiling 1,000; put caps 1 MiB and 16,384 lines),
-so runs exercise the same limit-handling code without spending time on huge
-counts. Normal builds and `cargo test` use the real limits, so committed
-regression inputs replay against the product's behaviour. The limits follow
-the rustc `cfg(fuzzing)`, not the `fuzzing` cargo feature: enabling only the
-feature keeps the real limits.
+lowers its own limits, so runs exercise the same limit-handling code without
+spending time on huge counts or documents. Normal builds and `cargo test` use
+the real limits, so committed regression inputs replay against the product's
+behaviour. The limits follow the rustc `cfg(fuzzing)`, not the `fuzzing` cargo
+feature: enabling only the feature keeps the real limits.
+
+| Limit                    | Normal build          | Fuzz build |
+| ------------------------ | --------------------- | ---------- |
+| Count ceiling            | 999,999,999           | 1,000      |
+| Document lines           | 4,194,304             | 65,536     |
+| Document bytes           | 268,435,456 (256 MiB) | 1,048,576  |
+| Undo bytes               | 67,108,864 (64 MiB)   | 1,048,576  |
+| Changes in one `:s`      | 262,144               | 4,096      |
+| Put bytes                | 67,108,864 (64 MiB)   | 1,048,576  |
+| Put lines                | 262,144               | 16,384     |
+
+Document bytes count line contents only, not line breaks.
+
+`MAX_UNDO_GROUPS` (1,000) is the same in both builds.
+
+The `editor_keys` run budgets are these same document limits, not numbers the
+harness chose. A put or a `:s` that would pass the document lines or bytes is
+refused by the product (`E1240`), but typing, and `.` replaying typed text, is
+not checked and can pass them. A run therefore ends, without failing, once the
+document passes the line or byte limit of the build it runs in.
 
 ## When a run finds a crash
 
@@ -153,10 +174,10 @@ with `-max_len` as in the table above (4096 for `editor_keys`, 65536 for the res
 Crashes were not ignored. Every run finished with `oom/timeout/crash: 0/0/0`, so no
 new finding was recorded and nothing was added to `known/` by this measurement.
 
-Two limits shape what `editor_keys` can reach. Its runs stop once the cursor line passes
-2 KiB or the document passes 65,536 lines, so its coverage is of documents within those
-sizes. Fuzz builds (`cfg(fuzzing)`, which cargo-fuzz sets) also clamp counts at 1,000 and
-cap a put at 1 MiB and 16,384 lines.
+Under `cfg(fuzzing)` the limits are lowered (see Fuzz-build limits), so these runs
+reached documents within those sizes. This measurement was taken while `editor_keys`
+still stopped a run once the cursor line passed 2 KiB or the document passed 65,536
+lines; its run budgets are now the product's document limits.
 
 Line coverage of `crates/editor-core/src/` (the `fuzz/` harness module excluded):
 

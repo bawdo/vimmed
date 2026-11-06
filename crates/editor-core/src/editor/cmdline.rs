@@ -11,6 +11,7 @@ use crate::ex::{self, ExCmd, Sub};
 use crate::file::{Loaded, WriteError};
 use crate::grapheme;
 use crate::input::{Key, KeyEvent};
+use crate::limits;
 use crate::search::{Hit, Search};
 use crate::status::{self, Mode};
 use crate::strings;
@@ -273,7 +274,8 @@ impl Editor {
     /// `:s`. An empty pattern is the last search's. The pattern becomes
     /// the last search, as in vim, so `n` finds it and it is highlighted.
     /// `n` only counts and takes priority over `c`; reader mode only
-    /// counts.
+    /// counts. Anything else past a budget (`sub_refusal`) changes nothing
+    /// and says why.
     fn substitute(&mut self, mut sub: Sub) -> Effects {
         if sub.pattern.is_empty() {
             match self.search.as_ref().filter(|s| !s.query.is_empty()) {
@@ -301,11 +303,30 @@ impl Editor {
             self.count_matches(&sub, lines)
         } else if self.refuses_edits() {
             Effects::default()
+        } else if let Some(refusal) = self.sub_refusal(&sub, lines.clone()) {
+            self.say(refusal);
+            Effects::default()
         } else if sub.flags.c {
             self.start_confirm(&sub, lines)
         } else {
             self.substitute_all(&sub, lines)
         })
+    }
+
+    /// Why `sub` on `lines` must not run, if it must not: it would make
+    /// more changes than one `:s` may, or grow the document past its line
+    /// or byte budget, were every match it finds replaced. Checked before
+    /// anything changes, and before a `c` session starts, so no answer can
+    /// take a session past a budget halfway.
+    fn sub_refusal(&self, sub: &Sub, lines: std::ops::RangeInclusive<usize>) -> Option<String> {
+        let p = substitute::project(&self.buf, sub, lines);
+        if p.changes > limits::MAX_SUB_CHANGES {
+            Some(strings::too_many_changes(limits::MAX_SUB_CHANGES))
+        } else if !limits::fits(&self.buf, p.added_lines, p.added_bytes) {
+            Some(strings::RESULTING_TEXT_TOO_LONG.to_owned())
+        } else {
+            None
+        }
     }
 
     /// Makes `pattern` the last search, going the way the last one went.
@@ -346,7 +367,11 @@ impl Editor {
             self.say(strings::pattern_not_found(&sub.pattern));
             return Effects::default();
         };
-        let (first, last) = (first.range.start.line, last.range.start.line);
+        // The last edit's last line, once its line breaks (`\r`) are in.
+        let (first, last) = (
+            first.range.start.line,
+            last.range.start.line + last.text.matches('\n').count(),
+        );
         let fx = self.run(|ctx| {
             ctx.place(Pos {
                 line: first,

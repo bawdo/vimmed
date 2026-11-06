@@ -128,9 +128,9 @@ pub fn shape(buf: &Buffer, sel: Selection) -> Shape {
     if sel.linewise {
         return Shape::Lines(b.line - a.line + 1);
     }
-    let end = grapheme::display_col(buf.line(b.line), b.col);
+    let end = buf.display_col(b);
     if a.line == b.line {
-        Shape::Chars(end - grapheme::display_col(buf.line(a.line), a.col) + 1)
+        Shape::Chars(end - buf.display_col(a) + 1)
     } else {
         Shape::Span {
             lines: b.line - a.line,
@@ -160,7 +160,7 @@ pub fn region(buf: &Buffer, at: Pos, shape: Shape) -> OpRange {
             let line = at.line.saturating_add(lines).min(buf.line_count() - 1);
             Pos {
                 line,
-                col: motion::col_for(buf.line(line), Want::Col(end)),
+                col: motion::col_for(buf, line, Want::Col(end)),
             }
         }
     };
