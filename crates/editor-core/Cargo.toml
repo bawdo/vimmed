@@ -10,6 +10,10 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Compiles the fuzz harnesses (`editor_core::fuzz`) for the fuzz/ crate.
+fuzzing = []
+
 [dependencies]
 app-meta = { path = "../app-meta" }
 marks = { path = "../marks" }

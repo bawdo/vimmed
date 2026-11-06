@@ -11,6 +11,9 @@ extend-exclude = [
     "research_notes/**",
     "reports/**",
     "bench-results/**",
+    "fuzz/corpus/**",
+    "fuzz/regressions/**",
+    "fuzz/known/**",
 ]
 
 # Words that are correct as written. Each maps to itself.

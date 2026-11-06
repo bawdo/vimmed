@@ -1,0 +1,21 @@
+vim = true
+autosave = false
+theme = "dark"
+column_width = 660
+
+[font]
+body = "Inter"
+mono = "JetBrains Mono"
+size = 16
+
+[tokens]
+"color.link" = "#2F5FA8"
+"line.height.body" = 1.6
+"space.column" = 700
+
+[tokens.light]
+"color.bg" = "#FFFFFF"
+
+[tokens.dark]
+"color.bg" = "#101012"
+color.text = "#EEEEEE"
