@@ -1,4 +1,5 @@
 pub mod buffer;
+mod colindex;
 pub mod config;
 pub mod editor;
 pub mod effects;
