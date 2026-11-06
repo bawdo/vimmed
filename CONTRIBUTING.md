@@ -20,6 +20,8 @@ through [SECURITY.md](SECURITY.md), not the issue tracker.
 2. Run `cargo xtask ci` before pushing. It mirrors the GitHub Actions checks.
    If your change could behave differently on Linux, also run
    `cargo xtask linux-check`, which needs Docker.
+   Parsers and editor input handling also have fuzz targets: see
+   `fuzz/README.md`.
 3. Add a line under `[Unreleased]` in `CHANGELOG.md` for anything a user
    would notice. Follow the existing Keep a Changelog headings.
 4. Open a pull request. The `CI result` check must pass before it can be
