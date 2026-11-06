@@ -2,7 +2,6 @@
 //! long a message stays.
 
 use crate::buffer::{Buffer, Pos};
-use crate::grapheme;
 use crate::strings;
 
 pub use crate::vim::Mode;
@@ -29,7 +28,7 @@ pub const MESSAGE_FOR_NS: u64 = 6_000_000_000;
 
 /// The cursor as shown, `line:column`, both 1-based, counting graphemes.
 pub fn position(buf: &Buffer, cursor: Pos) -> String {
-    let col = grapheme::display_col(buf.line(cursor.line), cursor.col);
+    let col = buf.display_col(cursor);
     format!("{}:{}", cursor.line + 1, col + 1)
 }
 

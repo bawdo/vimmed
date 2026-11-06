@@ -17,6 +17,7 @@
 use std::collections::VecDeque;
 
 use crate::buffer::{Buffer, Edit, Pos};
+use crate::limits::MAX_UNDO_BYTES;
 use crate::vim;
 
 /// The most undo steps kept. Past it, the oldest group is dropped.
@@ -32,6 +33,8 @@ struct Group {
     pinned: bool,
     /// Unique in this history; never 0.
     id: u64,
+    /// What the edits hold on to: see `pair_bytes`.
+    bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -49,6 +52,13 @@ pub struct History {
     /// The state the text on disk matches. 0 to begin with: a history
     /// starts at the text that was read.
     saved: u64,
+    /// The bytes held by the undo and redo groups (not the open one).
+    retained: usize,
+}
+
+/// What one (inverse, forward) pair holds on to.
+fn pair_bytes(inverse: &Edit, forward: &Edit) -> usize {
+    inverse.text.len() + forward.text.len() + size_of::<(Edit, Edit)>()
 }
 
 /// The forward edit for a replacement `Buffer::replace` carried out:
@@ -181,6 +191,7 @@ impl History {
             first_cursor,
             pinned: false,
             id: self.last_id,
+            bytes: 0,
         }
     }
 
@@ -238,10 +249,12 @@ impl History {
                 if g.edits.is_empty() {
                     g.first_cursor = cursor;
                 }
+                g.bytes += pair_bytes(&inverse, &forward);
                 g.edits.push((inverse, forward));
             }
             None => {
                 let mut g = self.group(cursor);
+                g.bytes += pair_bytes(&inverse, &forward);
                 g.edits.push((inverse, forward));
                 self.push(g);
             }
@@ -270,14 +283,20 @@ impl History {
         }
     }
 
-    /// Files a finished group: a new step clears redo, and the oldest step
-    /// goes once there are more than `MAX_UNDO_GROUPS`.
+    /// Files a finished group: a new step clears redo, and the oldest steps
+    /// go while there are more than `MAX_UNDO_GROUPS` or the history holds
+    /// more than `MAX_UNDO_BYTES`. The newest step always stays, however
+    /// big.
     fn push(&mut self, g: Group) {
+        self.retained -= self.redo.iter().map(|g| g.bytes).sum::<usize>();
         self.redo.clear();
+        self.retained += g.bytes;
         self.undo.push_back(g);
-        if self.undo.len() > MAX_UNDO_GROUPS
+        while (self.undo.len() > MAX_UNDO_GROUPS || self.retained > MAX_UNDO_BYTES)
+            && self.undo.len() > 1
             && let Some(dropped) = self.undo.pop_front()
         {
+            self.retained -= dropped.bytes;
             self.base = dropped.id;
         }
     }
@@ -329,6 +348,7 @@ impl History {
             return false;
         }
         self.open = self.undo.pop_back();
+        self.retained -= self.open.as_ref().map_or(0, |g| g.bytes);
         self.depth = 1;
         true
     }
@@ -339,6 +359,11 @@ impl History {
 
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// The bytes the undo and redo steps hold on to (not the open one).
+    pub fn retained_bytes(&self) -> usize {
+        self.retained
     }
 
     /// How many undo steps there are.
@@ -644,6 +669,7 @@ mod tests {
             assert!(h.undo_len() <= MAX_UNDO_GROUPS);
         }
         assert_eq!(h.undo_len(), MAX_UNDO_GROUPS);
+        assert_eq!(h.retained_bytes(), recount(&h));
         for _ in 0..MAX_UNDO_GROUPS - 1 {
             assert!(h.undo(&mut buf).is_some());
         }
@@ -659,5 +685,105 @@ mod tests {
         }
         assert_eq!(n, MAX_UNDO_GROUPS);
         assert_eq!(buf.to_text(), "x".repeat(MAX_UNDO_GROUPS + extra));
+    }
+
+    /// The byte total worked out from the stacks, independent of the
+    /// running count.
+    fn recount(h: &History) -> usize {
+        h.undo
+            .iter()
+            .chain(h.redo.iter())
+            .flat_map(|g| g.edits.iter())
+            .map(|(i, f)| i.text.len() + f.text.len() + size_of::<(Edit, Edit)>())
+            .sum()
+    }
+
+    #[test]
+    fn retained_bytes_follows_groups() {
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("");
+        assert_eq!(h.retained_bytes(), 0);
+        for t in ["hello", "wor", "ld!!"] {
+            let end = pos(0, buf.to_text().len());
+            h.begin();
+            edit(&mut h, &mut buf, end..end, t);
+            h.end();
+            assert_eq!(h.retained_bytes(), recount(&h));
+        }
+        assert!(h.retained_bytes() > 0);
+        h.undo(&mut buf);
+        h.undo(&mut buf);
+        assert_eq!(h.retained_bytes(), recount(&h));
+        h.redo(&mut buf);
+        assert_eq!(h.retained_bytes(), recount(&h));
+        // A new step clears redo.
+        edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "new");
+        assert!(!h.can_redo());
+        assert_eq!(h.retained_bytes(), recount(&h));
+    }
+
+    #[test]
+    fn oldest_groups_drop_past_the_byte_budget() {
+        let _big = crate::testkit::big_doc_lock();
+        use crate::limits::MAX_UNDO_BYTES;
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("");
+        let n = MAX_UNDO_BYTES / (1 << 20) + 3;
+        // Group i inserts 1 MiB of its own character at the start, so the
+        // text reads newest first.
+        let ch = |i: usize| char::from(b'!' + u8::try_from(i).unwrap());
+        for i in 0..n {
+            let text = ch(i).to_string().repeat(1 << 20);
+            h.begin();
+            edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), &text);
+            h.end();
+            assert!(h.retained_bytes() <= MAX_UNDO_BYTES || h.undo_len() == 1);
+            assert_eq!(h.retained_bytes(), recount(&h));
+        }
+        let kept = h.undo_len();
+        assert!(kept < n);
+        // The newest groups are the ones kept, undone newest first.
+        for i in (n - kept..n).rev() {
+            assert!(buf.to_text().starts_with(ch(i)));
+            assert!(h.undo(&mut buf).is_some());
+        }
+        assert!(h.undo(&mut buf).is_none());
+        // What is left is the dropped (oldest) groups' text, newest first.
+        let left = buf.to_text();
+        assert_eq!(left.len(), (n - kept) << 20);
+        for (k, i) in (0..n - kept).rev().enumerate() {
+            assert!(left[k << 20..].starts_with(ch(i)));
+        }
+    }
+
+    #[test]
+    fn a_single_huge_group_is_kept() {
+        let _big = crate::testkit::big_doc_lock();
+        use crate::limits::MAX_UNDO_BYTES;
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("");
+        let big = "y".repeat(MAX_UNDO_BYTES + 1);
+        h.begin();
+        edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), &big);
+        h.end();
+        assert_eq!(h.undo_len(), 1);
+        assert!(h.retained_bytes() > MAX_UNDO_BYTES);
+        assert_eq!(h.retained_bytes(), recount(&h));
+        assert!(h.undo(&mut buf).is_some());
+        assert_eq!(buf.to_text(), "");
+    }
+
+    #[test]
+    fn reopen_keeps_the_total() {
+        let mut h = History::new();
+        let mut buf = Buffer::from_text("");
+        edit(&mut h, &mut buf, pos(0, 0)..pos(0, 0), "a");
+        let id = h.last_group().unwrap();
+        assert!(h.reopen(id));
+        assert_eq!(h.retained_bytes(), 0);
+        edit(&mut h, &mut buf, pos(0, 1)..pos(0, 1), "bcd");
+        h.end();
+        assert_eq!(h.retained_bytes(), recount(&h));
+        assert!(h.retained_bytes() > 0);
     }
 }

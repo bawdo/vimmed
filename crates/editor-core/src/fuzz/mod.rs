@@ -17,6 +17,7 @@ use crate::file::{recovery, registers_store};
 use crate::host::{Host, Waker, WindowRequest};
 use crate::input::{Input, KeyEvent};
 use crate::keyseq::parse_keys;
+use crate::limits;
 use crate::markdown::block::oracle::{assert_fresh, check_update, snapshot};
 use crate::markdown::{Blocks, Reveal, display_to_src, line_display, parse_line, src_to_display};
 use crate::platform::Platform;
@@ -520,21 +521,6 @@ fn fuzz_path() -> PathBuf {
     PathBuf::from(format!("/nonexistent-{}-fuzz/fuzz.md", app_meta::SLUG))
 }
 
-/// The longest cursor line, in bytes, `editor_keys` lets a run reach. The
-/// editor's cost per key grows with the length of the cursor line (the
-/// display column is counted from the line's start, several times a key),
-/// and a counted put builds a huge line from a tiny input, so a run on one
-/// hits the libFuzzer timeout. That is a known limitation, tracked
-/// separately. Like the input cap, this bounds the work a run can create:
-/// the run ends, without a panic, once the cursor line is longer.
-const MAX_FUZZ_LINE_BYTES: usize = 2048;
-
-/// The most lines `editor_keys` lets a document reach. Yank and put double
-/// a document, so any document grows exponentially within a few keys and no
-/// per-put cap bounds it. Like the line-length guard, this bounds the work a
-/// run can create: the run ends, without a panic, once the buffer passes it.
-const MAX_FUZZ_LINES: usize = 65_536;
-
 /// How far the clock moves between two keys: a frame at 60 Hz.
 const KEY_STEP_NS: u64 = 16_000_000;
 
@@ -608,9 +594,15 @@ fn drive(path: PathBuf, data: &[u8]) -> Editor {
         }));
         let c = ViewSource::cursor(&editor);
         assert_eq!(editor.buffer().clamp(c), c, "cursor off a boundary");
+        // The run budgets are the product's own document budgets
+        // (`limits`), not ones the harness chose. The product refuses a put
+        // or a `:s` that would pass them, but typing (and `.` replaying
+        // typed text) is not checked and can pass them, so the run ends
+        // there instead of working on a document the product would not
+        // have grown to.
         if fx.close.is_some()
-            || editor.buffer().line(c.line).len() > MAX_FUZZ_LINE_BYTES
-            || editor.buffer().line_count() > MAX_FUZZ_LINES
+            || editor.buffer().line_count() > limits::MAX_DOC_LINES
+            || editor.buffer().byte_count() > limits::MAX_DOC_BYTES
         {
             break;
         }
@@ -655,45 +647,45 @@ mod tests {
         assert!(text.contains(strings::NO_FILE_ACCESS), "{text}");
     }
 
-    /// A put that takes the cursor line past `MAX_FUZZ_LINE_BYTES` ends the
-    /// run: the keys after it are not applied.
-    // Needs counts above the fuzz-build ceiling.
-    #[cfg(not(fuzzing))]
-    #[test]
-    fn editor_keys_stops_on_a_long_line() {
-        let put = MAX_FUZZ_LINE_BYTES; // "a" plus this many more is over
-        let data = format!("a\0yl{put}p$ix<Esc>");
-        let e = drive(fuzz_path(), data.as_bytes());
-        let line = e.buffer().line(0);
-        assert_eq!(line.len(), MAX_FUZZ_LINE_BYTES + 1);
-        assert!(
-            !line.contains('x'),
-            "a key ran after the line passed the cap"
-        );
-
-        // At the cap exactly, the run goes on.
-        let data = format!("a\0yl{}p$ix<Esc>", put - 1);
-        let e = drive(fuzz_path(), data.as_bytes());
-        assert_eq!(e.buffer().line(0).len(), MAX_FUZZ_LINE_BYTES + 1);
-        assert!(e.buffer().line(0).contains('x'));
-    }
-
-    /// A put that takes the buffer past `MAX_FUZZ_LINES` ends the run: the
-    /// keys after it are not applied.
-    // Needs counts above the fuzz-build ceiling.
+    /// A document past `limits::MAX_DOC_LINES` ends the run after the first
+    /// key: the keys after it are not applied. The document is built from
+    /// text, because typing is the only way past the budget and a put or a
+    /// `:s` is refused there.
+    // The normal-build budget; the fuzz build has a lower one.
     #[cfg(not(fuzzing))]
     #[test]
     fn editor_keys_stops_on_too_many_lines() {
-        let data = format!("a\0yy{}pix<Esc>", MAX_FUZZ_LINES);
-        let e = drive(fuzz_path(), data.as_bytes());
-        assert_eq!(e.buffer().line_count(), MAX_FUZZ_LINES + 1);
-        assert!(!e.text().contains('x'), "a key ran after the cap");
+        let _big = crate::testkit::big_doc_lock();
+        let mut data = "\n".repeat(limits::MAX_DOC_LINES + 1).into_bytes();
+        data.extend_from_slice(b"\0ix<Esc>");
+        let e = drive(fuzz_path(), &data);
+        assert_eq!(e.buffer().line_count(), limits::MAX_DOC_LINES + 1);
+        assert!(!e.text().contains('x'), "a key ran after the budget");
 
-        // At the cap exactly, the run goes on.
-        let data = format!("a\0yy{}pix<Esc>", MAX_FUZZ_LINES - 1);
-        let e = drive(fuzz_path(), data.as_bytes());
-        assert_eq!(e.buffer().line_count(), MAX_FUZZ_LINES);
+        // At the budget exactly, the run goes on.
+        let mut data = "\n".repeat(limits::MAX_DOC_LINES).into_bytes();
+        data.extend_from_slice(b"\0ix<Esc>");
+        let e = drive(fuzz_path(), &data);
+        assert_eq!(e.buffer().line_count(), limits::MAX_DOC_LINES);
         assert!(e.text().contains('x'));
+    }
+
+    /// A document past `limits::MAX_DOC_BYTES` ends the run after the first
+    /// key, built from one long line of text. There is no at-budget case:
+    /// it would be a second 256 MiB document in a debug test.
+    // The normal-build budget; the fuzz build has a lower one.
+    #[cfg(not(fuzzing))]
+    #[test]
+    fn editor_keys_stops_on_too_many_bytes() {
+        let _big = crate::testkit::big_doc_lock();
+        let mut data = vec![b'a'; limits::MAX_DOC_BYTES + 1];
+        data.extend_from_slice(b"\0ix<Esc>");
+        let e = drive(fuzz_path(), &data);
+        assert_eq!(e.buffer().byte_count(), limits::MAX_DOC_BYTES + 1);
+        assert!(
+            !e.buffer().line(0).contains('x'),
+            "a key ran after the budget"
+        );
     }
 
     #[test]

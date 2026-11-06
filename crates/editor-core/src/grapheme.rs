@@ -79,6 +79,12 @@ pub fn floor(line: &str, col: usize) -> usize {
 
 /// The number of graphemes before byte offset `col`, for `line:column` display (0-based).
 pub fn display_col(line: &str, col: usize) -> usize {
+    // Lines never contain `\n`, so an ASCII prefix holds no `\r\n` pair and
+    // each of its bytes starts a grapheme.
+    let end = col.min(line.len());
+    if line.as_bytes()[..end].is_ascii() {
+        return end;
+    }
     line.grapheme_indices(true)
         .take_while(|&(i, _)| i < col)
         .count()

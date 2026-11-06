@@ -63,11 +63,19 @@ pub fn lines(
 /// The matches `sub` replaces on `line`: all of them with `g`, else the
 /// first.
 fn line_matches(line: &str, sub: &Sub) -> Vec<Range<usize>> {
-    let mut ms = search::literal_matches(line, &sub.pattern, sub.flags.i);
-    if !sub.flags.g {
-        ms.truncate(1);
-    }
-    ms
+    replaced(&search::Literal::new(&sub.pattern, sub.flags.i), line, sub).collect()
+}
+
+/// The matches `sub` replaces on `line`, one at a time, found by `m`
+/// (`sub`'s pattern made ready): `line_matches` and `project` both count
+/// through here, so they find the same matches.
+fn replaced<'a>(
+    m: &'a search::Literal<'_>,
+    line: &'a str,
+    sub: &Sub,
+) -> impl Iterator<Item = Range<usize>> + 'a {
+    m.matches(line)
+        .take(if sub.flags.g { usize::MAX } else { 1 })
 }
 
 /// `replacement` with each `$&` turned into `matched`.
@@ -94,6 +102,42 @@ pub fn run(buf: &Buffer, sub: &Sub, lines: RangeInclusive<usize>) -> SubResult {
         count: session.count(),
         lines: session.lines(),
     }
+}
+
+/// What a `:s` would do if every match it finds were replaced, counted
+/// before anything is built: how many changes, and how many lines and
+/// content bytes (line breaks not counted, as `Buffer::byte_count`) it
+/// would add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Projection {
+    pub changes: usize,
+    pub added_lines: usize,
+    pub added_bytes: usize,
+}
+
+/// The `Projection` of `sub` on `lines` of `buf`: the matches `run` would
+/// replace, found the same way, each growing the document by its
+/// expansion less what it matched, or not at all (a shrinking match never
+/// makes room for a growing one). O(lines) time, and no memory per match.
+/// Sums saturate, so a projection too big to count never fits a budget.
+pub fn project(buf: &Buffer, sub: &Sub, lines: RangeInclusive<usize>) -> Projection {
+    // `expand` puts the match in for each `$&` and keeps the rest, whose
+    // line breaks (`\r`) are the only ones: a match lies within a line.
+    let amps = sub.replacement.matches("$&").count();
+    let breaks = sub.replacement.matches('\n').count();
+    let rest = sub.replacement.len() - 2 * amps - breaks;
+    let m = search::Literal::new(&sub.pattern, sub.flags.i);
+    let mut p = Projection::default();
+    for l in lines {
+        for r in replaced(&m, buf.line(l), sub) {
+            let len = r.len();
+            let expanded = rest.saturating_add(amps.saturating_mul(len));
+            p.changes += 1;
+            p.added_lines = p.added_lines.saturating_add(breaks);
+            p.added_bytes = p.added_bytes.saturating_add(expanded.saturating_sub(len));
+        }
+    }
+    p
 }
 
 /// An answer to `replace with <r>? [y/n/a/q/l]`.
@@ -368,6 +412,7 @@ mod tests {
     use super::*;
     use crate::editor::Editor;
     use crate::ex::SubFlags;
+    use crate::limits::{MAX_DOC_BYTES, MAX_DOC_LINES, MAX_SUB_CHANGES};
     use crate::testkit::*;
     use crate::vim::Mode;
 
@@ -1038,5 +1083,218 @@ mod tests {
     fn vim_golden_confirm_ignores_other_keys() {
         let t = "  X foo\nbar\n  x foo";
         golden_confirm("%s/foo/X/gc", "zyq", t, pos(0, 4), pos(0, 4));
+    }
+
+    // Budgets: `project` and the refusals it drives.
+
+    fn projection(changes: usize, added_lines: usize, added_bytes: usize) -> Projection {
+        Projection {
+            changes,
+            added_lines,
+            added_bytes,
+        }
+    }
+
+    #[test]
+    fn project_counts_without_building() {
+        let buf = Buffer::from_text("aa\na");
+        assert_eq!(
+            project(&buf, &sub("a", "xx", "g"), 0..=1),
+            projection(3, 0, 3)
+        );
+        // `\r` in the replacement (a line break once parsed) adds a line
+        // and no content bytes.
+        assert_eq!(
+            project(&buf, &sub("a", "x\ny", "g"), 0..=1),
+            projection(3, 3, 3)
+        );
+        // Without g, one a line; the range is kept to.
+        assert_eq!(
+            project(&buf, &sub("a", "xx", ""), 0..=1),
+            projection(2, 0, 2)
+        );
+        assert_eq!(
+            project(&buf, &sub("a", "xx", "g"), 1..=1),
+            projection(1, 0, 1)
+        );
+        // A shrinking match never pays for a growing one.
+        let buf = Buffer::from_text("abc x");
+        assert_eq!(
+            project(&buf, &sub("abc", "", "g"), 0..=0),
+            projection(1, 0, 0)
+        );
+        // `$&` grows by the match each time it appears.
+        assert_eq!(
+            project(&buf, &sub("x", "$&$&$&", "g"), 0..=0),
+            projection(1, 0, 2)
+        );
+        // An empty pattern matches nothing.
+        assert_eq!(
+            project(&buf, &sub("", "y", "g"), 0..=0),
+            projection(0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn project_agrees_with_run() {
+        // Every case `run` handles differently: g or not, case folding and
+        // the Kelvin sign, a match that would split a grapheme, `$&`, a
+        // line break, and a shrinking replacement.
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("foo bar foo\nfoo foo\nbar", "foo", "baz", "g"),
+            ("foo bar foo\nfoo foo\nbar", "foo", "baz", ""),
+            ("FOO foo Foo\nfOo", "foo", "[$&]", "gi"),
+            ("foo \u{212A}ey\nKEY key", "KEY", "x", "gi"),
+            ("e\u{301}e e\u{301}\ne", "e", "ee", "g"),
+            ("aa\nb\na", "a", "x\ny\nz", "g"),
+            ("abcabc\nabc", "abc", "", "g"),
+        ];
+        for &(text, pattern, replacement, f) in cases {
+            let s = sub(pattern, replacement, f);
+            let buf = Buffer::from_text(text);
+            let range = 0..=buf.line_count() - 1;
+            let p = project(&buf, &s, range.clone());
+            let r = run(&buf, &s, range);
+            let mut after = buf.clone();
+            for e in &r.edits {
+                after.replace(e.range.clone(), &e.text);
+            }
+            assert_eq!(p.changes, r.count, "{text:?} {pattern:?} {f:?}");
+            assert_eq!(p.added_lines, after.line_count() - buf.line_count());
+            // Each match grows by its expansion less what it matched, or
+            // not at all: the sum of that is what `project` gives.
+            let expected: usize = r
+                .edits
+                .iter()
+                .map(|e| e.text.len() - e.text.matches('\n').count())
+                .zip(matched_lens(&buf, &s))
+                .map(|(grew, was)| grew.saturating_sub(was))
+                .sum();
+            assert_eq!(p.added_bytes, expected, "{text:?} {pattern:?} {f:?}");
+            assert!(p.added_bytes >= after.byte_count().saturating_sub(buf.byte_count()));
+        }
+    }
+
+    /// The length of each match `run` would replace, in order.
+    fn matched_lens(buf: &Buffer, s: &Sub) -> Vec<usize> {
+        (0..buf.line_count())
+            .flat_map(|l| line_matches(buf.line(l), s).into_iter().map(|r| r.len()))
+            .collect()
+    }
+
+    /// An editor on one line of `n` `a`s.
+    fn ed_of_matches(n: usize) -> Editor {
+        ed(&"a".repeat(n))
+    }
+
+    #[test]
+    fn s_past_the_change_cap_is_refused() {
+        let mut e = ed_of_matches(MAX_SUB_CHANGES + 1);
+        keys(&mut e, ":%s/a/b/g<CR>");
+        assert!(
+            e.buffer().line(0).bytes().all(|b| b == b'a'),
+            "the text changed"
+        );
+        assert_eq!(e.buffer().byte_count(), MAX_SUB_CHANGES + 1);
+        assert!(!e.history().can_undo());
+        assert_eq!(e.mode(), Mode::Normal);
+        let msg = strings::too_many_changes(MAX_SUB_CHANGES);
+        assert_eq!(e.message(), Some(msg.as_str()));
+        assert!(msg.contains(&MAX_SUB_CHANGES.to_string()));
+    }
+
+    #[test]
+    fn s_at_the_change_cap_is_accepted() {
+        let mut e = ed_of_matches(MAX_SUB_CHANGES);
+        keys(&mut e, ":%s/a/b/g<CR>");
+        assert!(e.buffer().line(0).bytes().all(|b| b == b'b'));
+        assert!(e.history().can_undo());
+        let done = strings::substitutions(MAX_SUB_CHANGES, 1);
+        assert_eq!(e.message(), Some(done.as_str()));
+    }
+
+    #[test]
+    fn n_past_the_change_cap_still_counts() {
+        let mut e = ed_of_matches(MAX_SUB_CHANGES + 1);
+        keys(&mut e, ":%s/a/b/gn<CR>");
+        let counted = strings::matches(MAX_SUB_CHANGES + 1, 1);
+        assert_eq!(e.message(), Some(counted.as_str()));
+    }
+
+    #[test]
+    fn confirm_past_a_budget_never_starts() {
+        let mut e = ed_of_matches(MAX_SUB_CHANGES + 1);
+        keys(&mut e, ":%s/a/b/gc<CR>");
+        assert_eq!(e.mode(), Mode::Normal);
+        let msg = strings::too_many_changes(MAX_SUB_CHANGES);
+        assert_eq!(e.message(), Some(msg.as_str()));
+        // No session: an answer is a Normal-mode key, and `y` alone
+        // changes nothing.
+        keys(&mut e, "y");
+        assert_eq!(e.mode(), Mode::Normal);
+        assert!(
+            e.buffer().line(0).bytes().all(|b| b == b'a'),
+            "the text changed"
+        );
+        assert!(!e.history().can_undo());
+    }
+
+    #[test]
+    fn s_past_the_line_budget_is_refused() {
+        let _big = big_doc_lock();
+        // One line short of the budget: a replacement adding two lines is
+        // refused, with or without c, and one adding one is accepted.
+        let mut e = ed(&"a\n".repeat(MAX_DOC_LINES - 1));
+        let lines = e.buffer().line_count();
+        assert_eq!(lines, MAX_DOC_LINES - 1);
+        keys(&mut e, r":1s/a/x\r\ry/<CR>");
+        assert_eq!(e.buffer().line_count(), lines);
+        assert_eq!(e.buffer().line(0), "a");
+        assert!(!e.history().can_undo());
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
+        keys(&mut e, r":1s/a/x\r\ry/c<CR>");
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
+        assert!(!e.history().can_undo());
+        keys(&mut e, r":1s/a/x\ry/<CR>");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES);
+        assert_eq!(e.message(), Some("1 substitution on 1 line"));
+    }
+
+    #[test]
+    fn s_past_the_byte_budget_is_refused() {
+        let _big = big_doc_lock();
+        // Sixteen lines (16 MiB each in a normal build), the last 4 bytes
+        // short with one `a` in it: the document is 4 bytes under the
+        // budget.
+        const LINE: usize = MAX_DOC_BYTES / 16;
+        assert_eq!(16 * LINE, MAX_DOC_BYTES);
+        let mut text = String::with_capacity(MAX_DOC_BYTES + 16);
+        let row = "x".repeat(LINE);
+        for _ in 0..15 {
+            text.push_str(&row);
+            text.push('\n');
+        }
+        text.push('a');
+        text.push_str(&row[..LINE - 5]);
+        drop(row);
+        let mut e = ed(&text);
+        drop(text);
+        assert_eq!(e.buffer().byte_count(), MAX_DOC_BYTES - 4);
+        // Growing by 5 is refused, with or without c.
+        keys(&mut e, ":%s/a/aaaaaa/<CR>");
+        assert_eq!(e.buffer().byte_count(), MAX_DOC_BYTES - 4);
+        assert!(e.buffer().line(15).starts_with("ax"), "the text changed");
+        assert!(!e.history().can_undo());
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
+        keys(&mut e, ":%s/a/aaaaaa/gc<CR>");
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
+        assert!(!e.history().can_undo());
+        // Growing by 4 lands on the budget and is accepted.
+        keys(&mut e, ":%s/a/aaaaa/<CR>");
+        assert_eq!(e.buffer().byte_count(), MAX_DOC_BYTES);
+        assert!(e.buffer().line(15).starts_with("aaaaax"));
+        assert_eq!(e.message(), Some("1 substitution on 1 line"));
     }
 }
