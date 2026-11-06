@@ -1008,12 +1008,9 @@ impl Editor {
     fn vim_cursor(&self) -> Cursor {
         Cursor {
             pos: self.cursor,
-            want: self.goal.unwrap_or_else(|| {
-                Want::Col(grapheme::display_col(
-                    self.buf.line(self.cursor.line),
-                    self.cursor.col,
-                ))
-            }),
+            want: self
+                .goal
+                .unwrap_or_else(|| Want::Col(self.buf.display_col(self.cursor))),
         }
     }
 
@@ -1842,22 +1839,16 @@ impl Editor {
             up
         };
         let goal = self.goal.unwrap_or_else(|| {
-            Want::Col(grapheme::display_col(self.buf.line(line), self.cursor.col))
+            Want::Col(self.buf.display_col(Pos {
+                line,
+                col: self.cursor.col,
+            }))
         });
         self.goal = Some(goal);
         let text = self.buf.line(target);
         let col = match goal {
             Want::End => text.len(),
-            Want::Col(g) => {
-                let mut col = 0;
-                for _ in 0..g {
-                    if col >= text.len() {
-                        break;
-                    }
-                    col = grapheme::next(text, col);
-                }
-                col
-            }
+            Want::Col(g) => self.buf.grapheme_start(target, g).unwrap_or(text.len()),
         };
         self.move_to(Pos { line: target, col })
     }
