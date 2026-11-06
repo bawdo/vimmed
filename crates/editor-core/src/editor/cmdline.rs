@@ -346,7 +346,11 @@ impl Editor {
             self.say(strings::pattern_not_found(&sub.pattern));
             return Effects::default();
         };
-        let (first, last) = (first.range.start.line, last.range.start.line);
+        // The last edit's last line, once its line breaks (`\r`) are in.
+        let (first, last) = (
+            first.range.start.line,
+            last.range.start.line + last.text.matches('\n').count(),
+        );
         let fx = self.run(|ctx| {
             ctx.place(Pos {
                 line: first,

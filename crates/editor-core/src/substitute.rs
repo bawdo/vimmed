@@ -23,9 +23,10 @@ use crate::vim::motion::caret_col;
 /// What `run` found: the edits to make (none for `n`), how many matches
 /// they replace and on how many lines.
 ///
-/// There is one edit per line, top to bottom, from the line's first
-/// replaced match to the end of its last. None changes the line count, so
-/// each applies as given, in any order.
+/// There is one edit per match, top to bottom, holding only its
+/// replacement. A replacement can hold line breaks (`\r`), so each edit is
+/// placed in the buffer as the edits before it leave it: they apply in
+/// order, and only in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubResult {
     pub edits: Vec<Edit>,
@@ -75,39 +76,24 @@ fn expand(replacement: &str, matched: &str) -> String {
 }
 
 /// Every replacement `sub` makes on `lines` of `buf`, or with `n` only the
-/// count.
+/// count. The edits are those of a confirm session answered `a` at its
+/// first match, so the two ways of running `:s` place matches alike.
 pub fn run(buf: &Buffer, sub: &Sub, lines: RangeInclusive<usize>) -> SubResult {
-    let mut out = SubResult::default();
-    for l in lines {
-        let text = buf.line(l);
-        let ms = line_matches(text, sub);
-        let (Some(first), Some(last)) = (ms.first(), ms.last()) else {
-            continue;
-        };
-        out.count += ms.len();
-        out.lines += 1;
-        if sub.flags.n {
-            continue;
+    if sub.flags.n {
+        let mut out = SubResult::default();
+        for l in lines {
+            let found = line_matches(buf.line(l), sub).len();
+            out.count += found;
+            out.lines += usize::from(found > 0);
         }
-        let mut new = String::new();
-        let mut at = first.start;
-        for m in &ms {
-            new.push_str(&text[at..m.start]);
-            new.push_str(&expand(&sub.replacement, &text[m.clone()]));
-            at = m.end;
-        }
-        out.edits.push(Edit {
-            range: Pos {
-                line: l,
-                col: first.start,
-            }..Pos {
-                line: l,
-                col: last.end,
-            },
-            text: new,
-        });
+        return out;
     }
-    out
+    let mut session = confirm_session(buf, sub, lines);
+    SubResult {
+        edits: session.answer(Answer::All),
+        count: session.count(),
+        lines: session.lines(),
+    }
 }
 
 /// An answer to `replace with <r>? [y/n/a/q/l]`.
@@ -139,12 +125,11 @@ impl Answer {
     }
 }
 
-/// One match a session asks about.
+/// One match a session asks about, where it was before the command:
+/// `ConfirmSession::locate` gives where it is now.
 #[derive(Debug, Clone)]
 struct Match {
     line: usize,
-    /// Where it is in the buffer as it stands, after the replacements so
-    /// far.
     range: Range<usize>,
     /// The text it matched, for `$&`.
     text: String,
@@ -174,7 +159,18 @@ pub struct ConfirmSession {
     at: usize,
     count: usize,
     lines: usize,
+    /// Lines the replacements so far have added (`\r`), which move every
+    /// match after them down.
+    shift: usize,
+    /// Where the text after the last replacement now starts: its line
+    /// before the command, its column then and its column now. Matches
+    /// after it on that line move with it.
+    anchor: Option<(usize, usize, usize)>,
+    /// The last line replaced on, before the command, for `lines`.
     last_line: Option<usize>,
+    /// Where the last replacement ends now: the line `a` leaves the
+    /// cursor on.
+    last_end_line: Option<usize>,
     /// The first line replaced on, and the cursor vim's undo goes back to
     /// for the session: see `undo_cursor`.
     first_line: Option<usize>,
@@ -201,7 +197,10 @@ pub fn confirm_session(buf: &Buffer, sub: &Sub, lines: RangeInclusive<usize>) ->
         at: 0,
         count: 0,
         lines: 0,
+        shift: 0,
+        anchor: None,
         last_line: None,
+        last_end_line: None,
         first_line: None,
         undo_cursor: None,
         end: None,
@@ -212,7 +211,18 @@ impl ConfirmSession {
     /// The match being asked about: its line and range in the buffer as it
     /// stands.
     pub fn current(&self) -> Option<(usize, Range<usize>)> {
-        self.matches.get(self.at).map(|m| (m.line, m.range.clone()))
+        self.matches.get(self.at).map(|m| self.locate(m))
+    }
+
+    /// Where `m`, a match not yet answered, is in the buffer as it stands:
+    /// moved down by the lines added before it and, on the line last
+    /// replaced on, along with the text after that replacement.
+    fn locate(&self, m: &Match) -> (usize, Range<usize>) {
+        let col = |c: usize| match self.anchor {
+            Some((line, was, now)) if line == m.line => c - was + now,
+            _ => c,
+        };
+        (m.line + self.shift, col(m.range.start)..col(m.range.end))
     }
 
     /// `replace with <r>? [y/n/a/q/l]`, with the replacement as typed.
@@ -224,18 +234,18 @@ impl ConfirmSession {
     /// makes, to be applied in order before anything else changes the
     /// buffer.
     pub fn answer(&mut self, a: Answer) -> Vec<Edit> {
-        let Some(m) = self.matches.get(self.at) else {
+        let Some((line, range)) = self.current() else {
             return Vec::new();
         };
         let asked = Pos {
-            line: m.line,
-            col: m.range.start,
+            line,
+            col: range.start,
         };
         let mut edits = Vec::new();
         match a {
             Answer::Yes | Answer::Last => {
                 edits.push(self.replace());
-                self.end = Some(End::LineStart(asked.line));
+                self.end = self.last_end_line.map(End::LineStart);
                 if a == Answer::Last {
                     self.at = self.matches.len();
                 }
@@ -254,43 +264,51 @@ impl ConfirmSession {
                 while self.at < self.matches.len() {
                     edits.push(self.replace());
                 }
-                self.end = self.last_line.map(End::FirstNonBlank);
+                self.end = self.last_end_line.map(End::FirstNonBlank);
             }
         }
         edits
     }
 
     /// Replaces the current match and moves to the next: the edit, with
-    /// the matches after it on its line moved by the change in length.
+    /// the matches after it moved by the lines and columns it adds.
     fn replace(&mut self) -> Edit {
         let m = &self.matches[self.at];
-        let line = m.line;
+        let (was_line, was_end) = (m.line, m.range.end);
+        let (line, range) = self.locate(m);
         let text = expand(&self.replacement, &m.text);
+        let breaks = text.matches('\n').count();
+        // The column just past the replacement, on its last line.
+        let end_col = match text.rfind('\n') {
+            Some(i) => text.len() - i - 1,
+            None => range.start + text.len(),
+        };
         let edit = Edit {
             range: Pos {
                 line,
-                col: m.range.start,
+                col: range.start,
             }..Pos {
                 line,
-                col: m.range.end,
+                col: range.end,
             },
             text,
         };
-        let (old, new) = (m.range.len(), edit.text.len());
-        for later in self.matches[self.at + 1..]
-            .iter_mut()
-            .take_while(|l| l.line == line)
-        {
-            later.range = later.range.start + new - old..later.range.end + new - old;
-        }
+        self.shift += breaks;
+        self.anchor = Some((was_line, was_end, end_col));
+        self.last_end_line = Some(line + breaks);
         self.count += 1;
-        if self.last_line != Some(line) {
+        if self.last_line != Some(was_line) {
             self.lines += 1;
-            self.last_line = Some(line);
+            self.last_line = Some(was_line);
         }
-        let first = *self.first_line.get_or_insert(line);
-        if first == line {
-            self.undo_cursor = Some(Pos { line, col: 0 });
+        // No line above the first one replaced on has changed, so its
+        // number is the same before and after.
+        let first = *self.first_line.get_or_insert(was_line);
+        if first == was_line {
+            self.undo_cursor = Some(Pos {
+                line: first,
+                col: 0,
+            });
         }
         self.at += 1;
         edit
@@ -298,7 +316,7 @@ impl ConfirmSession {
 
     /// Notes a match skipped or quit at, for `undo_cursor`.
     fn asked_on_first_line(&mut self, asked: Pos) {
-        if self.first_line == Some(asked.line) {
+        if self.first_line == Some(self.matches[self.at].line) {
             self.undo_cursor = Some(asked);
         }
     }
@@ -499,11 +517,49 @@ mod tests {
     }
 
     #[test]
-    fn edits_are_one_per_line_in_order() {
+    fn edits_are_one_per_match_in_order() {
+        // Each placed where the edits before it leave the buffer.
         let (_, r) = apply("a foo b foo c\nfoo", &sub("foo", "X", "g"), 0..=1);
         let ranges: Vec<_> = r.edits.iter().map(|e| e.range.clone()).collect();
-        assert_eq!(ranges, [pos(0, 2)..pos(0, 11), pos(1, 0)..pos(1, 3)]);
-        assert_eq!(r.edits[0].text, "X b X");
+        assert_eq!(
+            ranges,
+            [
+                pos(0, 2)..pos(0, 5),
+                pos(0, 6)..pos(0, 9),
+                pos(1, 0)..pos(1, 3)
+            ]
+        );
+        assert!(r.edits.iter().all(|e| e.text == "X"));
+    }
+
+    #[test]
+    fn a_stray_carriage_return_survives_a_line_break() {
+        // Only the replacement is inserted, so the line's own `\r` never
+        // meets a line break from it and becomes `\r\n` (vim keeps `^M`).
+        let (text, r) = apply("a\ra", &sub("a", "\n", "g"), 0..=0);
+        assert_eq!(text, "\n\r\n");
+        assert_eq!((r.count, r.lines), (2, 1));
+    }
+
+    #[test]
+    fn a_line_break_in_the_replacement_moves_later_lines() {
+        // Edits applied top to bottom, as the editor does.
+        let (text, r) = apply("a1\na2\na3", &sub("a", "x\ny", "g"), 0..=2);
+        assert_eq!(text, "x\ny1\nx\ny2\nx\ny3");
+        assert_eq!((r.count, r.lines), (3, 3));
+    }
+
+    #[test]
+    fn a_line_break_twice_on_a_line_and_below() {
+        let (text, r) = apply("aa\nb\na", &sub("a", "\n", "g"), 0..=2);
+        assert_eq!(text, "\n\n\nb\n\n");
+        assert_eq!((r.count, r.lines), (3, 2));
+    }
+
+    #[test]
+    fn a_line_break_only_on_the_first_match_without_g() {
+        let (text, _) = apply("aa\naa", &sub("a", "x\ny", ""), 0..=1);
+        assert_eq!(text, "x\nya\nx\nya");
     }
 
     #[test]
@@ -545,6 +601,56 @@ mod tests {
         assert!(s.answer(Answer::No).is_empty());
         assert!(s.done());
         assert_eq!((s.count(), s.lines()), (1, 1));
+    }
+
+    /// Feeds `answers` to a session of `s` over all of `text` and returns
+    /// the text after, and the session.
+    fn session(text: &str, s: &Sub, answers: &[Answer]) -> (Buffer, ConfirmSession) {
+        let mut buf = Buffer::from_text(text);
+        let n = buf.line_count();
+        let mut cs = confirm_session(&buf, s, 0..=n - 1);
+        for &a in answers {
+            for e in cs.answer(a) {
+                buf.replace(e.range, &e.text);
+            }
+        }
+        (buf, cs)
+    }
+
+    #[test]
+    fn the_session_follows_a_line_break_on_the_same_line() {
+        let s = sub("a", "x\ny", "gc");
+        let (buf, cs) = session("aa\nb", &s, &[Answer::Yes]);
+        assert_eq!(buf.to_text(), "x\nya\nb");
+        // The second `a` is now on the replacement's last line.
+        assert_eq!(cs.current(), Some((1, 1..2)));
+        let (buf, cs) = session("aa\nb", &s, &[Answer::Yes, Answer::Yes]);
+        assert_eq!(buf.to_text(), "x\nyx\ny\nb");
+        assert!(cs.done());
+        assert_eq!((cs.count(), cs.lines()), (2, 1));
+    }
+
+    #[test]
+    fn the_session_moves_later_lines_down_after_a_line_break() {
+        let s = sub("a", "x\ny", "gc");
+        let (buf, cs) = session("a1\na2\na3", &s, &[Answer::Yes]);
+        assert_eq!(buf.to_text(), "x\ny1\na2\na3");
+        assert_eq!(cs.current(), Some((2, 0..1)));
+        let (buf, cs) = session("a1\na2\na3", &s, &[Answer::Yes, Answer::No, Answer::Yes]);
+        assert_eq!(buf.to_text(), "x\ny1\na2\nx\ny3");
+        assert_eq!((cs.count(), cs.lines()), (2, 2));
+    }
+
+    #[test]
+    fn answering_all_with_line_breaks_matches_run() {
+        let s = sub("a", "x\n\ny", "gc");
+        let text = "aa\nba\na";
+        let (buf, cs) = session(text, &s, &[Answer::No, Answer::All]);
+        assert_eq!(buf.to_text(), "ax\n\ny\nbx\n\ny\nx\n\ny");
+        assert_eq!((cs.count(), cs.lines()), (3, 3));
+        let (all, _) = session(text, &s, &[Answer::All]);
+        let (ran, _) = apply(text, &sub("a", "x\n\ny", "g"), 0..=2);
+        assert_eq!(all.to_text(), ran);
     }
 
     // vim_engine_test.dart: confirm mode (:s///c).
@@ -641,6 +747,49 @@ mod tests {
         keys(&mut e, "N<Space>L");
         assert_eq!(e.text(), "x foo x");
         assert_eq!(e.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn confirm_with_backslash_r_asks_at_each_match_where_it_now_is() {
+        let mut e = confirm("aa\na", r"%s/a/x\ry/gc");
+        keys(&mut e, "y");
+        assert_eq!(e.text(), "x\nya\na");
+        assert_eq!(e.mode(), Mode::Confirm);
+        assert_eq!(e.cursor(), pos(1, 1));
+        keys(&mut e, "y");
+        assert_eq!(e.text(), "x\nyx\ny\na");
+        assert_eq!(e.cursor(), pos(3, 0));
+        keys(&mut e, "y");
+        assert_eq!(e.text(), "x\nyx\ny\nx\ny");
+        assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.message(), Some("3 substitutions on 2 lines"));
+        // vim 9.1: the start of the last replacement's last line.
+        assert_eq!(e.cursor(), pos(4, 0));
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "aa\na");
+    }
+
+    #[test]
+    fn vim_golden_confirm_backslash_r_cursor() {
+        // vim 9.1, `:%s/a/x\ry/gc` on `aa a`: the answers, the text and
+        // where the cursor ends.
+        for (answers, text, cursor) in [
+            ("yyq", "x\nyx\ny\na", pos(3, 0)),
+            ("a", "x\nyx\ny\nx\ny", pos(4, 0)),
+            ("na", "ax\ny\nx\ny", pos(3, 0)),
+            ("yl", "x\nyx\ny\na", pos(2, 0)),
+        ] {
+            let mut e = confirm("aa\na", r"%s/a/x\ry/gc");
+            keys(&mut e, answers);
+            assert_eq!(e.text(), text, "{answers}");
+            assert_eq!(e.mode(), Mode::Normal, "{answers}");
+            assert_eq!(e.cursor(), cursor, "{answers}");
+        }
+        // Two matches on an indented line: the last line's start.
+        let mut e = confirm(" aa\nb", r"%s/a/x\ry/gc");
+        keys(&mut e, "yy");
+        assert_eq!(e.text(), " x\nyx\ny\nb");
+        assert_eq!(e.cursor(), pos(2, 0));
     }
 
     #[test]

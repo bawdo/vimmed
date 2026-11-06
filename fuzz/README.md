@@ -62,7 +62,10 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   buffer, and when `vflag & 1` is set the last Visual selection is
   `(v0 % n, v1 % n)`. `tail[4..]` are confirm answers, one key each. Only a
   `:s` substitute goes past parsing: any other command returns straight after
-  `ex::parse`.
+  `ex::parse`. The applied `run` and the confirm session's result are both
+  compared with an oracle that rebuilds each line from strings, without
+  working out any position, and the session's current match must hold the
+  text it asks about.
 - `markdown_incremental`: the initial text up to the first `0x00`, then edit
   records. A record is six bytes `[flags, l0, c0, l1, c1, len]` followed by
   `len` bytes of replacement text. A truncated record ends the sequence.
