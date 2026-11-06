@@ -12,6 +12,7 @@ pub mod host;
 pub mod input;
 #[cfg(any(test, feature = "fuzzing"))]
 mod keyseq;
+pub mod limits;
 pub mod links;
 pub mod lists;
 pub mod markdown;
