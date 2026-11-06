@@ -765,8 +765,33 @@ mod tests {
         assert_eq!(e.text(), "x\nyx\ny\nx\ny");
         assert_eq!(e.mode(), Mode::Normal);
         assert_eq!(e.message(), Some("3 substitutions on 2 lines"));
+        // vim 9.1: the start of the last replacement's last line.
+        assert_eq!(e.cursor(), pos(4, 0));
         keys(&mut e, "u");
         assert_eq!(e.text(), "aa\na");
+    }
+
+    #[test]
+    fn vim_golden_confirm_backslash_r_cursor() {
+        // vim 9.1, `:%s/a/x\ry/gc` on `aa a`: the answers, the text and
+        // where the cursor ends.
+        for (answers, text, cursor) in [
+            ("yyq", "x\nyx\ny\na", pos(3, 0)),
+            ("a", "x\nyx\ny\nx\ny", pos(4, 0)),
+            ("na", "ax\ny\nx\ny", pos(3, 0)),
+            ("yl", "x\nyx\ny\na", pos(2, 0)),
+        ] {
+            let mut e = confirm("aa\na", r"%s/a/x\ry/gc");
+            keys(&mut e, answers);
+            assert_eq!(e.text(), text, "{answers}");
+            assert_eq!(e.mode(), Mode::Normal, "{answers}");
+            assert_eq!(e.cursor(), cursor, "{answers}");
+        }
+        // Two matches on an indented line: the last line's start.
+        let mut e = confirm(" aa\nb", r"%s/a/x\ry/gc");
+        keys(&mut e, "yy");
+        assert_eq!(e.text(), " x\nyx\ny\nb");
+        assert_eq!(e.cursor(), pos(2, 0));
     }
 
     #[test]
