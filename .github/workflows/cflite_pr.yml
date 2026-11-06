@@ -1,0 +1,46 @@
+name: ClusterFuzzLite PR fuzzing
+
+# Fuzzes the code a pull request changes for five minutes with ClusterFuzzLite
+# (libFuzzer plus AddressSanitizer), using the targets in fuzz/. A crash fails
+# this job and uploads the input. It is not a required check. Uses the default
+# GITHUB_TOKEN only; the corpus lives in Actions artifacts (no storage repo).
+on:
+  pull_request:
+
+permissions: read-all
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.sanitizer }}-${{ github.ref }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address]
+    steps:
+      # The SHA pins the action definitions; they run the mutable image
+      # gcr.io/oss-fuzz-base/clusterfuzzlite-{build,run}-fuzzers:v1, which
+      # upstream controls.
+      - name: Build fuzzers (${{ matrix.sanitizer }})
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: ${{ matrix.sanitizer }}
+
+      - name: Run fuzzers (${{ matrix.sanitizer }})
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          # Code-change mode fuzzes every target here; there is no coverage
+          # job to narrow it to the ones the pull request touches.
+          mode: code-change
+          sanitizer: ${{ matrix.sanitizer }}

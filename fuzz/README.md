@@ -16,6 +16,9 @@ rustup toolchain install nightly-2026-10-23 --profile minimal --component llvm-t
 cargo install cargo-fuzz --locked
 ```
 
+The ClusterFuzzLite image installs the same nightly (`.clusterfuzzlite/Dockerfile`), so
+the two dates move together and are bumped by hand.
+
 Run everything below from `fuzz/`. `rustup` picks the pinned nightly there.
 
 ## Running a target

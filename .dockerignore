@@ -1,0 +1,10 @@
+# Keeps the build context small and clean for .clusterfuzzlite/Dockerfile, which
+# copies the whole repo (COPY . $SRC/vimmed). Build output, fuzz crash artifacts
+# and local notes must not reach the image.
+target/
+fuzz/target/
+fuzz/artifacts/
+fuzz/coverage/
+bench-results/
+.superpowers/
+.git/
