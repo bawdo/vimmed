@@ -101,5 +101,7 @@ fn per_key_cost() {
     scenario("l in 200k code block", &code, "100000G", &repeat('l', 300));
 
     let table = format!("| a | b |\n|---|---|\n{}", "| 1 | 2 |\n".repeat(100_000));
-    scenario("type in 100k table", &table, "50000Gi", &repeat('x', 50));
+    // `l` first: typing must land inside a cell. At column 0, before the
+    // leading pipe, the first key makes the line stop being a table row.
+    scenario("type in 100k table", &table, "50000Gli", &repeat('x', 50));
 }
