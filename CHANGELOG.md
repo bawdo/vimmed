@@ -6,6 +6,10 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `:s///n` counts its matches one at a time, so counting on a very long line no longer takes memory in proportion to the number of matches.
+
 ## [0.9.1] - 2026-11-06
 
 ### Added
