@@ -10,6 +10,21 @@ use super::table::{TableId, TableInfo, find_tables, parse_cells};
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) mod oracle;
 
+// How many times `Blocks::update` has returned from a fast path on this
+// thread, so a test can tell a fast path from the general one when both
+// return the same lines. Per thread, so tests running alongside each other
+// do not see each other's updates.
+#[cfg(test)]
+thread_local! {
+    static FAST_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one return from a fast path in `Blocks::update`.
+fn took_fast_path() {
+    #[cfg(test)]
+    FAST_PATHS.with(|n| n.set(n.get() + 1));
+}
+
 /// Identifies one fenced code block within a `Blocks` value. Stable between
 /// updates that do not touch the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -214,6 +229,7 @@ impl Blocks {
             && let LineKind::TableRow { table } = &self.kinds[s]
             && parse_cells(buf.line(s)).map(|c| c.len()) == Some(self.tables[table].aligns.len())
         {
+            took_fast_path();
             return s..s + 1;
         }
 
@@ -1618,32 +1634,50 @@ mod tests {
 
     const TABLE: &str = "intro\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |\nafter";
 
+    /// Runs `f` and returns how many times `Blocks::update` took a fast path
+    /// meanwhile.
+    fn fast_paths(f: impl FnOnce()) -> usize {
+        let before = FAST_PATHS.with(|n| n.get());
+        f();
+        FAST_PATHS.with(|n| n.get()) - before
+    }
+
     #[test]
     fn editing_a_body_row_in_place_repaints_one_line() {
         let (mut b, mut bl) = blocks(TABLE);
-        let changed = checked_set_line(&mut b, &mut bl, 4, "| 3 | 44 |");
+        let mut changed = 0..0;
+        let fast = fast_paths(|| changed = checked_set_line(&mut b, &mut bl, 4, "| 3 | 44 |"));
+        assert_eq!(fast, 1);
         assert_eq!(changed, 4..5);
     }
 
     #[test]
     fn a_body_row_losing_a_cell_takes_the_general_path() {
         let (mut b, mut bl) = blocks(TABLE);
-        let changed = checked_set_line(&mut b, &mut bl, 4, "| 3 |");
+        let mut changed = 0..0;
+        let fast = fast_paths(|| changed = checked_set_line(&mut b, &mut bl, 4, "| 3 |"));
+        assert_eq!(fast, 0);
         assert!(changed.contains(&4));
     }
 
     #[test]
     fn editing_the_header_takes_the_general_path() {
         let (mut b, mut bl) = blocks(TABLE);
-        checked_set_line(&mut b, &mut bl, 1, "| a | bb |");
-        checked_set_line(&mut b, &mut bl, 1, "| a |");
+        let fast = fast_paths(|| {
+            checked_set_line(&mut b, &mut bl, 1, "| a | bb |");
+            checked_set_line(&mut b, &mut bl, 1, "| a |");
+        });
+        assert_eq!(fast, 0);
     }
 
     #[test]
     fn editing_the_separator_takes_the_general_path() {
         let (mut b, mut bl) = blocks(TABLE);
-        checked_set_line(&mut b, &mut bl, 2, "|:--|--:|");
-        checked_set_line(&mut b, &mut bl, 2, "|---|");
+        let fast = fast_paths(|| {
+            checked_set_line(&mut b, &mut bl, 2, "|:--|--:|");
+            checked_set_line(&mut b, &mut bl, 2, "|---|");
+        });
+        assert_eq!(fast, 0);
     }
 
     #[test]
@@ -1654,15 +1688,21 @@ mod tests {
         let e = b.replace(p(4, 5)..p(4, 5), "|\n|");
         let delta = b.line_count() as isize - before as isize;
         let edited = e.range.start.line..e.range.end.line + 1;
-        let changed = bl.update(&b, edited.clone(), delta);
+        let mut changed = 0..0;
+        let fast = fast_paths(|| changed = bl.update(&b, edited.clone(), delta));
+        assert_eq!(fast, 0);
         check_update(&snap, &b, &bl, edited, delta, changed, "split");
     }
 
     #[test]
     fn a_body_row_that_looks_like_a_separator_keeps_its_cell_count() {
         let (mut b, mut bl) = blocks(TABLE);
-        let changed = checked_set_line(&mut b, &mut bl, 4, "|---|---|");
+        let mut changed = 0..0;
+        let fast = fast_paths(|| {
+            changed = checked_set_line(&mut b, &mut bl, 4, "|---|---|");
+            checked_set_line(&mut b, &mut bl, 5, "  | ``` | x |  ");
+        });
+        assert_eq!(fast, 2);
         assert_eq!(changed, 4..5);
-        checked_set_line(&mut b, &mut bl, 5, "  | ``` | x |  ");
     }
 }
