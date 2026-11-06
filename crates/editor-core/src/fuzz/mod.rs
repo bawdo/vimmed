@@ -6,9 +6,11 @@ use std::ops::Range;
 
 use crate::buffer::{Buffer, Pos};
 use crate::config::Config;
+use crate::ex::{self, ExCmd};
 use crate::file::{recovery, registers_store};
 use crate::markdown::block::oracle::{assert_fresh, check_update, snapshot};
 use crate::markdown::{Blocks, Reveal, display_to_src, line_display, parse_line, src_to_display};
+use crate::substitute::{self, Answer};
 use crate::tokens::Theme;
 
 #[cfg(test)]
@@ -22,6 +24,7 @@ pub const TARGETS: &[(&str, Harness)] = &[
     ("config_parse", config_parse),
     ("state_files", state_files),
     ("markdown_incremental", markdown_incremental),
+    ("ex_command", ex_command),
 ];
 
 /// The config file's text, as `Config::load` reads it: a file that is not
@@ -52,6 +55,84 @@ pub fn state_files(data: &[u8]) {
             let _ = recovery::parse_meta(&text, "/fuzz.md", 1);
         }
         _ => {}
+    }
+}
+
+/// `:s` through `ex::parse`, `substitute::lines`, `run` and a confirm
+/// session. The input is `cmd 0x00 text 0x00 tail`, each part decoded
+/// lossily and a missing part empty. `text` is the buffer. `tail[0..4]`
+/// are `cursor, vflag, v0, v1` (zero when missing): the cursor line wraps
+/// onto the buffer and, when `vflag & 1` is set, the last Visual selection
+/// is `(v0 % n, v1 % n)`. `tail[4..]` are confirm answers, one key each.
+///
+/// The edits of `run` are applied top to bottom, as `substitute_all` in
+/// the editor does; those each `answer` returns are applied in order, as
+/// `confirm_key` does. A key that gives no `Answer` is skipped, as the
+/// editor waits on it. When the answers run out the session is quit.
+pub fn ex_command(data: &[u8]) {
+    let mut parts = data.splitn(3, |&b| b == 0);
+    let cmd = String::from_utf8_lossy(parts.next().unwrap_or(&[]));
+    let text = String::from_utf8_lossy(parts.next().unwrap_or(&[]));
+    let tail = parts.next().unwrap_or(&[]);
+    let byte = |i: usize| tail.get(i).copied().unwrap_or(0);
+    let answers = tail.get(4..).unwrap_or(&[]);
+
+    let Ok(ExCmd::Substitute(sub)) = ex::parse(&cmd) else {
+        return;
+    };
+    let buf = Buffer::from_text(&text);
+    let n = buf.line_count();
+    let visual = (byte(1) & 1 == 1).then(|| (usize::from(byte(2)) % n, usize::from(byte(3)) % n));
+    let Ok(r) = substitute::lines(sub.range, usize::from(byte(0)) % n, visual, n) else {
+        return;
+    };
+
+    let result = substitute::run(&buf, &sub, r.clone());
+    let mut applied = buf.clone();
+    for e in &result.edits {
+        assert_eq!(
+            buf.clamp(e.range.start),
+            e.range.start,
+            "edit start off a boundary"
+        );
+        assert_eq!(
+            buf.clamp(e.range.end),
+            e.range.end,
+            "edit end off a boundary"
+        );
+        applied.replace(e.range.clone(), &e.text);
+    }
+
+    let mut session = substitute::confirm_session(&buf, &sub, r);
+    let mut confirmed = buf.clone();
+    let mut fed = 0;
+    let mut keys = answers.iter();
+    while !session.done() {
+        if let Some((line, _)) = session.current() {
+            assert!(line < n, "current match on line {line} of {n}");
+        }
+        assert!(
+            fed < answers.len() + 1,
+            "session not done after {fed} answers fed (answers.len() = {})",
+            answers.len()
+        );
+        let answer = match keys.next() {
+            Some(&b) => match Answer::from_key(b as char) {
+                Some(a) => a,
+                None => continue,
+            },
+            None => {
+                for e in session.answer(Answer::from_key('q').expect("q is an answer")) {
+                    confirmed.replace(e.range, &e.text);
+                }
+                assert!(session.done(), "session not done after quit");
+                break;
+            }
+        };
+        fed += 1;
+        for e in session.answer(answer) {
+            confirmed.replace(e.range, &e.text);
+        }
     }
 }
 
@@ -222,6 +303,15 @@ fn check_display(buf: &Buffer, bl: &Blocks, lines: Range<usize>, cursor: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ex_command_substitute_on_last_line() {
+        for cmd in ["%s/a/$&$&/gc", "'<,'>s/x/y/"] {
+            assert!(matches!(ex::parse(cmd), Ok(ExCmd::Substitute(_))));
+        }
+        ex_command(b"%s/a/$&$&/gc\0a\naa\na\0\x02\x00\x00\x00yyna"); // cursor on line 2, answers y y n a
+        ex_command(b"'<,'>s/x/y/\0x\0\x00\x01\x05\x00"); // visual range clamped by % n
+    }
 
     #[test]
     fn markdown_incremental_handles_crlf_edits() {
