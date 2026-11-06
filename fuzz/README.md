@@ -119,3 +119,39 @@ libFuzzer writes it to `fuzz/artifacts/<target>/` (untracked).
 A timeout or out-of-memory is a defect too, not noise. A timeout input is
 saved the same way, but under `cargo test` it only checks that the harness
 terminates; it has no time limit there.
+
+## Coverage at merge
+
+Measured on 2026-11-06 with `nightly-2026-10-23`. Each of the five targets ran for
+twelve minutes (one hour of CPU in total, run concurrently) in libFuzzer fork mode:
+
+```sh
+cd fuzz
+cargo fuzz run <target> "$TMPDIR/corpus4-<target>" corpus/<target> -- \
+  -fork=1 -ignore_timeouts=1 -ignore_ooms=1 -max_total_time=720 -max_len=<N> -timeout=10
+```
+
+with `-max_len` as in the table above (4096 for `editor_keys`, 65536 for the rest).
+Crashes were not ignored. Every run finished with `oom/timeout/crash: 0/0/0`, so no
+new finding was recorded and nothing was added to `known/` by this measurement.
+
+Two limits shape what `editor_keys` can reach. Its runs stop once the cursor line passes
+2 KiB or the document passes 65,536 lines, so its coverage is of documents within those
+sizes. Fuzz builds (`cfg(fuzzing)`, which cargo-fuzz sets) also clamp counts at 1,000 and
+cap a put at 1 MiB and 16,384 lines.
+
+Line coverage of `crates/editor-core/src/` (the `fuzz/` harness module excluded):
+
+| Target                 | Runs       | Final cov / ft  | Line coverage of interest              | Whole of `editor-core` |
+| ---------------------- | ---------- | --------------- | -------------------------------------- | ---------------------- |
+| `markdown_incremental` | 61,157     | 2718 / 17972    | `markdown/block.rs` 87.89%             | 11.32%                 |
+| `ex_command`           | 9,314,383  | 2124 / 10735    | `ex.rs` 97.87%                         | 5.75%                  |
+| `editor_keys`          | 2,303,483  | 6529 / 35605    | `vim/` 89.27% (1,556 lines, 8 files)   | 45.50%                 |
+| `config_parse`         | 13,504,266 | 3967 / 18104    | not tracked                            | 2.88%                  |
+| `state_files`          | 18,677,118 | 3470 / 16464    | not tracked                            | 0.36%                  |
+
+To reproduce a figure, run the target as above, then
+`cargo fuzz coverage <target> "$TMPDIR/corpus4-<target>" corpus/<target>` and
+`llvm-cov report` from `llvm-tools-preview` on the coverage binary with that
+target's `coverage.profdata`, giving it `crates/editor-core/src` as the path to report
+on and `--ignore-filename-regex='editor-core/src/fuzz/'`.
