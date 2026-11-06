@@ -151,32 +151,66 @@ pub fn ex_command(data: &[u8]) {
 /// The most edit records `markdown_incremental` applies.
 const MAX_EDITS: usize = 256;
 
+/// The most oracle work, in steps, one `markdown_incremental` run may do.
+/// It bounds the harness's own checking, so that the fuzzer's timeout
+/// reflects the product rather than the oracle: the oracle's cost per edit
+/// grows with the whole buffer (`snapshot`, `check_update`, `assert_fresh`)
+/// and with every repainted line (`check_display`), so a large document and
+/// many edits would otherwise time out on a correct product. The run ends
+/// cleanly before the oracle work for an edit would pass it; that edit's
+/// `update` is still applied, so the product's own per-edit cost stays
+/// fully exercised up to that point.
+///
+/// Measured under cargo-fuzz (ASan, debug assertions) on inputs near
+/// `-max_len`, this keeps a run under about two seconds, a fifth of the
+/// `-timeout=10`, while still covering several edits of a 64 KiB
+/// span-dense line (one line's display check costs about six million).
+const ORACLE_BUDGET: usize = 32_000_000;
+
+/// The steps a line costs in one whole-buffer oracle pass (a snapshot, or
+/// `check_update` with its fresh rebuild) and in `check_display` before
+/// its probes. A probe step is one span walked by a mapping call; a line in
+/// a whole-buffer pass formats and compares its kind, which costs about
+/// this many of those.
+const LINE_STEPS: usize = 64;
+
 /// Incremental block reparsing against the oracle. The input is the initial
 /// text (decoded lossily) up to the first `0x00`, then edit records: six
 /// bytes `[flags, l0, c0, l1, c1, len]` and `len` bytes of replacement text
-/// (decoded lossily). A truncated record ends the sequence. Positions wrap
-/// onto the buffer and snap down to a char boundary.
+/// (decoded lossily). A truncated record ends the sequence, and at most
+/// `MAX_EDITS` are applied. Positions wrap onto the buffer and snap down to
+/// a char boundary.
 ///
 /// When `flags & 0x0f` is zero, `update` is handed an `edited` range that
 /// cannot fit, and must fall back to a full rebuild. Otherwise it gets the
 /// contract's arguments and `check_update` judges the result. After every
 /// edit the display mappings of every line `update` repainted are checked
 /// too (every line of the initial text first); the high nibble of `flags`
-/// places the cursor for `Reveal::Cursor`.
+/// places the cursor for `Reveal::Cursor`. The run ends once the oracle
+/// would pass `ORACLE_BUDGET`.
 pub fn markdown_incremental(data: &[u8]) {
+    let _ = incremental_checked(data);
+}
+
+/// `markdown_incremental`, returning how many edits the oracle checked in
+/// full before the input or `ORACLE_BUDGET` ran out.
+fn incremental_checked(data: &[u8]) -> usize {
     let (text, mut rest) = match data.iter().position(|&b| b == 0) {
         Some(i) => (&data[..i], &data[i + 1..]),
         None => (data, &[][..]),
     };
     let mut buf = Buffer::from_text(&String::from_utf8_lossy(text));
     let mut bl = Blocks::new(&buf);
-    check_display(&buf, &bl, 0..buf.line_count(), 0);
+    let pass = |buf: &Buffer| buf.line_count().saturating_mul(LINE_STEPS);
+    let Some(mut spent) = check_display(&buf, &bl, 0..buf.line_count(), 0, ORACLE_BUDGET) else {
+        return 0;
+    };
     for step in 0..MAX_EDITS {
         let Some((&[flags, l0, c0, l1, c1, len], tail)) = rest.split_first_chunk::<6>() else {
-            break;
+            return step;
         };
         let Some((repl, tail)) = tail.split_at_checked(usize::from(len)) else {
-            break;
+            return step;
         };
         rest = tail;
         let repl = String::from_utf8_lossy(repl);
@@ -189,13 +223,28 @@ pub fn markdown_incremental(data: &[u8]) {
             (b, a)
         };
         let abuse = flags & 0x0f == 0;
-        let before = (!abuse).then(|| snapshot(&buf, &bl));
+        // The snapshot is a whole-buffer pass over the text before the edit.
+        let mut in_budget = abuse || spent + pass(&buf) <= ORACLE_BUDGET;
+        let before = (!abuse && in_budget).then(|| {
+            spent += pass(&buf);
+            snapshot(&buf, &bl)
+        });
         let old_n = buf.line_count();
         let e = buf.replace(start..end, &repl);
         let delta = buf.line_count() as isize - old_n as isize;
-        let changed = if let Some(before) = before {
-            let edited = e.range.start.line..e.range.end.line + 1;
-            let changed = bl.update(&buf, edited.clone(), delta);
+        let edited = if abuse {
+            0..buf.line_count() + 1 + usize::from(l0)
+        } else {
+            e.range.start.line..e.range.end.line + 1
+        };
+        let changed = bl.update(&buf, edited.clone(), delta);
+        // `check_update` and `assert_fresh` are passes over the edited text.
+        in_budget = in_budget && spent + pass(&buf) <= ORACLE_BUDGET;
+        if !in_budget {
+            return step;
+        }
+        spent += pass(&buf);
+        if let Some(before) = before {
             check_update(
                 &before,
                 &buf,
@@ -205,19 +254,21 @@ pub fn markdown_incremental(data: &[u8]) {
                 changed.clone(),
                 &format!("edit {step}"),
             );
-            changed
         } else {
-            let changed = bl.update(&buf, 0..buf.line_count() + 1 + usize::from(l0), delta);
             assert_eq!(
                 changed,
                 0..buf.line_count(),
                 "edit {step}: abuse did not rebuild"
             );
             assert_fresh(&buf, &bl);
-            changed
+        }
+        let cursor = usize::from(flags >> 4);
+        let Some(s) = check_display(&buf, &bl, changed, cursor, ORACLE_BUDGET - spent) else {
+            return step;
         };
-        check_display(&buf, &bl, changed, usize::from(flags >> 4));
+        spent += s;
     }
+    MAX_EDITS
 }
 
 /// A buffer position from fuzz bytes: the line wraps onto the buffer, the
@@ -259,7 +310,18 @@ fn probes(v: Vec<usize>, edges: Vec<usize>, per_probe: usize) -> Vec<usize> {
 /// mapping properties `display_to_src` and `src_to_display` document.
 /// `cursor` wraps onto each line for `Reveal::Cursor`. Offsets are probed
 /// within `DISPLAY_BUDGET` (see `probes`).
-fn check_display(buf: &Buffer, bl: &Blocks, lines: Range<usize>, cursor: usize) {
+///
+/// Returns the steps spent (`LINE_STEPS` a line, plus each probe times the
+/// spans it walks), or `None` when a line's probes would take the total
+/// past `budget`; that line and those after it are then left unchecked.
+fn check_display(
+    buf: &Buffer,
+    bl: &Blocks,
+    lines: Range<usize>,
+    cursor: usize,
+    budget: usize,
+) -> Option<usize> {
+    let mut spent = 0;
     for i in lines {
         let line = buf.line(i);
         let kind = bl.kind(i);
@@ -268,36 +330,50 @@ fn check_display(buf: &Buffer, bl: &Blocks, lines: Range<usize>, cursor: usize) 
         while !line.is_char_boundary(c) {
             c -= 1;
         }
-        for reveal in [Reveal::None, Reveal::Cursor(c), Reveal::Block] {
-            let d = line_display(line, kind, &inline, reveal);
-            let per_probe = d.spans.len() + 1;
-            let shown: String = d.spans.iter().map(|s| &line[s.src.clone()]).collect();
-            let bounds = (0..=shown.len())
-                .filter(|&b| shown.is_char_boundary(b))
-                .collect();
-            let edges = d
-                .spans
-                .iter()
-                .scan(0, |at, s| {
-                    *at += s.src.len();
-                    Some(*at)
-                })
-                .collect();
-            for b in probes(bounds, edges, per_probe) {
+        let mut cost = LINE_STEPS;
+        let plans: Vec<_> = [Reveal::None, Reveal::Cursor(c), Reveal::Block]
+            .into_iter()
+            .map(|reveal| {
+                let d = line_display(line, kind, &inline, reveal);
+                let per_probe = d.spans.len() + 1;
+                let shown: String = d.spans.iter().map(|s| &line[s.src.clone()]).collect();
+                let bounds = (0..=shown.len())
+                    .filter(|&b| shown.is_char_boundary(b))
+                    .collect();
+                let edges = d
+                    .spans
+                    .iter()
+                    .scan(0, |at, s| {
+                        *at += s.src.len();
+                        Some(*at)
+                    })
+                    .collect();
+                let bounds = probes(bounds, edges, per_probe);
+                let cols = (0..=line.len() + 1).collect();
+                let edges = d
+                    .spans
+                    .iter()
+                    .flat_map(|s| [s.src.start, s.src.end])
+                    .chain([line.len()])
+                    .collect();
+                let cols = probes(cols, edges, per_probe);
+                cost += (bounds.len() + cols.len()) * per_probe;
+                (reveal, d, bounds, cols)
+            })
+            .collect();
+        spent += cost;
+        if spent > budget {
+            return None;
+        }
+        for (reveal, d, bounds, cols) in plans {
+            for b in bounds {
                 let src = display_to_src(&d, b);
                 assert!(
                     src <= line.len() && line.is_char_boundary(src),
                     "line {i} {line:?} {reveal:?}: display {b} maps to {src}"
                 );
             }
-            let cols = (0..=line.len() + 1).collect();
-            let edges = d
-                .spans
-                .iter()
-                .flat_map(|s| [s.src.start, s.src.end])
-                .chain([line.len()])
-                .collect();
-            for col in probes(cols, edges, per_probe) {
+            for col in cols {
                 if col > line.len() {
                     assert_eq!(
                         src_to_display(&d, col),
@@ -310,6 +386,7 @@ fn check_display(buf: &Buffer, bl: &Blocks, lines: Range<usize>, cursor: usize) 
             }
         }
     }
+    Some(spent)
 }
 
 /// A host that touches nothing outside the process: the clipboard is held
@@ -589,5 +666,34 @@ mod tests {
         d.extend([1, 0, 3, 0, 3, 1]);
         d.extend(b"x");
         markdown_incremental(&d);
+    }
+
+    /// A long table and `MAX_EDITS` one-byte edits in its header: each edit
+    /// repaints the whole table, so checking every one costs the oracle
+    /// about lines times edits and timed the fuzzer out on a correct
+    /// product. `ORACLE_BUDGET` ends the run after a few edits instead.
+    #[test]
+    fn markdown_incremental_budget_ends_heavy_runs() {
+        let mut d = b"|a|\n|-|\n".to_vec();
+        d.extend(b"|a|\n".repeat(14_000));
+        d.push(0);
+        for _ in 0..MAX_EDITS {
+            d.extend([1, 0, 1, 0, 1, 1]);
+            d.extend(b"x");
+        }
+        let checked = incremental_checked(&d);
+        assert!(
+            (1..MAX_EDITS).contains(&checked),
+            "checked {checked} of {MAX_EDITS} edits"
+        );
+
+        // A light run checks every edit.
+        let mut d = b"|a|\n|-|\n|a|\n".to_vec();
+        d.push(0);
+        for _ in 0..MAX_EDITS {
+            d.extend([1, 0, 1, 0, 1, 1]);
+            d.extend(b"x");
+        }
+        assert_eq!(incremental_checked(&d), MAX_EDITS);
     }
 }
