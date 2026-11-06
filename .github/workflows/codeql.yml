@@ -4,8 +4,10 @@ name: CodeQL
 # each change is scanned before it merges, and on every push to main, so the
 # Security tab always reflects main. The weekly run picks up new queries
 # while the code does not change. This sits outside ci.yml on purpose: it
-# reports through code scanning, not through the CI result gate, and the
-# main ruleset requires its check by name instead.
+# reports through code scanning, not through the CI result gate. Once the
+# results are uploaded, code scanning adds its own check named "CodeQL" to
+# the pull request, which fails on new alerts; the main ruleset requires that
+# check. The job is named "CodeQL analysis" so the two never share a name.
 on:
   pull_request:
   push:
@@ -23,7 +25,7 @@ jobs:
   # build-mode none: CodeQL reads the Rust source without compiling it, so
   # the job needs no toolchain, no GTK libraries and no cargo cache.
   analyze:
-    name: CodeQL
+    name: CodeQL analysis
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
