@@ -101,14 +101,15 @@ pub fn ex_command(data: &[u8]) {
 
     let result = substitute::run(&buf, &sub, r.clone());
     let mut applied = buf.clone();
+    // Each edit is placed in the buffer as the edits before it leave it.
     for e in &result.edits {
         assert_eq!(
-            buf.clamp(e.range.start),
+            applied.clamp(e.range.start),
             e.range.start,
             "edit start off a boundary"
         );
         assert_eq!(
-            buf.clamp(e.range.end),
+            applied.clamp(e.range.end),
             e.range.end,
             "edit end off a boundary"
         );
@@ -121,7 +122,8 @@ pub fn ex_command(data: &[u8]) {
     let mut keys = answers.iter();
     while !session.done() {
         if let Some((line, _)) = session.current() {
-            assert!(line < n, "current match on line {line} of {n}");
+            let now = confirmed.line_count();
+            assert!(line < now, "current match on line {line} of {now}");
         }
         assert!(
             fed < answers.len() + 1,

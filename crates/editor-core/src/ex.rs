@@ -128,8 +128,8 @@ fn substitute(input: &str) -> Option<Result<Sub, String>> {
     let mut rest = rest.strip_prefix('s')?.chars();
     let delim = rest.next().filter(|&d| !d.is_alphanumeric() && d != '\\')?;
     let rest = rest.as_str();
-    let (pattern, rest) = until_delim(rest, delim);
-    let (replacement, flags) = until_delim(rest, delim);
+    let (pattern, rest) = until_delim(rest, delim, |_| None);
+    let (replacement, flags) = until_delim(rest, delim, replacement_escape);
     let mut f = SubFlags::default();
     for (i, c) in flags.char_indices() {
         let on = match c {
@@ -177,8 +177,10 @@ fn number(s: &str) -> Option<(usize, &str)> {
 }
 
 /// The text of `s` up to an unescaped `delim` (or the end), with `\<delim>`
-/// turned into `delim`, and what follows the delimiter.
-fn until_delim(s: &str, delim: char) -> (String, &str) {
+/// turned into `delim` and any other `\<c>` into what `escape` gives for
+/// `c`, or left as typed when it gives `None`. Also what follows the
+/// delimiter.
+fn until_delim(s: &str, delim: char, escape: fn(char) -> Option<char>) -> (String, &str) {
     let mut out = String::new();
     let mut chars = s.char_indices();
     while let Some((i, c)) = chars.next() {
@@ -188,10 +190,13 @@ fn until_delim(s: &str, delim: char) -> (String, &str) {
         if c == '\\' {
             match chars.next() {
                 Some((_, d)) if d == delim => out.push(d),
-                Some((_, d)) => {
-                    out.push('\\');
-                    out.push(d);
-                }
+                Some((_, d)) => match escape(d) {
+                    Some(e) => out.push(e),
+                    None => {
+                        out.push('\\');
+                        out.push(d);
+                    }
+                },
                 None => out.push('\\'),
             }
             continue;
@@ -199,6 +204,17 @@ fn until_delim(s: &str, delim: char) -> (String, &str) {
         out.push(c);
     }
     (out, "")
+}
+
+/// The escapes a replacement takes from vim: `\r` is a line break and
+/// `\\` a backslash. Vim's `\n` puts a NUL, which has no place in a
+/// Markdown file, so it stays as typed with every other escape.
+fn replacement_escape(c: char) -> Option<char> {
+    match c {
+        'r' => Some('\n'),
+        '\\' => Some('\\'),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +352,36 @@ mod tests {
         assert_eq!(sub(r"s/a/x\/y/").replacement, "x/y");
         // Any other escape stays as typed.
         assert_eq!(sub(r"s/a\b/c/").pattern, r"a\b");
+    }
+
+    #[test]
+    fn backslash_r_in_the_replacement_is_a_line_break() {
+        // vim 9.1: `:s/a/x\ry/` splits the line at the replacement.
+        assert_eq!(sub(r"s/a/x\ry/").replacement, "x\ny");
+        assert_eq!(sub(r"s/a/\r\r/").replacement, "\n\n");
+    }
+
+    #[test]
+    fn double_backslash_in_the_replacement_is_one() {
+        // vim 9.1: `\\` is a backslash, so `\\r` is a backslash and an r.
+        assert_eq!(sub(r"s/a/x\\y/").replacement, r"x\y");
+        assert_eq!(sub(r"s/a/x\\ry/").replacement, r"x\ry");
+        assert_eq!(sub(r"s/a/x\\\ry/").replacement, "x\\\ny");
+    }
+
+    #[test]
+    fn other_replacement_escapes_stay_as_typed() {
+        // vim puts a NUL for `\n`; the editor keeps it as typed.
+        assert_eq!(sub(r"s/a/x\ny/").replacement, r"x\ny");
+        assert_eq!(sub(r"s/a/\0\t/").replacement, r"\0\t");
+        assert_eq!(sub(r"s/a/x\/y\\/").replacement, r"x/y\");
+    }
+
+    #[test]
+    fn pattern_escapes_are_unchanged() {
+        // The pattern is literal: only `\<delim>` is special there.
+        assert_eq!(sub(r"s/a\rb/c/").pattern, r"a\rb");
+        assert_eq!(sub(r"s/a\\b/c/").pattern, r"a\\b");
     }
 
     #[test]
@@ -734,6 +780,48 @@ mod tests {
         assert_eq!(e.message(), Some("3 matches on 2 lines"));
         assert!(!e.dirty());
         assert!(!e.history().can_undo());
+    }
+
+    #[test]
+    fn backslash_r_splits_lines_and_later_matches_follow() {
+        // vim 9.1 golden: `:%s/a/x\ry/g` on `a1 a2 a3`.
+        let mut e = ed("a1\na2\na3");
+        colon(&mut e, r"%s/a/x\ry/g");
+        assert_eq!(e.text(), "x\ny1\nx\ny2\nx\ny3");
+        // The message counts the lines as they were.
+        assert_eq!(e.message(), Some("3 substitutions on 3 lines"));
+        // The first non-blank of the last line of the last replacement.
+        assert_eq!(e.cursor(), Pos { line: 5, col: 0 });
+    }
+
+    #[test]
+    fn backslash_r_twice_on_one_line() {
+        // vim 9.1 golden: `:%s/a/x\ry/g` on `aa b c d`, cursor on line 3.
+        let mut e = ed("aa\nb\nc\nd");
+        colon(&mut e, r"%s/a/x\ry/g");
+        assert_eq!(e.text(), "x\nyx\ny\nb\nc\nd");
+        assert_eq!(e.message(), Some("2 substitutions on 1 line"));
+        assert_eq!(e.cursor(), Pos { line: 2, col: 0 });
+    }
+
+    #[test]
+    fn backslash_r_cursor_is_on_the_first_non_blank() {
+        // vim 9.1 golden: `:%s/a/x\r  y/g` on `b, a1`: line 3, col 3.
+        let mut e = ed("b\n a1");
+        colon(&mut e, r"%s/a/x\r  y/g");
+        assert_eq!(e.text(), "b\n x\n  y1");
+        assert_eq!(e.cursor(), Pos { line: 2, col: 2 });
+    }
+
+    #[test]
+    fn backslash_r_substitute_is_one_undo_step() {
+        let mut e = ed("a1\na2\na3");
+        colon(&mut e, r"%s/a/x\ry/g");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "a1\na2\na3");
+        assert_eq!(e.cursor(), Pos { line: 0, col: 0 });
+        keys(&mut e, "<C-r>");
+        assert_eq!(e.text(), "x\ny1\nx\ny2\nx\ny3");
     }
 
     #[test]
