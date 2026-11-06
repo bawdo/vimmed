@@ -347,6 +347,15 @@ fn fuzz_path() -> PathBuf {
     PathBuf::from(format!("/nonexistent-{}-fuzz/fuzz.md", app_meta::SLUG))
 }
 
+/// The longest cursor line, in bytes, `editor_keys` lets a run reach. The
+/// editor's cost per key grows with the length of the cursor line (the
+/// display column is counted from the line's start, several times a key),
+/// and a counted put builds a huge line from a tiny input, so a run on one
+/// hits the libFuzzer timeout. That is a known limitation, tracked
+/// separately. Like the input cap, this bounds the work a run can create:
+/// the run ends, without a panic, once the cursor line is longer.
+const MAX_FUZZ_LINE_BYTES: usize = 2048;
+
 /// How far the clock moves between two keys: a frame at 60 Hz.
 const KEY_STEP_NS: u64 = 16_000_000;
 
@@ -420,7 +429,7 @@ fn drive(path: PathBuf, data: &[u8]) -> Editor {
         }));
         let c = ViewSource::cursor(&editor);
         assert_eq!(editor.buffer().clamp(c), c, "cursor off a boundary");
-        if fx.close.is_some() {
+        if fx.close.is_some() || editor.buffer().line(c.line).len() > MAX_FUZZ_LINE_BYTES {
             break;
         }
     }
@@ -462,6 +471,27 @@ mod tests {
             panic!("no refusal showing: {:?}", e.status().left);
         };
         assert!(text.contains(strings::NO_FILE_ACCESS), "{text}");
+    }
+
+    /// A put that takes the cursor line past `MAX_FUZZ_LINE_BYTES` ends the
+    /// run: the keys after it are not applied.
+    #[test]
+    fn editor_keys_stops_on_a_long_line() {
+        let put = MAX_FUZZ_LINE_BYTES; // "a" plus this many more is over
+        let data = format!("a\0yl{put}p$ix<Esc>");
+        let e = drive(fuzz_path(), data.as_bytes());
+        let line = e.buffer().line(0);
+        assert_eq!(line.len(), MAX_FUZZ_LINE_BYTES + 1);
+        assert!(
+            !line.contains('x'),
+            "a key ran after the line passed the cap"
+        );
+
+        // At the cap exactly, the run goes on.
+        let data = format!("a\0yl{}p$ix<Esc>", put - 1);
+        let e = drive(fuzz_path(), data.as_bytes());
+        assert_eq!(e.buffer().line(0).len(), MAX_FUZZ_LINE_BYTES + 1);
+        assert!(e.buffer().line(0).contains('x'));
     }
 
     #[test]
