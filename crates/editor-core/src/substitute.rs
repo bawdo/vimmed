@@ -23,10 +23,10 @@ use crate::vim::motion::caret_col;
 /// What `run` found: the edits to make (none for `n`), how many matches
 /// they replace and on how many lines.
 ///
-/// There is one edit per line, top to bottom, from the line's first
-/// replaced match to the end of its last. A replacement can hold line
-/// breaks (`\r`), so each edit is placed in the buffer as the edits
-/// before it leave it: they apply in order, and only in order.
+/// There is one edit per match, top to bottom, holding only its
+/// replacement. A replacement can hold line breaks (`\r`), so each edit is
+/// placed in the buffer as the edits before it leave it: they apply in
+/// order, and only in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubResult {
     pub edits: Vec<Edit>,
@@ -76,43 +76,24 @@ fn expand(replacement: &str, matched: &str) -> String {
 }
 
 /// Every replacement `sub` makes on `lines` of `buf`, or with `n` only the
-/// count.
+/// count. The edits are those of a confirm session answered `a` at its
+/// first match, so the two ways of running `:s` place matches alike.
 pub fn run(buf: &Buffer, sub: &Sub, lines: RangeInclusive<usize>) -> SubResult {
-    let mut out = SubResult::default();
-    // Lines the edits so far have added, which move every later line down.
-    let mut added = 0;
-    for l in lines {
-        let text = buf.line(l);
-        let ms = line_matches(text, sub);
-        let (Some(first), Some(last)) = (ms.first(), ms.last()) else {
-            continue;
-        };
-        out.count += ms.len();
-        out.lines += 1;
-        if sub.flags.n {
-            continue;
+    if sub.flags.n {
+        let mut out = SubResult::default();
+        for l in lines {
+            let found = line_matches(buf.line(l), sub).len();
+            out.count += found;
+            out.lines += usize::from(found > 0);
         }
-        let mut new = String::new();
-        let mut at = first.start;
-        for m in &ms {
-            new.push_str(&text[at..m.start]);
-            new.push_str(&expand(&sub.replacement, &text[m.clone()]));
-            at = m.end;
-        }
-        let line = l + added;
-        added += new.matches('\n').count();
-        out.edits.push(Edit {
-            range: Pos {
-                line,
-                col: first.start,
-            }..Pos {
-                line,
-                col: last.end,
-            },
-            text: new,
-        });
+        return out;
     }
-    out
+    let mut session = confirm_session(buf, sub, lines);
+    SubResult {
+        edits: session.answer(Answer::All),
+        count: session.count(),
+        lines: session.lines(),
+    }
 }
 
 /// An answer to `replace with <r>? [y/n/a/q/l]`.
@@ -536,11 +517,28 @@ mod tests {
     }
 
     #[test]
-    fn edits_are_one_per_line_in_order() {
+    fn edits_are_one_per_match_in_order() {
+        // Each placed where the edits before it leave the buffer.
         let (_, r) = apply("a foo b foo c\nfoo", &sub("foo", "X", "g"), 0..=1);
         let ranges: Vec<_> = r.edits.iter().map(|e| e.range.clone()).collect();
-        assert_eq!(ranges, [pos(0, 2)..pos(0, 11), pos(1, 0)..pos(1, 3)]);
-        assert_eq!(r.edits[0].text, "X b X");
+        assert_eq!(
+            ranges,
+            [
+                pos(0, 2)..pos(0, 5),
+                pos(0, 6)..pos(0, 9),
+                pos(1, 0)..pos(1, 3)
+            ]
+        );
+        assert!(r.edits.iter().all(|e| e.text == "X"));
+    }
+
+    #[test]
+    fn a_stray_carriage_return_survives_a_line_break() {
+        // Only the replacement is inserted, so the line's own `\r` never
+        // meets a line break from it and becomes `\r\n` (vim keeps `^M`).
+        let (text, r) = apply("a\ra", &sub("a", "\n", "g"), 0..=0);
+        assert_eq!(text, "\n\r\n");
+        assert_eq!((r.count, r.lines), (2, 1));
     }
 
     #[test]

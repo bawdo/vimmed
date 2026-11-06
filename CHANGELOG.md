@@ -18,6 +18,7 @@ All notable changes to vimmed are documented here. The format follows
 
 - Moving by grapheme (`h`, `l`, `b`, `w` and friends) on a long line no longer takes time proportional to the square of the line length.
 - `:s` with a line break in the replacement puts later replacements in the right place, with or without `c`, and leaves the cursor where vim does.
+- `:s` no longer drops a stray carriage return that sits next to a line break it inserts.
 
 ## [0.9.0] - 2026-11-06
 
