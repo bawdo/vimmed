@@ -2,16 +2,27 @@
 //! panicking. They are driven by the `fuzz/` crate (libFuzzer, nightly)
 //! and replayed on stable by `replay`.
 
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::ops::Range;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::buffer::{Buffer, Pos};
 use crate::config::Config;
+use crate::editor::{Editor, OpenRequest};
 use crate::ex::{self, ExCmd};
 use crate::file::{recovery, registers_store};
+use crate::host::{Host, Waker, WindowRequest};
+use crate::input::{Input, KeyEvent};
+use crate::keyseq::parse_keys;
 use crate::markdown::block::oracle::{assert_fresh, check_update, snapshot};
 use crate::markdown::{Blocks, Reveal, display_to_src, line_display, parse_line, src_to_display};
+use crate::platform::Platform;
 use crate::substitute::{self, Answer};
 use crate::tokens::Theme;
+use crate::view_model::ViewSource;
 
 #[cfg(test)]
 mod replay;
@@ -25,6 +36,7 @@ pub const TARGETS: &[(&str, Harness)] = &[
     ("state_files", state_files),
     ("markdown_incremental", markdown_incremental),
     ("ex_command", ex_command),
+    ("editor_keys", editor_keys),
 ];
 
 /// The config file's text, as `Config::load` reads it: a file that is not
@@ -300,9 +312,184 @@ fn check_display(buf: &Buffer, bl: &Blocks, lines: Range<usize>, cursor: usize) 
     }
 }
 
+/// A host that touches nothing outside the process: the clipboard is held
+/// in memory, links and windows go nowhere, and the clock is `now`, which
+/// `editor_keys` moves on by hand through its own handle on it (the editor
+/// owns the host, behind `dyn Host`).
+#[derive(Default)]
+pub(crate) struct FuzzHost {
+    now: Rc<Cell<u64>>,
+    clipboard: Option<String>,
+}
+
+impl Host for FuzzHost {
+    fn clipboard_get(&mut self) -> Option<String> {
+        self.clipboard.clone()
+    }
+    fn clipboard_set(&mut self, text: &str) {
+        self.clipboard = Some(text.to_owned());
+    }
+    fn open_external(&mut self, _target: &str) {}
+    fn spawn_window(&mut self, _req: WindowRequest) {}
+    fn now_ns(&self) -> u64 {
+        self.now.get()
+    }
+    fn waker(&self) -> Waker {
+        Arc::new(|| {})
+    }
+}
+
+/// The path `editor_keys` names its document,
+/// `/nonexistent-<slug>-fuzz/fuzz.md`. Its directory does not exist, and
+/// the editor has no `Saver` wired to it, so nothing reaches it. Built
+/// from the slug, which `lint-name` keeps out of the source.
+fn fuzz_path() -> PathBuf {
+    PathBuf::from(format!("/nonexistent-{}-fuzz/fuzz.md", app_meta::SLUG))
+}
+
+/// How far the clock moves between two keys: a frame at 60 Hz.
+const KEY_STEP_NS: u64 = 16_000_000;
+
+/// A whole `Editor` driven by keys. The input is `text SEP keys`, where
+/// `SEP` is the first `0x00` (the Mac) or `0x01` (Linux) and sets the
+/// platform; with neither, all of it is keys, on an empty text, on the
+/// Mac. Both parts are decoded lossily. A leading `R` in the keys opens the
+/// document in reader mode and is not pressed. The keys are the tests'
+/// `<Esc>` notation (`keyseq::parse_keys`), each a frame after the last.
+///
+/// The editor has no `Saver` (so `:w`, `:e!` and closing reach no file)
+/// and no state directory (no registers file, lock or recovery copy).
+/// After every key the cursor must sit on a char boundary of the buffer.
+/// A key that closes the window ends the run.
+pub fn editor_keys(data: &[u8]) {
+    drive(fuzz_path(), data);
+}
+
+/// `editor_keys`'s input split into its parts: the text, the keys, the
+/// platform and whether the document opens in reader mode.
+fn split_input(data: &[u8]) -> (Cow<'_, str>, Cow<'_, str>, Platform, bool) {
+    let (text, keys, platform) = match data.iter().position(|&b| b == 0 || b == 1) {
+        Some(i) => {
+            let platform = if data[i] == 0 {
+                Platform::Mac
+            } else {
+                Platform::Linux
+            };
+            (&data[..i], &data[i + 1..], platform)
+        }
+        None => (&[][..], data, Platform::Mac),
+    };
+    let (view, keys) = match keys.split_first() {
+        Some((b'R', rest)) => (true, rest),
+        _ => (false, keys),
+    };
+    (
+        String::from_utf8_lossy(text),
+        String::from_utf8_lossy(keys),
+        platform,
+        view,
+    )
+}
+
+/// `editor_keys` on a document named `path`, returning the editor as the
+/// keys left it. Only the tests name any other path than `fuzz_path()`.
+fn drive(path: PathBuf, data: &[u8]) -> Editor {
+    let (text, keys, platform, view) = split_input(data);
+    let host = FuzzHost::default();
+    let clock = Rc::clone(&host.now);
+    let mut editor = Editor::build(
+        OpenRequest {
+            path,
+            view,
+            display_name: None,
+        },
+        &text,
+        None,
+        Config::default(),
+        platform,
+        Box::new(host),
+        false,
+    );
+    for (key, mods) in parse_keys(&keys) {
+        let now = clock.get().saturating_add(KEY_STEP_NS);
+        clock.set(now);
+        let fx = editor.handle(Input::Key(KeyEvent {
+            key,
+            mods,
+            time_ns: now,
+        }));
+        let c = ViewSource::cursor(&editor);
+        assert_eq!(editor.buffer().clamp(c), c, "cursor off a boundary");
+        if fx.close.is_some() {
+            break;
+        }
+    }
+    editor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strings;
+    use crate::view_model::StatusLeft;
+
+    #[test]
+    fn editor_keys_touches_no_files() {
+        editor_keys(b"# hi\n\0ihello<Esc>:w<CR>:e!<CR>:wq<CR>:x<CR>");
+        let path = fuzz_path();
+        let dir = path.parent().expect("the fuzz path has a directory");
+        assert!(!dir.exists(), "{} exists", dir.display());
+    }
+
+    /// `editor_keys_touches_no_files` cannot fail: a write to a missing
+    /// directory fails without creating it. Here the directory exists, so
+    /// a wired `Saver` would leave `fuzz.md` (or its temporary file) in it.
+    #[test]
+    fn editor_keys_writes_nothing_to_an_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = drive(
+            dir.path().join("fuzz.md"),
+            b"# hi\n\0ihello<Esc>:w<CR>:e!<CR>:wq<CR>:x<CR>",
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|f| f.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "the harness wrote {left:?}");
+        // The writes went to `Unwired` and were refused.
+        assert!(e.dirty(), "a write succeeded");
+        let StatusLeft::Message { text, .. } = e.status().left else {
+            panic!("no refusal showing: {:?}", e.status().left);
+        };
+        assert!(text.contains(strings::NO_FILE_ACCESS), "{text}");
+    }
+
+    #[test]
+    fn editor_keys_reader_mode_and_linux() {
+        let data = b"- a\n- b\n\x01Rjjkk<C-d>gg";
+        let (text, keys, platform, view) = split_input(data);
+        assert_eq!(
+            (&*text, &*keys, platform, view),
+            ("- a\n- b\n", "jjkk<C-d>gg", Platform::Linux, true)
+        );
+        editor_keys(data);
+    }
+
+    #[test]
+    fn editor_keys_splits_its_input() {
+        // No separator: all keys, on an empty text, on the Mac.
+        let (text, keys, platform, view) = split_input(b"ihi<Esc>");
+        assert_eq!(
+            (&*text, &*keys, platform, view),
+            ("", "ihi<Esc>", Platform::Mac, false)
+        );
+        // The first separator wins; a later one is a key.
+        let (text, keys, platform, view) = split_input(b"a\0R\x01b");
+        assert_eq!(
+            (&*text, &*keys, platform, view),
+            ("a", "\x01b", Platform::Mac, true)
+        );
+    }
 
     #[test]
     fn ex_command_substitute_on_last_line() {

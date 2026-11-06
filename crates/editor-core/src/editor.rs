@@ -370,8 +370,9 @@ impl Editor {
         editor
     }
 
-    /// An editor on `text`, with no file behind it (the tests' editors).
-    #[cfg(test)]
+    /// An editor on `text`, with no file behind it (the tests' and the
+    /// `editor_keys` fuzz harness's editors).
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn build(
         req: OpenRequest,
         text: &str,
