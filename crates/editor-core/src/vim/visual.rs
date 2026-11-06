@@ -771,6 +771,56 @@ mod tests {
     }
 
     #[test]
+    fn paste_past_the_line_budget_is_refused() {
+        use crate::limits::MAX_DOC_LINES;
+        use crate::strings::RESULTING_TEXT_TOO_LONG;
+        let _big = big_doc_lock();
+        let (mut e, host) = ed_with_host(&"a\n".repeat(MAX_DOC_LINES - 2));
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 2);
+        host.set_clipboard("x\ny\nz\n");
+        keys(&mut e, "<D-v>");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 2);
+        assert_eq!(e.buffer().line(0), "a");
+        assert!(!e.history().can_undo());
+        assert_eq!(e.message(), Some(RESULTING_TEXT_TOO_LONG));
+        // In Insert too, and the session goes on.
+        keys(&mut e, "i<D-v>");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 2);
+        assert_eq!(e.mode(), Mode::Insert);
+        assert!(!e.history().can_undo());
+        // A paste that lands exactly on the budget is accepted.
+        host.set_clipboard("x\ny\n");
+        keys(&mut e, "<D-v>");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES);
+        assert_eq!(e.buffer().line(0), "x");
+    }
+
+    #[test]
+    fn paste_over_a_selection_counts_only_what_it_adds() {
+        use crate::limits::MAX_DOC_LINES;
+        let _big = big_doc_lock();
+        let (mut e, host) = ed_with_host(&"a\n".repeat(MAX_DOC_LINES));
+        host.set_clipboard("x\ny\n");
+        keys(&mut e, "Vj<D-v>");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES);
+        assert_eq!(e.buffer().line(0), "x");
+        assert_eq!(e.buffer().line(1), "y");
+        assert_eq!(e.message(), None);
+    }
+
+    #[test]
+    fn paste_past_the_per_put_cap_is_refused() {
+        use crate::strings::RESULTING_TEXT_TOO_LONG;
+        use crate::vim::operator::MAX_PUT_LINES;
+        let (mut e, host) = ed_with_host("abc");
+        host.set_clipboard(&"\n".repeat(MAX_PUT_LINES + 1));
+        keys(&mut e, "<D-v>");
+        assert_eq!(e.text(), "abc");
+        assert!(!e.history().can_undo());
+        assert_eq!(e.message(), Some(RESULTING_TEXT_TOO_LONG));
+    }
+
+    #[test]
     fn paste_with_an_empty_clipboard_or_in_reader_mode_does_nothing() {
         let (mut e, _host) = ed_with_host("abc");
         keys(&mut e, "<D-v>");

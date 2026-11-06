@@ -6,6 +6,15 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Pasting with Cmd+V (Ctrl+V on Linux) is checked against the same limits as a put: a paste of more than 64 MiB or 262,144 lines, or one that would take the document past 4,194,304 lines or 256 MiB, changes nothing and says `E1240: Resulting text too long`. A paste over a selection counts only what it adds beyond the selection.
+
+### Fixed
+
+- Typing at the start of a row in a big table, before its leading `|`, no longer takes time in proportion to the table's size: about 1 µs a key in a 100,000-row table (was about 10 ms). Only the first key, which takes the row out of the table, still costs that much.
+- `:s///n` counts its matches one at a time, so counting on a very long line no longer takes memory in proportion to the number of matches.
+
 ## [0.9.1] - 2026-11-06
 
 ### Added

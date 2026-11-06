@@ -97,6 +97,16 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   plain `cargo test` replay of any of the four proves only that the run
   terminates, not that it is fast.
 
+  `long_grapheme_cluster` holds two lines that each carry one grapheme of
+  64 KiB (an `e` and 32,768 combining acute accents), and moves and types
+  next to it. The column index checkpoints only grapheme boundaries, so each
+  step across that grapheme walks all of it: a cost that grows with the
+  grapheme, about 250 µs a key at this size in a release build, and no index
+  avoids it. Run under ASan with `-timeout`, it catches that cost growing
+  faster than the grapheme; under `cargo test`, as with the others, it proves
+  only that the run terminates. It was written by hand, not found by the
+  fuzzer.
+
 ## Replay under `cargo test`
 
 `editor-core` replays `fuzz/corpus/`, `fuzz/regressions/` and `fuzz/known/`

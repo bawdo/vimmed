@@ -959,6 +959,21 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_past_the_budgets_is_refused() {
+        use crate::vim::operator::MAX_PUT_LINES;
+        let (mut e, host) = plain_with_host("one two");
+        host.set_clipboard(&"\n".repeat(MAX_PUT_LINES + 1));
+        keys(&mut e, "<D-v>");
+        assert_eq!(e.text(), "one two");
+        assert!(!e.history().can_undo());
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
+        // Over a selection, only what it adds beyond the selection counts.
+        host.set_clipboard("1");
+        keys(&mut e, "<S-M-Right><D-v>");
+        assert_eq!(e.text(), "1 two");
+    }
+
+    #[test]
     fn primary_k_and_l_link_the_selection() {
         let (mut e, _host) = plain_with_host("see docs here");
         keys(&mut e, "<M-Right><Right><S-M-Right><D-k>");
