@@ -136,6 +136,13 @@ fn is_code(kind: &LineKind) -> bool {
     )
 }
 
+fn is_table(kind: &LineKind) -> bool {
+    matches!(
+        kind,
+        LineKind::TableHeader { .. } | LineKind::TableSep { .. } | LineKind::TableRow { .. }
+    )
+}
+
 /// Bookkeeping for one rescan: ids whose lines were rewritten (their infos
 /// are dropped or rebuilt), and the previous kind of every surviving line that
 /// was rewritten, which yields the range of lines whose kind changed. `repaint`
@@ -229,6 +236,26 @@ impl Blocks {
             && let LineKind::TableRow { table } = &self.kinds[s]
             && parse_cells(buf.line(s)).map(|c| c.len()) == Some(self.tables[table].aligns.len())
         {
+            took_fast_path();
+            return s..s + 1;
+        }
+
+        // Out-of-table fast path: a one-line edit to a line in no table and
+        // no code block that leaves it unable to join either changes only
+        // its own kind. Tables are built from runs of pipe rows
+        // (`parse_cells` finds cells), and a separator needs cells too, so
+        // a line without them is no header, separator or row, and
+        // `find_tables` treats it as it treated the old line, which joined
+        // no table either. Not being code, the line had no fence state
+        // carried into it, and not opening a fence, it carries none out.
+        if delta == 0
+            && e == s + 1
+            && !is_code(&self.kinds[s])
+            && !is_table(&self.kinds[s])
+            && parse_cells(buf.line(s)).is_none()
+            && opening_fence(buf.line(s), false).is_none()
+        {
+            self.kinds[s] = classify_line(buf.line(s));
             took_fast_path();
             return s..s + 1;
         }
@@ -1704,5 +1731,55 @@ mod tests {
         });
         assert_eq!(fast, 2);
         assert_eq!(changed, 4..5);
+    }
+
+    #[test]
+    fn editing_a_line_that_stays_out_of_every_table_repaints_one_line() {
+        let (mut b, mut bl) = blocks(TABLE);
+        // The first key splits the table: the general path.
+        let fast = fast_paths(|| {
+            checked_set_line(&mut b, &mut bl, 4, "x| 3 | 4 |");
+        });
+        assert_eq!(fast, 0);
+        // Later keys leave the line out of every table and every fence.
+        let mut changed = 0..0;
+        let fast = fast_paths(|| {
+            changed = checked_set_line(&mut b, &mut bl, 4, "xy| 3 | 4 |");
+        });
+        assert_eq!(fast, 1);
+        assert_eq!(changed, 4..5);
+        // Its own kind may change, and is still right.
+        let fast = fast_paths(|| {
+            checked_set_line(&mut b, &mut bl, 4, "# xy| 3 | 4 |");
+            checked_set_line(&mut b, &mut bl, 0, "- intro");
+            checked_set_line(&mut b, &mut bl, 6, "");
+        });
+        assert_eq!(fast, 3);
+    }
+
+    #[test]
+    fn a_pipe_line_outside_any_table_losing_its_pipes_takes_the_fast_path() {
+        let text = "| a | b |\n|---|---|\n| 1 | 2 |\n| x |\n| c | d |\n|---|---|\n| 3 | 4 |";
+        let (mut b, mut bl) = blocks(text);
+        let fast = fast_paths(|| {
+            checked_set_line(&mut b, &mut bl, 3, "x");
+        });
+        assert_eq!(fast, 1);
+    }
+
+    #[test]
+    fn a_line_joining_a_table_or_a_fence_takes_the_general_path() {
+        let (mut b, mut bl) = blocks(TABLE);
+        checked_set_line(&mut b, &mut bl, 4, "x| 3 | 4 |");
+        let fast = fast_paths(|| {
+            // Back into the table. The line is no body row before the
+            // edit, so the in-row fast path does not apply either.
+            checked_set_line(&mut b, &mut bl, 4, "| 3 | 4 |");
+            // Opening a fence.
+            checked_set_line(&mut b, &mut bl, 6, "```");
+            // Inside the fence it opened.
+            checked_set_line(&mut b, &mut bl, 6, "```rust");
+        });
+        assert_eq!(fast, 0);
     }
 }

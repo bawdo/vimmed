@@ -104,4 +104,12 @@ fn per_key_cost() {
     // `l` first: typing must land inside a cell. At column 0, before the
     // leading pipe, the first key makes the line stop being a table row.
     scenario("type in 100k table", &table, "50000Gli", &repeat('x', 50));
+    // At column 0 the first key (in the setup) splits the table; the timed
+    // keys edit a line in no table.
+    scenario(
+        "type col 0 in 100k table",
+        &table,
+        "50000Gix",
+        &repeat('x', 50),
+    );
 }
