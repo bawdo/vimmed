@@ -269,6 +269,9 @@ impl Editor {
             let at = self.buf.clamp(self.cursor);
             at..at
         });
+        if self.refuses_paste(r.clone(), &text) {
+            return Effects::default();
+        }
         self.edit(r, &text).merge(self.selection_redraw(before))
     }
 

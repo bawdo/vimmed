@@ -1490,19 +1490,24 @@ impl Editor {
         else {
             return Effects::default();
         };
-        let before = self.selection_lines();
         self.vim.cancel();
-        let range = match self.shown_selection().filter(|_| self.visual()) {
-            Some(sel) => {
-                let r = visual::paste_range(&self.buf, sel, &mut text);
-                self.leave_visual();
-                r
-            }
+        let sel = self.shown_selection().filter(|_| self.visual());
+        let range = match sel {
+            Some(sel) => visual::paste_range(&self.buf, sel, &mut text),
             None => {
                 let at = self.buf.clamp(self.cursor);
                 at..at
             }
         };
+        // Before anything changes: a refused paste leaves the text, the
+        // mode and an Insert session as they were.
+        if self.refuses_paste(range.clone(), &text) {
+            return Effects::default();
+        }
+        let before = self.selection_lines();
+        if sel.is_some() {
+            self.leave_visual();
+        }
         let insert = self.mode == Mode::Insert;
         // In a vim Insert session the paste is a step of its own; the
         // session goes on after it. Its text joins what `.` repeats.
@@ -1533,6 +1538,20 @@ impl Editor {
             self.history.begin();
         }
         fx.merge(self.selection_redraw(before))
+    }
+
+    /// Whether a paste of `text` over `r` is refused, saying so if it is.
+    /// A paste is checked as a put is: against the per-put caps, and against
+    /// the document budgets for what it adds beyond `r`.
+    fn refuses_paste(&mut self, r: Range<Pos>, text: &str) -> bool {
+        let breaks = text.matches('\n').count();
+        let refused = text.len() > operator::MAX_PUT_BYTES
+            || breaks > operator::MAX_PUT_LINES
+            || !crate::limits::fits_replacing(&self.buf, r, text);
+        if refused {
+            self.say(strings::RESULTING_TEXT_TOO_LONG.to_owned());
+        }
+        refused
     }
 
     /// Undoes (or, with `redo`, redoes) up to `count` steps and puts the

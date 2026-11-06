@@ -30,9 +30,9 @@ use crate::vim::{Cursor, rest};
 /// Fuzz builds (`cfg(fuzzing)`) use a smaller limit (1 MiB) so a run cannot
 /// spend its time on huge puts.
 #[cfg(not(fuzzing))]
-const MAX_PUT_BYTES: usize = 1 << 26;
+pub(crate) const MAX_PUT_BYTES: usize = 1 << 26;
 #[cfg(fuzzing)]
-const MAX_PUT_BYTES: usize = 1 << 20;
+pub(crate) const MAX_PUT_BYTES: usize = 1 << 20;
 
 /// The most lines a single put may add. Each line costs about 175 bytes of
 /// memory on top of its text (the `String`, the Markdown line kind and the
@@ -42,9 +42,9 @@ const MAX_PUT_BYTES: usize = 1 << 20;
 /// Fuzz builds (`cfg(fuzzing)`) use a smaller limit (16,384 lines) so a run
 /// cannot spend its time on huge puts.
 #[cfg(not(fuzzing))]
-const MAX_PUT_LINES: usize = 1 << 18;
+pub(crate) const MAX_PUT_LINES: usize = 1 << 18;
 #[cfg(fuzzing)]
-const MAX_PUT_LINES: usize = 1 << 14;
+pub(crate) const MAX_PUT_LINES: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
