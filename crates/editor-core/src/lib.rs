@@ -1,4 +1,6 @@
 pub mod buffer;
+#[cfg_attr(not(test), allow(dead_code))]
+mod colindex;
 pub mod config;
 pub mod editor;
 pub mod effects;
