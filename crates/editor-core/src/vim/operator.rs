@@ -14,8 +14,10 @@ use std::ops::Range;
 use crate::buffer::{Buffer, Edit, Pos};
 use crate::grapheme;
 use crate::host::Host;
+use crate::limits;
 use crate::lists::{self, EditPlan};
 use crate::markdown::Blocks;
+use crate::strings;
 use crate::tables::{self, CellMove};
 use crate::undo::{self, History};
 use crate::vim::motion::{self, Motion, MotionKind};
@@ -285,6 +287,9 @@ pub struct EditCtx<'a> {
     /// The named register (`"a` to `"z`) the command writes or puts, if it
     /// names one.
     pub register: Option<char>,
+    /// Why the command refused to do what it was asked, for the editor to
+    /// say once it returns (`strings`). `None` when it did not refuse.
+    pub refusal: Option<&'static str>,
     touched: Vec<Touched>,
 }
 
@@ -303,6 +308,7 @@ impl<'a> EditCtx<'a> {
             registers,
             host,
             register: None,
+            refusal: None,
             touched: Vec::new(),
         }
     }
@@ -662,15 +668,20 @@ pub fn put(ctx: &mut EditCtx, before: bool, count: usize) -> OpOutcome {
         .checked_mul(count)
         .is_none_or(|n| n > MAX_PUT_BYTES)
     {
+        ctx.refusal = Some(strings::RESULTING_TEXT_TOO_LONG);
         return stay;
     }
     // A put splits its text at each `\n`, so that is how many lines it adds.
-    if text
-        .matches('\n')
-        .count()
-        .checked_mul(count)
-        .is_none_or(|n| n > MAX_PUT_LINES)
-    {
+    let breaks = text.matches('\n').count();
+    if breaks.checked_mul(count).is_none_or(|n| n > MAX_PUT_LINES) {
+        ctx.refusal = Some(strings::RESULTING_TEXT_TOO_LONG);
+        return stay;
+    }
+    // Checked before anything changes, so a refused put changes nothing.
+    // Both products are within the caps above, so neither overflows; the
+    // bytes leave out the breaks, which the document does not count.
+    if !limits::fits(ctx.buf, breaks * count, (text.len() - breaks) * count) {
+        ctx.refusal = Some(strings::RESULTING_TEXT_TOO_LONG);
         return stay;
     }
     let text = text.repeat(count);
@@ -740,6 +751,8 @@ pub fn put(ctx: &mut EditCtx, before: bool, count: usize) -> OpOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::Editor;
+    use crate::limits::MAX_DOC_LINES;
     use crate::testkit::*;
     use crate::vim::Mode;
 
@@ -1464,6 +1477,7 @@ mod tests {
         let mut e = ed("a");
         keys(&mut e, "yl99999999999p");
         assert_eq!(e.text(), "a");
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
     }
 
     #[cfg(fuzzing)]
@@ -1478,6 +1492,7 @@ mod tests {
         keys(&mut e, "17yy");
         keys(&mut e, "99999p");
         assert_eq!(e.buffer().line_count(), 17);
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
         // Under the cap still puts: 17 lines x 900 = 15,300.
         keys(&mut e, "900p");
         assert_eq!(e.buffer().line_count(), 17 + 15_300);
@@ -1492,6 +1507,7 @@ mod tests {
         keys(&mut e, &format!("{count}p"));
         assert_eq!(e.text(), "a");
         assert_eq!(e.buffer().line_count(), 1);
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
     }
 
     #[cfg(not(fuzzing))]
@@ -1501,6 +1517,58 @@ mod tests {
         keys(&mut e, "yy");
         keys(&mut e, &format!("{MAX_PUT_LINES}p"));
         assert_eq!(e.buffer().line_count(), MAX_PUT_LINES + 1);
+        assert_eq!(e.message(), None);
+    }
+
+    /// An editor on a document of `lines` lines of "a".
+    fn ed_of_lines(lines: usize) -> Editor {
+        let text = "a\n".repeat(lines);
+        let e = ed(&text);
+        assert_eq!(e.buffer().line_count(), lines);
+        e
+    }
+
+    #[test]
+    fn put_past_the_line_budget_is_refused() {
+        let mut e = ed_of_lines(MAX_DOC_LINES - 10);
+        keys(&mut e, "yy");
+        let text = e.text();
+        let reg = e.register(None);
+        assert!(!e.history().can_undo());
+        keys(&mut e, "20p");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 10);
+        assert!(e.text() == text, "the text changed");
+        assert_eq!(e.register(None), reg);
+        assert!(!e.history().can_undo());
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
+    }
+
+    #[test]
+    fn dot_repeat_of_a_refused_put() {
+        let mut e = ed_of_lines(MAX_DOC_LINES - 25);
+        keys(&mut e, "yy10p");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 15);
+        keys(&mut e, ".");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 5);
+        assert_eq!(e.message(), None);
+        let text = e.text();
+        let reg = e.register(None);
+        let undo = e.history().undo_len();
+        let cursor = e.cursor();
+        // The crossing `.` would make MAX_DOC_LINES + 5.
+        keys(&mut e, ".");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 5);
+        assert!(e.text() == text, "the text changed");
+        assert_eq!(e.register(None), reg);
+        assert_eq!(e.history().undo_len(), undo);
+        assert!(!e.history().can_redo());
+        assert_eq!(e.cursor(), cursor);
+        assert_eq!(e.message(), Some(strings::RESULTING_TEXT_TOO_LONG));
+        // The refusal leaves `.` as it was, and a put that lands exactly
+        // on the budget is accepted.
+        keys(&mut e, "5.");
+        assert_eq!(e.buffer().line_count(), MAX_DOC_LINES);
+        assert_eq!(e.history().undo_len(), undo + 1);
     }
 
     #[test]

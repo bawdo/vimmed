@@ -88,6 +88,9 @@ pub struct Buffer {
     /// Column indexes for up to two lines, `(line, index)`, most recently
     /// used first. `replace` keeps them true to the text.
     cols: RefCell<[Option<(usize, LineCols)>; 2]>,
+    /// The sum of the lines' lengths, without line breaks. `replace` keeps
+    /// it true to the text.
+    bytes: usize,
 }
 
 /// A clone is a new buffer: it edits on its own from here, so it takes a
@@ -124,6 +127,7 @@ impl Buffer {
     }
 
     fn new(lines: Vec<String>, eol: Eol, bom: bool, trailing_newline: bool) -> Buffer {
+        let bytes = lines.iter().map(String::len).sum();
         Buffer {
             lines,
             eol,
@@ -133,6 +137,7 @@ impl Buffer {
             seq: 0,
             shifts: VecDeque::new(),
             cols: RefCell::default(),
+            bytes,
         }
     }
 
@@ -175,6 +180,11 @@ impl Buffer {
     /// The line at `i` without its terminator, or "" when out of range.
     pub fn line(&self, i: usize) -> &str {
         self.lines.get(i).map_or("", String::as_str)
+    }
+
+    /// The bytes the lines hold, line breaks not counted.
+    pub fn byte_count(&self) -> usize {
+        self.bytes
     }
 
     /// The number of lines, at least 1.
@@ -291,6 +301,10 @@ impl Buffer {
             removed: end.line - start.line + 1,
             inserted: pieces.len(),
         };
+        // Line breaks are not counted: `removed` held one per line joined,
+        // `inserted` one per line split.
+        self.bytes = self.bytes - (removed.len() - (end.line - start.line))
+            + (inserted.len() - (shift.inserted - 1));
         self.lines.splice(start.line..=end.line, pieces);
         self.log(shift);
         self.update_cols(start, end, shift);
@@ -377,6 +391,35 @@ mod tests {
         let inv2 = b.replace(inv.range, &inv.text);
         assert_eq!(b.to_text(), original);
         assert_eq!(inv2.text, "there");
+    }
+
+    /// The byte count, recounted from the lines.
+    fn recount(b: &Buffer) -> usize {
+        (0..b.line_count()).map(|i| b.line(i).len()).sum()
+    }
+
+    #[test]
+    fn byte_count_tracks_edits() {
+        let mut b = Buffer::from_text("\u{FEFF}héllo\r\nworld\r\n");
+        assert_eq!(b.byte_count(), recount(&b));
+        assert_eq!(b.byte_count(), 11);
+        // Same-line insert, multi-line insert, a CRLF insert, a deletion
+        // across lines, a replacement across lines and an edit past the end.
+        let edits: [(Range<Pos>, &str); 7] = [
+            (pos(0, 1)..pos(0, 1), "XY"),
+            (pos(1, 2)..pos(1, 2), "one\ntwo\nthree"),
+            (pos(0, 0)..pos(0, 0), "a\r\nb\r\n"),
+            (pos(1, 3)..pos(4, 2), ""),
+            (pos(0, 0)..pos(1, 1), "p\nq\nr"),
+            (pos(9, 99)..pos(9, 99), "\nend"),
+            (pos(0, 0)..pos(99, 999), ""),
+        ];
+        for (r, text) in edits {
+            b.replace(r.clone(), text);
+            assert_eq!(b.byte_count(), recount(&b), "{r:?} {text:?}");
+        }
+        assert_eq!(b.byte_count(), 0);
+        assert_eq!(b.clone().byte_count(), 0);
     }
 
     #[test]

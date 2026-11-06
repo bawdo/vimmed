@@ -252,6 +252,10 @@ pub fn table_too_big(max_cols: u32, max_rows: u32) -> String {
     format!("E474: A table has at most {max_cols} columns and {max_rows} rows")
 }
 
+/// A put (or `.` of one) refused because the document would grow past its
+/// line or byte budget, or the put past its own size cap. Vim's own text.
+pub const RESULTING_TEXT_TOO_LONG: &str = "E1240: Resulting text too long";
+
 /// Put before the window title while there are unsaved changes, where the
 /// toolkit has no edited flag of its own (GTK; macOS shows its dot).
 pub const DIRTY_TITLE_MARK: &str = "\u{2022} ";

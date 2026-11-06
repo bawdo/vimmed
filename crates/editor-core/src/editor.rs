@@ -1756,11 +1756,15 @@ impl Editor {
         ctx.register = self.register;
         let out = f(&mut ctx);
         let touched = ctx.touched().to_vec();
+        let refusal = ctx.refusal;
         if out.insert {
             self.mode = Mode::Insert;
         }
         let fx = self.finish(old, &touched, out.cursor);
         self.history.end();
+        if let Some(text) = refusal {
+            self.say(text.to_owned());
+        }
         fx
     }
 
