@@ -5,6 +5,8 @@
 //! by cargo-fuzz and ClusterFuzzLite). Fuzz builds lower the numbers only;
 //! the same limit-handling code runs in both.
 
+use crate::buffer::Buffer;
+
 /// The largest value a count part may reach. Matches vim's own ceiling, so a
 /// count never means more than a billion operations. Fuzz builds use 1,000 so
 /// a few input bytes cannot mean tens of millions of operations.
@@ -41,3 +43,30 @@ pub const MAX_UNDO_BYTES: usize = 1 << 20; // 1,048,576
 pub const MAX_SUB_CHANGES: usize = 1 << 18; // 262,144
 #[cfg(fuzzing)]
 pub const MAX_SUB_CHANGES: usize = 1 << 12; // 4,096
+
+/// Whether `buf` stays within the document budgets after growing by
+/// `added_lines` lines and `added_bytes` bytes (line breaks not counted).
+/// A sum that overflows does not fit.
+pub fn fits(buf: &Buffer, added_lines: usize, added_bytes: usize) -> bool {
+    let lines = buf.line_count().checked_add(added_lines);
+    let bytes = buf.byte_count().checked_add(added_bytes);
+    lines.is_some_and(|n| n <= MAX_DOC_LINES) && bytes.is_some_and(|n| n <= MAX_DOC_BYTES)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fits_holds_both_budgets_and_overflow_never_fits() {
+        let buf = Buffer::from_text("ab\ncd\n");
+        let lines = MAX_DOC_LINES - buf.line_count();
+        let bytes = MAX_DOC_BYTES - buf.byte_count();
+        assert!(fits(&buf, 0, 0));
+        assert!(fits(&buf, lines, bytes));
+        assert!(!fits(&buf, lines + 1, 0));
+        assert!(!fits(&buf, 0, bytes + 1));
+        assert!(!fits(&buf, usize::MAX, 0));
+        assert!(!fits(&buf, 0, usize::MAX));
+    }
+}
