@@ -6,6 +6,14 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A put that would add more than 262,144 lines now adds nothing, as one over the existing 64 MiB limit does, so a mistyped count cannot exhaust memory.
+
+### Fixed
+
+- Moving by grapheme (`h`, `l`, `b`, `w` and friends) on a long line no longer takes time proportional to the square of the line length.
+
 ## [0.9.0] - 2026-11-06
 
 ### Added
