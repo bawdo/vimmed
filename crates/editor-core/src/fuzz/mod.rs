@@ -356,6 +356,12 @@ fn fuzz_path() -> PathBuf {
 /// the run ends, without a panic, once the cursor line is longer.
 const MAX_FUZZ_LINE_BYTES: usize = 2048;
 
+/// The most lines `editor_keys` lets a document reach. Yank and put double
+/// a document, so any document grows exponentially within a few keys and no
+/// per-put cap bounds it. Like the line-length guard, this bounds the work a
+/// run can create: the run ends, without a panic, once the buffer passes it.
+const MAX_FUZZ_LINES: usize = 65_536;
+
 /// How far the clock moves between two keys: a frame at 60 Hz.
 const KEY_STEP_NS: u64 = 16_000_000;
 
@@ -429,7 +435,10 @@ fn drive(path: PathBuf, data: &[u8]) -> Editor {
         }));
         let c = ViewSource::cursor(&editor);
         assert_eq!(editor.buffer().clamp(c), c, "cursor off a boundary");
-        if fx.close.is_some() || editor.buffer().line(c.line).len() > MAX_FUZZ_LINE_BYTES {
+        if fx.close.is_some()
+            || editor.buffer().line(c.line).len() > MAX_FUZZ_LINE_BYTES
+            || editor.buffer().line_count() > MAX_FUZZ_LINES
+        {
             break;
         }
     }
@@ -492,6 +501,22 @@ mod tests {
         let e = drive(fuzz_path(), data.as_bytes());
         assert_eq!(e.buffer().line(0).len(), MAX_FUZZ_LINE_BYTES + 1);
         assert!(e.buffer().line(0).contains('x'));
+    }
+
+    /// A put that takes the buffer past `MAX_FUZZ_LINES` ends the run: the
+    /// keys after it are not applied.
+    #[test]
+    fn editor_keys_stops_on_too_many_lines() {
+        let data = format!("a\0yy{}pix<Esc>", MAX_FUZZ_LINES);
+        let e = drive(fuzz_path(), data.as_bytes());
+        assert_eq!(e.buffer().line_count(), MAX_FUZZ_LINES + 1);
+        assert!(!e.text().contains('x'), "a key ran after the cap");
+
+        // At the cap exactly, the run goes on.
+        let data = format!("a\0yy{}pix<Esc>", MAX_FUZZ_LINES - 1);
+        let e = drive(fuzz_path(), data.as_bytes());
+        assert_eq!(e.buffer().line_count(), MAX_FUZZ_LINES);
+        assert!(e.text().contains('x'));
     }
 
     #[test]

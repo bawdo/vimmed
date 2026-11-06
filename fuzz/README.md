@@ -80,7 +80,8 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   cursor line, and a counted put builds a huge line from a tiny input, so
   such a run hits the timeout. That is a known performance limitation, not a
   crash; see the long-line performance issue. The cap bounds the work a run
-  can create, as the input cap does. The input
+  can create, as the input cap does. A run also stops once the buffer passes
+  65,536 lines, because yank and put double a document within a few keys. The input
   `fuzz/known/editor_keys/long_line_per_key_cost` is kept as the reference
   input for that work.
 
