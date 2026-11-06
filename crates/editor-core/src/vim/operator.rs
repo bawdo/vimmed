@@ -24,7 +24,25 @@ use crate::vim::{Cursor, rest};
 
 /// The most a single put may insert. A count that would go past it puts
 /// nothing rather than exhausting memory.
+///
+/// Fuzz builds (`cfg(fuzzing)`) use a smaller limit (1 MiB) so a run cannot
+/// spend its time on huge puts.
+#[cfg(not(fuzzing))]
 const MAX_PUT_BYTES: usize = 1 << 26;
+#[cfg(fuzzing)]
+const MAX_PUT_BYTES: usize = 1 << 20;
+
+/// The most lines a single put may add. Each line costs about 175 bytes of
+/// memory on top of its text (the `String`, the Markdown line kind and the
+/// undo record), so the byte cap alone lets one counted put of a tiny line
+/// allocate gigabytes. A put past this adds nothing, like the byte cap.
+///
+/// Fuzz builds (`cfg(fuzzing)`) use a smaller limit (16,384 lines) so a run
+/// cannot spend its time on huge puts.
+#[cfg(not(fuzzing))]
+const MAX_PUT_LINES: usize = 1 << 18;
+#[cfg(fuzzing)]
+const MAX_PUT_LINES: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
@@ -643,6 +661,15 @@ pub fn put(ctx: &mut EditCtx, before: bool, count: usize) -> OpOutcome {
         .len()
         .checked_mul(count)
         .is_none_or(|n| n > MAX_PUT_BYTES)
+    {
+        return stay;
+    }
+    // A put splits its text at each `\n`, so that is how many lines it adds.
+    if text
+        .matches('\n')
+        .count()
+        .checked_mul(count)
+        .is_none_or(|n| n > MAX_PUT_LINES)
     {
         return stay;
     }
@@ -1431,11 +1458,49 @@ mod tests {
         assert_eq!(e.cursor(), pos(0, 1));
     }
 
+    #[cfg(not(fuzzing))]
     #[test]
     fn a_huge_put_count_puts_nothing() {
         let mut e = ed("a");
         keys(&mut e, "yl99999999999p");
         assert_eq!(e.text(), "a");
+    }
+
+    #[cfg(fuzzing)]
+    #[test]
+    fn fuzz_builds_lower_the_put_caps() {
+        assert_eq!(MAX_PUT_BYTES, 1 << 20);
+        assert_eq!(MAX_PUT_LINES, 1 << 14);
+        // The fuzz count ceiling (1,000) is below the line cap, so reach the
+        // cap with a multi-line yank: 17 lines x 1,000 = 17,000 > 16,384.
+        let text = "a\n".repeat(16);
+        let mut e = ed(&format!("{text}a"));
+        keys(&mut e, "17yy");
+        keys(&mut e, "99999p");
+        assert_eq!(e.buffer().line_count(), 17);
+        // Under the cap still puts: 17 lines x 900 = 15,300.
+        keys(&mut e, "900p");
+        assert_eq!(e.buffer().line_count(), 17 + 15_300);
+    }
+
+    #[cfg(not(fuzzing))]
+    #[test]
+    fn a_put_past_the_line_cap_puts_nothing() {
+        let mut e = ed("a");
+        keys(&mut e, "yy");
+        let count = MAX_PUT_LINES + 1;
+        keys(&mut e, &format!("{count}p"));
+        assert_eq!(e.text(), "a");
+        assert_eq!(e.buffer().line_count(), 1);
+    }
+
+    #[cfg(not(fuzzing))]
+    #[test]
+    fn a_put_at_the_line_cap_is_accepted() {
+        let mut e = ed("a");
+        keys(&mut e, "yy");
+        keys(&mut e, &format!("{MAX_PUT_LINES}p"));
+        assert_eq!(e.buffer().line_count(), MAX_PUT_LINES + 1);
     }
 
     #[test]

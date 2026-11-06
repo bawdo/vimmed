@@ -1,0 +1,49 @@
+[package]
+name = "editor-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+editor-core = { path = "../crates/editor-core", features = ["fuzzing"] }
+
+[[bin]]
+name = "markdown_incremental"
+path = "fuzz_targets/markdown_incremental.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ex_command"
+path = "fuzz_targets/ex_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "editor_keys"
+path = "fuzz_targets/editor_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_files"
+path = "fuzz_targets/state_files.rs"
+test = false
+doc = false
+bench = false

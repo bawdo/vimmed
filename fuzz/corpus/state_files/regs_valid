@@ -1,0 +1,7 @@
+r[a]
+text = "one\n"
+linewise = true
+
+[b]
+text = "two"
+linewise = false

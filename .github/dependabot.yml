@@ -53,3 +53,39 @@ updates:
     commit-message:
       prefix: "Bumped"
     labels: [dependencies]
+
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Australia/Sydney
+    # Wait a week before taking a new release, so one that is found to be
+    # compromised or broken soon after publishing never lands here. Security
+    # updates are not delayed.
+    cooldown:
+      default-days: 7
+    groups:
+      fuzz-cargo:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Bumped"
+    labels: [dependencies]
+
+  - package-ecosystem: docker
+    directory: /.clusterfuzzlite
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Australia/Sydney
+    # Wait a week before taking a new release, so one that is found to be
+    # compromised or broken soon after publishing never lands here. Security
+    # updates are not delayed.
+    cooldown:
+      default-days: 7
+    groups:
+      clusterfuzzlite:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Bumped"
+    labels: [dependencies]

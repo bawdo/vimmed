@@ -7,3 +7,7 @@ Cargo.lock linguist-generated=true
 docs/superpowers/** linguist-documentation
 research_notes/** linguist-documentation
 reports/** linguist-documentation
+# Fuzz inputs are raw bytes: never normalise their line endings.
+fuzz/corpus/** -text
+fuzz/regressions/** -text
+fuzz/known/** -text

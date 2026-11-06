@@ -7,6 +7,9 @@ use crate::buffer::Buffer;
 
 use super::table::{TableId, TableInfo, find_tables, parse_cells};
 
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) mod oracle;
+
 /// Identifies one fenced code block within a `Blocks` value. Stable between
 /// updates that do not touch the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -678,6 +681,7 @@ fn roman(mut n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::oracle::{assert_fresh, block_of, check_update, snapshot, table_of};
     use super::*;
     use crate::buffer::Pos;
     use crate::markdown::table::Align;
@@ -718,63 +722,6 @@ mod tests {
             } => (depth, content_offset),
             other => panic!("{line:?} is {other:?}, not a quote"),
         }
-    }
-
-    fn block_of(kind: &LineKind) -> Option<BlockId> {
-        match kind {
-            LineKind::FenceOpen { block, .. }
-            | LineKind::FenceClose { block }
-            | LineKind::Code { block } => Some(*block),
-            _ => None,
-        }
-    }
-
-    fn table_of(kind: &LineKind) -> Option<TableId> {
-        match kind {
-            LineKind::TableHeader { table }
-            | LineKind::TableSep { table }
-            | LineKind::TableRow { table } => Some(*table),
-            _ => None,
-        }
-    }
-
-    /// The kinds with ids renamed by first appearance, each id-bearing line
-    /// carrying its block or table info, so two `Blocks` compare equal when
-    /// they describe the same structure. Also checks no stale infos linger.
-    fn canon(buf: &Buffer, bl: &Blocks) -> Vec<String> {
-        let mut bids: HashMap<BlockId, usize> = HashMap::new();
-        let mut tids: HashMap<TableId, usize> = HashMap::new();
-        let out = (0..buf.line_count())
-            .map(|i| {
-                let kind = bl.kind(i);
-                if let Some(b) = block_of(kind) {
-                    let n = bids.len();
-                    let c = *bids.entry(b).or_insert(n);
-                    let mut s = format!("{kind:?}");
-                    s = s.replace(&format!("{b:?}"), &format!("B{c}"));
-                    format!("{s} {:?}", bl.code_block(b))
-                } else if let Some(t) = table_of(kind) {
-                    let n = tids.len();
-                    let c = *tids.entry(t).or_insert(n);
-                    let s = format!("{kind:?}").replace(&format!("{t:?}"), &format!("T{c}"));
-                    format!("{s} {:?}", bl.table(t))
-                } else {
-                    format!("{kind:?}")
-                }
-            })
-            .collect();
-        assert_eq!(bl.code_blocks.len(), bids.len(), "stale code block infos");
-        assert_eq!(bl.tables.len(), tids.len(), "stale table infos");
-        out
-    }
-
-    fn assert_fresh(buf: &Buffer, bl: &Blocks) {
-        assert_eq!(
-            canon(buf, bl),
-            canon(buf, &Blocks::new(buf)),
-            "{:?}",
-            buf.to_text()
-        );
     }
 
     /// Applies a buffer replace, then `update` with the contract's arguments.
@@ -1616,85 +1563,21 @@ mod tests {
                 pieces[next(pieces.len())]
             };
 
-            let old: Vec<LineKind> = (0..b.line_count()).map(|i| bl.kind(i).clone()).collect();
-            let old_tables = bl.tables.clone();
-            let old_code = bl.code_blocks.clone();
+            let before_snap = snapshot(&b, &bl);
             let before = b.line_count();
             let e = b.replace(start..end, text);
             let delta = b.line_count() as isize - before as isize;
             let edited = e.range.start.line..e.range.end.line + 1;
             let changed = bl.update(&b, edited.clone(), delta);
-
-            assert_fresh(&b, &bl);
-            assert!(
-                changed.start <= edited.start && changed.end >= edited.end,
-                "seed {label} step {step}"
+            check_update(
+                &before_snap,
+                &b,
+                &bl,
+                edited,
+                delta,
+                changed,
+                &format!("seed {label} step {step}"),
             );
-            for i in (0..b.line_count()).filter(|i| !changed.contains(i)) {
-                let o = if i < edited.start {
-                    i
-                } else {
-                    (i as isize - delta) as usize
-                };
-                assert_eq!(bl.kind(i), &old[o], "seed {label} step {step} line {i}");
-            }
-            // A table whose info changed (after mapping old lines into the new
-            // buffer) must be repainted whole, even when its id was kept. A
-            // line inside the edit keeps its offset while still inside
-            // `edited`, and is otherwise gone.
-            let old_e = (edited.end as isize - delta) as usize;
-            let map = |x: usize| {
-                if x >= old_e {
-                    Some((x as isize + delta) as usize)
-                } else if x < edited.end {
-                    Some(x)
-                } else {
-                    None
-                }
-            };
-            for (id, info) in &bl.tables {
-                let Some(was) = old_tables.get(id) else {
-                    continue;
-                };
-                let same = map(was.header) == Some(info.header)
-                    && map(was.sep) == Some(info.sep)
-                    && map(was.last) == Some(info.last)
-                    && was.aligns == info.aligns;
-                if !same {
-                    assert!(
-                        changed.start <= info.header && changed.end > info.last,
-                        "seed {label} step {step}: table {info:?} was {was:?}, changed {changed:?}"
-                    );
-                }
-            }
-            // Likewise a code block whose open, close, lang or last line (from
-            // the kinds, which is how an unclosed block's end is known) changed
-            // under a kept id: opener to the later of its old and new last
-            // lines is in range.
-            for (id, info) in &bl.code_blocks {
-                let Some(was) = old_code.get(id) else {
-                    continue;
-                };
-                let mut last = info.open;
-                while block_of(bl.kind(last + 1)) == Some(*id) {
-                    last += 1;
-                }
-                let old_last = old
-                    .iter()
-                    .rposition(|k| block_of(k) == Some(*id))
-                    .and_then(map);
-                let same = map(was.open) == Some(info.open)
-                    && was.close.map(map) == info.close.map(Some)
-                    && was.lang == info.lang
-                    && old_last == Some(last);
-                if !same {
-                    let end = old_last.map_or(last, |o| o.max(last).min(b.line_count() - 1));
-                    assert!(
-                        changed.start <= info.open && changed.end > end,
-                        "seed {label} step {step}: block {info:?} last {last} was {was:?} last {old_last:?}, changed {changed:?}"
-                    );
-                }
-            }
             with_code += usize::from(!bl.code_blocks.is_empty());
             with_table += usize::from(!bl.tables.is_empty());
         }

@@ -26,7 +26,7 @@ use crate::file::StateDir;
 use crate::vim::register::Register;
 
 /// The registers, by name.
-type Regs = BTreeMap<char, Register>;
+pub(crate) type Regs = BTreeMap<char, Register>;
 
 /// What identifies one version of the file: its modification time and
 /// size. `None` when there is no file.
@@ -170,7 +170,7 @@ fn user_file(path: &Path, truncate: bool) -> io::Result<File> {
 /// The registers in `bytes`, or `None` when they are not UTF-8 TOML of
 /// the expected shape: tables named `a` to `z`, each with a string `text`
 /// and a boolean `linewise`.
-fn parse(bytes: &[u8]) -> Option<Regs> {
+pub(crate) fn parse(bytes: &[u8]) -> Option<Regs> {
     let table: toml::Table = std::str::from_utf8(bytes).ok()?.parse().ok()?;
     table
         .iter()
@@ -188,7 +188,7 @@ fn parse(bytes: &[u8]) -> Option<Regs> {
         .collect()
 }
 
-fn serialise(regs: &Regs) -> String {
+pub(crate) fn serialise(regs: &Regs) -> String {
     let table: toml::Table = regs
         .iter()
         .map(|(name, reg)| {

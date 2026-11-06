@@ -372,7 +372,15 @@ fn copy_pid(name: &str, hash: &str) -> Option<u32> {
 /// `written_at_ns` from the metadata at `meta`, when it is a copy of the
 /// file `key` by `pid`.
 fn read_meta(meta: &Path, key: &str, pid: u32) -> Option<i64> {
-    let table: toml::Table = fs::read_to_string(meta).ok()?.parse().ok()?;
+    fs::read_to_string(meta)
+        .ok()
+        .and_then(|text| parse_meta(&text, key, pid))
+}
+
+/// `written_at_ns` from the metadata `text`, when it is a copy of the file
+/// `key` by `pid`.
+pub(crate) fn parse_meta(text: &str, key: &str, pid: u32) -> Option<i64> {
+    let table: toml::Table = text.parse().ok()?;
     let ours =
         table.get("path")?.as_str()? == key && table.get("pid")?.as_integer()? == i64::from(pid);
     if !ours {
@@ -464,6 +472,15 @@ fn remove(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn parse_meta_matches_read_meta() {
+        let text = "path = \"/a.md\"\npid = 7\nwritten_at_ns = 42\n";
+        assert_eq!(parse_meta(text, "/a.md", 7), Some(42));
+        assert_eq!(parse_meta(text, "/b.md", 7), None);
+        assert_eq!(parse_meta(text, "/a.md", 8), None);
+        assert_eq!(parse_meta("not toml", "/a.md", 7), None);
+    }
 
     const T0: u64 = 5_000;
     const SEC: u64 = 1_000_000_000;

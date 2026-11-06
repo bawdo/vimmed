@@ -1,0 +1,25 @@
+vim = "yes"
+autosave = 1
+theme = "purple"
+column_width = -5
+unknown_key = true
+
+[font]
+body = ""
+mono = 12
+size = 0
+extra = 1
+
+[tokens]
+"color.link" = "not a colour"
+"color.nope" = "#000000"
+"font.size" = 100000
+"line.height.body" = 99
+"space.column" = "wide"
+"color.bg" = true
+
+[tokens.light]
+"color.bg" = []
+
+[tokens.dark]
+"color.text" = "#12"
