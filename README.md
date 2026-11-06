@@ -157,13 +157,21 @@ MIT, see [LICENSE](LICENSE). The bundled test fonts are under the SIL OFL 1.1:
 [NotoSansSymbols2](crates/editor-render/tests/fonts/NotoSansSymbols2-OFL.txt).
 
 <!-- The badge URLs carry the project name, so they live here, the one
-     README block that `cargo xtask lint-name` allows to. -->
+     README block that `cargo xtask lint-name` allows to.
+     The CI badge follows release.yml, not ci.yml: on main, CI runs only
+     inside the Release workflow (through workflow_call), so ci.yml itself
+     has no runs on main for a badge to show.
+     The release and Scorecard badges ask shields.io for a one-hour cache
+     (cacheSeconds). With their default of a few minutes, a badge is often rebuilt while GitHub's image proxy
+     waits, and the proxy gives up and shows a broken image. The Scorecard
+     badge points straight at shields.io instead of the scorecard.dev
+     redirect, which saves a hop. -->
 <!-- name-lint:allow:start -->
-[ci-badge]: https://github.com/bawdo/vimmed/actions/workflows/ci.yml/badge.svg?branch=main
-[ci]: https://github.com/bawdo/vimmed/actions/workflows/ci.yml
-[release-badge]: https://img.shields.io/github/v/release/bawdo/vimmed
+[ci-badge]: https://github.com/bawdo/vimmed/actions/workflows/release.yml/badge.svg?branch=main&event=push
+[ci]: https://github.com/bawdo/vimmed/actions/workflows/release.yml?query=branch%3Amain
+[release-badge]: https://img.shields.io/github/v/release/bawdo/vimmed?cacheSeconds=3600
 [release]: https://github.com/bawdo/vimmed/releases/latest
-[scorecard-badge]: https://api.scorecard.dev/projects/github.com/bawdo/vimmed/badge
+[scorecard-badge]: https://img.shields.io/ossf-scorecard/github.com/bawdo/vimmed?label=openssf%20scorecard&cacheSeconds=3600
 [scorecard]: https://scorecard.dev/viewer/?uri=github.com/bawdo/vimmed
 [coverage-badge]: https://codecov.io/gh/bawdo/vimmed/branch/main/graph/badge.svg
 [coverage]: https://codecov.io/gh/bawdo/vimmed
