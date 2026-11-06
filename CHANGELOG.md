@@ -6,6 +6,8 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-06
+
 ### Added
 
 - `\r` in a `:s` replacement inserts a line break, as in vim, and `\\` is a backslash. `\n` stays as typed (vim would insert a NUL).
@@ -37,5 +39,6 @@ All notable changes to vimmed are documented here. The format follows
 - Safe file handling: atomic saves, recovery copies, and detection of changes made on disk by other tools.
 - `~/.config/vimmed/config.toml` for vim mode, autosave, fonts, column width and theme, with a light and dark theme that follows the system.
 
-[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/bawdo/vimmed/releases/tag/v0.9.1
 [0.9.0]: https://github.com/bawdo/vimmed/releases/tag/v0.9.0
