@@ -153,6 +153,12 @@ pub const MARK_NOT_SET: &str = "E20: Mark not set";
 /// `:s//` with no search to take the pattern from.
 pub const NO_PREVIOUS_PATTERN: &str = "E35: No previous regular expression";
 
+/// A `:s` refused because it would replace more than `max` matches, the
+/// most one `:s` may change (`limits::MAX_SUB_CHANGES`).
+pub fn too_many_changes(max: usize) -> String {
+    format!("E: :s would change more than {max} matches")
+}
+
 /// What a `:s` did: `1 substitution on 1 line`, `<N> substitutions on <L>
 /// lines`, with vim's singular for one line (`3 substitutions on 1 line`).
 pub fn substitutions(count: usize, lines: usize) -> String {
@@ -253,7 +259,8 @@ pub fn table_too_big(max_cols: u32, max_rows: u32) -> String {
 }
 
 /// A put (or `.` of one) refused because the document would grow past its
-/// line or byte budget, or the put past its own size cap. Vim's own text.
+/// line or byte budget, or the put past its own size cap; a `:s` refused
+/// for its growth past either budget too. Vim's own text.
 pub const RESULTING_TEXT_TOO_LONG: &str = "E1240: Resulting text too long";
 
 /// Put before the window title while there are unsaved changes, where the
