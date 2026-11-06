@@ -13,8 +13,15 @@ All notable changes to vimmed are documented here. The format follows
 ### Changed
 
 - A put that would add more than 262,144 lines now adds nothing, as one over the existing 64 MiB limit does, so a mistyped count cannot exhaust memory.
+- Counts clamp at 999,999,999, as in vim.
+- A put, or a `.` repeating one, that would take the document past 4,194,304 lines or 256 MiB changes nothing and says `E1240: Resulting text too long`, as vim does. A put past the per-put limits now says so too, where it used to refuse silently.
+- `:s` that would take the document past the same limits changes nothing and says `E1240`, and `:s` refuses more than 262,144 changes at once. Both are checked before anything changes, and before a `:s///c` session starts, so a session is never refused halfway.
+- The undo history keeps at most 64 MiB of changes plus its newest step, dropping the oldest steps first, as well as at most 1,000 steps.
 
 ### Fixed
+
+- Keys at the end of a long line (moving, typing, `j` and `k` between long lines) no longer take time in proportion to the line's length: about 1 to 10 µs a key on a 64 KiB line, down from 230 to 1,250 µs.
+- Moving inside a big code block, and typing inside a cell of a big table, no longer take time in proportion to the block's size: under 1 µs a key in a 200,000-line code block (was 174) and about 1 µs in a 100,000-row table (was about 10 ms).
 
 - Moving by grapheme (`h`, `l`, `b`, `w` and friends) on a long line no longer takes time proportional to the square of the line length.
 - `:s` with a line break in the replacement puts later replacements in the right place, with or without `c`, and leaves the cursor where vim does.
