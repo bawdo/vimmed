@@ -26,6 +26,12 @@ use crate::vim::{Cursor, rest};
 /// nothing rather than exhausting memory.
 const MAX_PUT_BYTES: usize = 1 << 26;
 
+/// The most lines a single put may add. Each line costs about 175 bytes of
+/// memory on top of its text (the `String`, the Markdown line kind and the
+/// undo record), so the byte cap alone lets one counted put of a tiny line
+/// allocate gigabytes. A put past this adds nothing, like the byte cap.
+const MAX_PUT_LINES: usize = 1 << 18;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
     Delete,
@@ -643,6 +649,15 @@ pub fn put(ctx: &mut EditCtx, before: bool, count: usize) -> OpOutcome {
         .len()
         .checked_mul(count)
         .is_none_or(|n| n > MAX_PUT_BYTES)
+    {
+        return stay;
+    }
+    // A put splits its text at each `\n`, so that is how many lines it adds.
+    if text
+        .matches('\n')
+        .count()
+        .checked_mul(count)
+        .is_none_or(|n| n > MAX_PUT_LINES)
     {
         return stay;
     }
@@ -1436,6 +1451,24 @@ mod tests {
         let mut e = ed("a");
         keys(&mut e, "yl99999999999p");
         assert_eq!(e.text(), "a");
+    }
+
+    #[test]
+    fn a_put_past_the_line_cap_puts_nothing() {
+        let mut e = ed("a");
+        keys(&mut e, "yy");
+        let count = MAX_PUT_LINES + 1;
+        keys(&mut e, &format!("{count}p"));
+        assert_eq!(e.text(), "a");
+        assert_eq!(e.buffer().line_count(), 1);
+    }
+
+    #[test]
+    fn a_put_at_the_line_cap_is_accepted() {
+        let mut e = ed("a");
+        keys(&mut e, "yy");
+        keys(&mut e, &format!("{MAX_PUT_LINES}p"));
+        assert_eq!(e.buffer().line_count(), MAX_PUT_LINES + 1);
     }
 
     #[test]
