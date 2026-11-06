@@ -1,0 +1,47 @@
+name: CodeQL
+
+# Static analysis (SAST) of the Rust code. It runs on every pull request, so
+# each change is scanned before it merges, and on every push to main, so the
+# Security tab always reflects main. The weekly run picks up new queries
+# while the code does not change. This sits outside ci.yml on purpose: it
+# reports through code scanning, not through the CI result gate, and the
+# main ruleset requires its check by name instead.
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '41 3 * * 1'
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # build-mode none: CodeQL reads the Rust source without compiling it, so
+  # the job needs no toolchain, no GTK libraries and no cargo cache.
+  analyze:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: rust
+          build-mode: none
+
+      - name: Run the analysis
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:rust
