@@ -92,6 +92,14 @@ under plain `cargo test` on stable, so it runs in the normal CI with no
 nightly. Every subdirectory of those three must name a target, so keep stray
 files and directories out of `fuzz/corpus/`.
 
+## Fuzz-build limits
+
+cargo-fuzz and ClusterFuzzLite build with `cfg(fuzzing)`. Under it vimmed
+lowers its own limits (count ceiling 1,000; put caps 1 MiB and 16,384 lines),
+so runs exercise the same limit-handling code without spending time on huge
+counts. Normal builds and `cargo test` use the real limits, so committed
+regression inputs replay against the product's behaviour.
+
 ## When a run finds a crash
 
 CI (ClusterFuzzLite) uploads the failing input as an artifact. Locally,

@@ -484,6 +484,8 @@ mod tests {
 
     /// A put that takes the cursor line past `MAX_FUZZ_LINE_BYTES` ends the
     /// run: the keys after it are not applied.
+    // Needs counts above the fuzz-build ceiling.
+    #[cfg(not(fuzzing))]
     #[test]
     fn editor_keys_stops_on_a_long_line() {
         let put = MAX_FUZZ_LINE_BYTES; // "a" plus this many more is over
@@ -505,6 +507,8 @@ mod tests {
 
     /// A put that takes the buffer past `MAX_FUZZ_LINES` ends the run: the
     /// keys after it are not applied.
+    // Needs counts above the fuzz-build ceiling.
+    #[cfg(not(fuzzing))]
     #[test]
     fn editor_keys_stops_on_too_many_lines() {
         let data = format!("a\0yy{}pix<Esc>", MAX_FUZZ_LINES);
