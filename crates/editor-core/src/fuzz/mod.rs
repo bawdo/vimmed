@@ -521,12 +521,6 @@ fn fuzz_path() -> PathBuf {
     PathBuf::from(format!("/nonexistent-{}-fuzz/fuzz.md", app_meta::SLUG))
 }
 
-// The run budgets below are taken from the product's own document budget
-// (`limits`), not chosen by the harness. The product refuses a put or a `:s`
-// that would pass the budget, but typing (and `.` replaying typed text) is
-// not budget-checked and can pass it, so the run ends there instead of
-// working on a document the product itself would not have grown to.
-
 /// How far the clock moves between two keys: a frame at 60 Hz.
 const KEY_STEP_NS: u64 = 16_000_000;
 
@@ -600,6 +594,12 @@ fn drive(path: PathBuf, data: &[u8]) -> Editor {
         }));
         let c = ViewSource::cursor(&editor);
         assert_eq!(editor.buffer().clamp(c), c, "cursor off a boundary");
+        // The run budgets are the product's own document budgets
+        // (`limits`), not ones the harness chose. The product refuses a put
+        // or a `:s` that would pass them, but typing (and `.` replaying
+        // typed text) is not checked and can pass them, so the run ends
+        // there instead of working on a document the product would not
+        // have grown to.
         if fx.close.is_some()
             || editor.buffer().line_count() > limits::MAX_DOC_LINES
             || editor.buffer().byte_count() > limits::MAX_DOC_BYTES
@@ -655,6 +655,7 @@ mod tests {
     #[cfg(not(fuzzing))]
     #[test]
     fn editor_keys_stops_on_too_many_lines() {
+        let _big = crate::testkit::big_doc_lock();
         let mut data = "\n".repeat(limits::MAX_DOC_LINES + 1).into_bytes();
         data.extend_from_slice(b"\0ix<Esc>");
         let e = drive(fuzz_path(), &data);
@@ -676,6 +677,7 @@ mod tests {
     #[cfg(not(fuzzing))]
     #[test]
     fn editor_keys_stops_on_too_many_bytes() {
+        let _big = crate::testkit::big_doc_lock();
         let mut data = vec![b'a'; limits::MAX_DOC_BYTES + 1];
         data.extend_from_slice(b"\0ix<Esc>");
         let e = drive(fuzz_path(), &data);

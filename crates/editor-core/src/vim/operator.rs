@@ -1530,6 +1530,7 @@ mod tests {
 
     #[test]
     fn put_past_the_line_budget_is_refused() {
+        let _big = big_doc_lock();
         let mut e = ed_of_lines(MAX_DOC_LINES - 10);
         keys(&mut e, "yy");
         let text = e.text();
@@ -1545,6 +1546,7 @@ mod tests {
 
     #[test]
     fn dot_repeat_of_a_refused_put() {
+        let _big = big_doc_lock();
         let mut e = ed_of_lines(MAX_DOC_LINES - 25);
         keys(&mut e, "yy10p");
         assert_eq!(e.buffer().line_count(), MAX_DOC_LINES - 15);

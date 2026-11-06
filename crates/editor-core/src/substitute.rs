@@ -1241,6 +1241,7 @@ mod tests {
 
     #[test]
     fn s_past_the_line_budget_is_refused() {
+        let _big = big_doc_lock();
         // One line short of the budget: a replacement adding two lines is
         // refused, with or without c, and one adding one is accepted.
         let mut e = ed(&"a\n".repeat(MAX_DOC_LINES - 1));
@@ -1262,6 +1263,7 @@ mod tests {
 
     #[test]
     fn s_past_the_byte_budget_is_refused() {
+        let _big = big_doc_lock();
         // Sixteen lines (16 MiB each in a normal build), the last 4 bytes
         // short with one `a` in it: the document is 4 bytes under the
         // budget.

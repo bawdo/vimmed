@@ -124,6 +124,8 @@ feature: enabling only the feature keeps the real limits.
 | Put bytes                | 67,108,864 (64 MiB)   | 1,048,576  |
 | Put lines                | 262,144               | 16,384     |
 
+Document bytes count line contents only, not line breaks.
+
 `MAX_UNDO_GROUPS` (1,000) is the same in both builds.
 
 The `editor_keys` run budgets are these same document limits, not numbers the

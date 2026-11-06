@@ -24,7 +24,8 @@ pub const MAX_DOC_LINES: usize = 1 << 16; // 65,536
 
 /// The most bytes a document may hold after an edit grows it (256 MiB
 /// normally). Bounds memory so a repeated put or substitute cannot exhaust
-/// it. Loading is never refused, only growth.
+/// it. Loading is never refused, only growth. Counts line contents only,
+/// not line breaks.
 #[cfg(not(fuzzing))]
 pub const MAX_DOC_BYTES: usize = 1 << 28; // 268,435,456
 #[cfg(fuzzing)]

@@ -724,6 +724,7 @@ mod tests {
 
     #[test]
     fn oldest_groups_drop_past_the_byte_budget() {
+        let _big = crate::testkit::big_doc_lock();
         use crate::limits::MAX_UNDO_BYTES;
         let mut h = History::new();
         let mut buf = Buffer::from_text("");
@@ -757,6 +758,7 @@ mod tests {
 
     #[test]
     fn a_single_huge_group_is_kept() {
+        let _big = crate::testkit::big_doc_lock();
         use crate::limits::MAX_UNDO_BYTES;
         let mut h = History::new();
         let mut buf = Buffer::from_text("");
