@@ -1880,18 +1880,37 @@ impl Editor {
     /// The lines whose display depends on whether the cursor is on `line`:
     /// its whole code block or table, or just the line.
     fn reveal_extent(&self, line: usize) -> Range<usize> {
-        let Some(g) = self.group(line) else {
-            return line..line + 1;
-        };
-        let mut start = line;
-        while start > 0 && self.group(start - 1) == Some(g) {
-            start -= 1;
+        let n = self.buf.line_count();
+        match self.group(line) {
+            None => line..line + 1,
+            Some(Group::Table(id)) => {
+                let t = self.blocks.table(id);
+                t.header..t.last + 1
+            }
+            Some(Group::Code(id)) => {
+                let info = self.blocks.code_block(id);
+                let end = match info.close {
+                    Some(c) => c + 1,
+                    // Unclosed does not mean "to the end": a later opening
+                    // fence ends the block too. Its lines are one contiguous
+                    // run (ids are never reused), so search for where it stops.
+                    None => {
+                        let g = Some(Group::Code(id));
+                        let (mut lo, mut hi) = (line + 1, n);
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            if self.group(mid) == g {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        lo
+                    }
+                };
+                info.open..end
+            }
         }
-        let mut end = line + 1;
-        while end < self.buf.line_count() && self.group(end) == Some(g) {
-            end += 1;
-        }
-        start..end
     }
 
     /// What line `i` reveals: around the cursor, or, while a mouse button
@@ -2537,5 +2556,63 @@ mod tests {
         assert_eq!(e.reveal(5), Reveal::Block);
         assert_eq!(e.reveal(3), Reveal::None);
         assert_eq!(e.reveal(7), Reveal::None);
+    }
+
+    /// Asserts the reveal extent of each listed line.
+    fn extents(text: &str, want: &[(usize, Range<usize>)]) {
+        let e = ed(text);
+        for (line, r) in want {
+            assert_eq!(e.reveal_extent(*line), *r, "line {line} of {text:?}");
+        }
+    }
+
+    #[test]
+    fn reveal_extent_of_an_unclosed_block_runs_to_the_end() {
+        extents(
+            "a\n```\nx\ny",
+            &[(0, 0..1), (1, 1..4), (2, 1..4), (3, 1..4)],
+        );
+    }
+
+    #[test]
+    fn reveal_extent_of_an_unclosed_block_stops_at_the_next_opener() {
+        let text = "```\na\n```rust\nb\n```\nafter";
+        extents(
+            text,
+            &[
+                (0, 0..2),
+                (1, 0..2),
+                (2, 2..5),
+                (3, 2..5),
+                (4, 2..5),
+                (5, 5..6),
+            ],
+        );
+    }
+
+    #[test]
+    fn reveal_extent_reads_the_infos() {
+        extents(
+            "a\n```\nx\ny\n```\nb",
+            &[
+                (0, 0..1),
+                (1, 1..5),
+                (2, 1..5),
+                (3, 1..5),
+                (4, 1..5),
+                (5, 5..6),
+            ],
+        );
+        extents(
+            "p\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\nq",
+            &[
+                (0, 0..1),
+                (1, 1..5),
+                (2, 1..5),
+                (3, 1..5),
+                (4, 1..5),
+                (5, 5..6),
+            ],
+        );
     }
 }
