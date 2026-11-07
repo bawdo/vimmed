@@ -1,0 +1,10 @@
+# OSV-Scanner policy, read by the OpenSSF Scorecard Vulnerabilities check.
+# Scorecard does not read deny.toml, so every advisory ignored there needs a
+# matching entry here, and the other way round. Remove both together.
+# The ttf-parser claim below can be checked against Source::File in
+# crates/editor-render/src/fonts.rs.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+ignoreUntil = 2027-05-07
+reason = "Unmaintained notice, not a vulnerability. ttf-parser arrives through cosmic-text 0.19 and fontdb 0.23 and only parses font files installed on the system, which the config picks by family name (font.body, font.mono); markdown content never reaches it. Fixed upstream but unreleased: cosmic-text main moved to fontdb 0.24, which drops ttf-parser (pop-os/cosmic-text#526). Remove this entry, and the one in deny.toml, when a cosmic-text release after 0.19 ships with fontdb 0.24."
