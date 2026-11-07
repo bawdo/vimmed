@@ -6,6 +6,8 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-07
+
 ### Changed
 
 - Pasting with Cmd+V (Ctrl+V on Linux) is checked against the same limits as a put: a paste of more than 64 MiB or 262,144 lines, or one that would take the document past 4,194,304 lines or 256 MiB, changes nothing and says `E1240: Resulting text too long`. A paste over a selection counts only what it adds beyond the selection.
@@ -48,6 +50,7 @@ All notable changes to vimmed are documented here. The format follows
 - Safe file handling: atomic saves, recovery copies, and detection of changes made on disk by other tools.
 - `~/.config/vimmed/config.toml` for vim mode, autosave, fonts, column width and theme, with a light and dark theme that follows the system.
 
-[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/bawdo/vimmed/releases/tag/v0.9.2
 [0.9.1]: https://github.com/bawdo/vimmed/releases/tag/v0.9.1
 [0.9.0]: https://github.com/bawdo/vimmed/releases/tag/v0.9.0
