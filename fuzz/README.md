@@ -76,14 +76,26 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   applied, and the run also ends once the harness's own checking passes a
   per-run budget (`ORACLE_BUDGET`), so the timeout reflects the product, not
   the oracle.
-- `editor_keys`: `text SEP keys`, where `SEP` is the first `0x00` (Mac) or
-  `0x01` (Linux) and sets the platform. With neither, all of it is keys on an
-  empty text, on the Mac. A leading `R` in the keys opens the document in
-  reader mode and is not pressed. The keys use the tests' `<Esc>` notation
+- `editor_keys`: `text SEP keys`, where `SEP` is the first byte of
+  `0x00..=0x03` and sets the platform and vim mode:
+
+  | `SEP`  | Platform | Vim |
+  | ------ | -------- | --- |
+  | `0x00` | Mac      | on  |
+  | `0x01` | Linux    | on  |
+  | `0x02` | Mac      | off |
+  | `0x03` | Linux    | off |
+
+  With none, all of it is keys on an empty text, on the Mac, with vim on. A
+  leading `R` in the keys opens the document in reader mode and is not
+  pressed, with vim on or off. The keys use the tests' `<Esc>` notation
   (`keyseq::parse_keys`). The editor has no saver and no state directory, so
   `:w`, `:e!` and closing touch no file. After every key the cursor must sit
   on a char boundary of the buffer, and a key that closes the window ends the
-  run.
+  run. With vim off, both ends of the selection must sit on char boundaries
+  too, and the mode must be one a vim-off editor can be in: Insert, the link
+  prompt, a prompt, or Normal in reader mode only. The vim-off seeds are the
+  `vim_off_*` files in `corpus/editor_keys/`.
 
   Four long-line inputs live in `fuzz/regressions/editor_keys/`.
   `long_line_per_key_cost` is the original reduction and

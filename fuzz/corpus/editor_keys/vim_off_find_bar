@@ -1,0 +1,10 @@
+# Notes
+
+héllo wörld, some **bold** text
+- a
+- b
+
+| a | b |
+|---|---|
+| 1 | 2 |
+<C-f>wör<CR><CR><S-CR>zz<BS><BS><Esc><C-f>b<Esc>

@@ -25,6 +25,7 @@ use crate::search;
 use crate::substitute::{self, Answer};
 use crate::tokens::Theme;
 use crate::view_model::ViewSource;
+use crate::vim::Mode;
 
 #[cfg(test)]
 mod replay;
@@ -525,66 +526,93 @@ fn fuzz_path() -> PathBuf {
 const KEY_STEP_NS: u64 = 16_000_000;
 
 /// A whole `Editor` driven by keys. The input is `text SEP keys`, where
-/// `SEP` is the first `0x00` (the Mac) or `0x01` (Linux) and sets the
-/// platform; with neither, all of it is keys, on an empty text, on the
-/// Mac. Both parts are decoded lossily. A leading `R` in the keys opens the
-/// document in reader mode and is not pressed. The keys are the tests'
-/// `<Esc>` notation (`keyseq::parse_keys`), each a frame after the last.
+/// `SEP` is the first byte of `0x00..=0x03` and sets the platform and vim
+/// mode: `0x00` the Mac and `0x01` Linux with vim on, `0x02` the Mac and
+/// `0x03` Linux with vim off. With none, all of it is keys, on an empty
+/// text, on the Mac, with vim on. Both parts are decoded lossily. A leading
+/// `R` in the keys opens the document in reader mode and is not pressed.
+/// The keys are the tests' `<Esc>` notation (`keyseq::parse_keys`), each a
+/// frame after the last.
 ///
 /// The editor has no `Saver` (so `:w`, `:e!` and closing reach no file)
 /// and no state directory (no registers file, lock or recovery copy).
 /// After every key the cursor must sit on a char boundary of the buffer.
-/// A key that closes the window ends the run.
+/// With vim off, so must both ends of the selection, and the mode must be
+/// one a vim-off editor can be in (`vim_off_mode_ok`). A key that closes
+/// the window ends the run.
 pub fn editor_keys(data: &[u8]) {
     drive(fuzz_path(), data);
 }
 
-/// `editor_keys`'s input split into its parts: the text, the keys, the
-/// platform and whether the document opens in reader mode.
-fn split_input(data: &[u8]) -> (Cow<'_, str>, Cow<'_, str>, Platform, bool) {
-    let (text, keys, platform) = match data.iter().position(|&b| b == 0 || b == 1) {
-        Some(i) => {
-            let platform = if data[i] == 0 {
-                Platform::Mac
-            } else {
-                Platform::Linux
-            };
-            (&data[..i], &data[i + 1..], platform)
-        }
-        None => (&[][..], data, Platform::Mac),
+/// `editor_keys`'s input split into its parts.
+#[derive(Debug, PartialEq)]
+struct KeysInput<'a> {
+    text: Cow<'a, str>,
+    keys: Cow<'a, str>,
+    platform: Platform,
+    /// Vim mode on (`Config::vim`).
+    vim: bool,
+    /// The document opens in reader mode.
+    view: bool,
+}
+
+fn split_input(data: &[u8]) -> KeysInput<'_> {
+    let (text, keys, sep) = match data.iter().position(|&b| b <= 3) {
+        Some(i) => (&data[..i], &data[i + 1..], data[i]),
+        None => (&[][..], data, 0),
     };
     let (view, keys) = match keys.split_first() {
         Some((b'R', rest)) => (true, rest),
         _ => (false, keys),
     };
-    (
-        String::from_utf8_lossy(text),
-        String::from_utf8_lossy(keys),
-        platform,
+    KeysInput {
+        text: String::from_utf8_lossy(text),
+        keys: String::from_utf8_lossy(keys),
+        platform: if sep % 2 == 0 {
+            Platform::Mac
+        } else {
+            Platform::Linux
+        },
+        vim: sep < 2,
         view,
-    )
+    }
+}
+
+/// Whether a vim-off editor may be in `mode`. It leaves Insert on purpose
+/// for the link prompt (`Command`), a prompt (`Prompt`) and reader mode
+/// (`Normal`), so a vim engine mode, or `Normal` outside reader mode, means
+/// a key reached the vim engine with vim off.
+fn vim_off_mode_ok(mode: Mode, reader: bool) -> bool {
+    match mode {
+        Mode::Insert | Mode::Command | Mode::Prompt => true,
+        Mode::Normal => reader,
+        Mode::Visual | Mode::VisualLine | Mode::Search | Mode::Confirm => false,
+    }
 }
 
 /// `editor_keys` on a document named `path`, returning the editor as the
 /// keys left it. Only the tests name any other path than `fuzz_path()`.
 fn drive(path: PathBuf, data: &[u8]) -> Editor {
-    let (text, keys, platform, view) = split_input(data);
+    let input = split_input(data);
     let host = FuzzHost::default();
     let clock = Rc::clone(&host.now);
     let mut editor = Editor::build(
         OpenRequest {
             path,
-            view,
+            view: input.view,
             display_name: None,
         },
-        &text,
+        &input.text,
         None,
-        Config::default(),
-        platform,
+        Config {
+            vim: input.vim,
+            ..Config::default()
+        },
+        input.platform,
         Box::new(host),
         false,
     );
-    for (key, mods) in parse_keys(&keys) {
+    for (key, mods) in parse_keys(&input.keys) {
         let now = clock.get().saturating_add(KEY_STEP_NS);
         clock.set(now);
         let fx = editor.handle(Input::Key(KeyEvent {
@@ -594,6 +622,18 @@ fn drive(path: PathBuf, data: &[u8]) -> Editor {
         }));
         let c = ViewSource::cursor(&editor);
         assert_eq!(editor.buffer().clamp(c), c, "cursor off a boundary");
+        if !input.vim {
+            if let Some(sel) = ViewSource::selection(&editor) {
+                for end in [sel.anchor, sel.head] {
+                    assert_eq!(editor.buffer().clamp(end), end, "selection off a boundary");
+                }
+            }
+            let (mode, reader) = (editor.mode(), ViewSource::reader(&editor));
+            assert!(
+                vim_off_mode_ok(mode, reader),
+                "vim off in {mode:?} (reader {reader})"
+            );
+        }
         // The run budgets are the product's own document budgets
         // (`limits`), not ones the harness chose. The product refuses a put
         // or a `:s` that would pass them, but typing (and `.` replaying
@@ -688,30 +728,105 @@ mod tests {
         );
     }
 
+    /// `editor_keys`'s input as `split_input` should read it.
+    fn parts(
+        text: &'static str,
+        keys: &'static str,
+        platform: Platform,
+        vim: bool,
+        view: bool,
+    ) -> KeysInput<'static> {
+        KeysInput {
+            text: text.into(),
+            keys: keys.into(),
+            platform,
+            vim,
+            view,
+        }
+    }
+
     #[test]
     fn editor_keys_reader_mode_and_linux() {
         let data = b"- a\n- b\n\x01Rjjkk<C-d>gg";
-        let (text, keys, platform, view) = split_input(data);
         assert_eq!(
-            (&*text, &*keys, platform, view),
-            ("- a\n- b\n", "jjkk<C-d>gg", Platform::Linux, true)
+            split_input(data),
+            parts("- a\n- b\n", "jjkk<C-d>gg", Platform::Linux, true, true)
         );
         editor_keys(data);
     }
 
     #[test]
     fn editor_keys_splits_its_input() {
-        // No separator: all keys, on an empty text, on the Mac.
-        let (text, keys, platform, view) = split_input(b"ihi<Esc>");
+        // No separator: all keys, on an empty text, on the Mac, vim on.
         assert_eq!(
-            (&*text, &*keys, platform, view),
-            ("", "ihi<Esc>", Platform::Mac, false)
+            split_input(b"ihi<Esc>"),
+            parts("", "ihi<Esc>", Platform::Mac, true, false)
         );
         // The first separator wins; a later one is a key.
-        let (text, keys, platform, view) = split_input(b"a\0R\x01b");
         assert_eq!(
-            (&*text, &*keys, platform, view),
-            ("a", "\x01b", Platform::Mac, true)
+            split_input(b"a\0R\x01b"),
+            parts("a", "\x01b", Platform::Mac, true, true)
+        );
+        assert_eq!(
+            split_input(b"a\x02b\x00c"),
+            parts("a", "b\0c", Platform::Mac, false, false)
+        );
+    }
+
+    /// `0x02` and `0x03` are the Mac and Linux with vim off, and a
+    /// leading `R` still opens reader mode after them.
+    #[test]
+    fn editor_keys_separator_turns_vim_off() {
+        assert_eq!(
+            split_input(b"a\x02Rx"),
+            parts("a", "x", Platform::Mac, false, true)
+        );
+        assert_eq!(
+            split_input(b"a\x03x"),
+            parts("a", "x", Platform::Linux, false, false)
+        );
+    }
+
+    /// The vim-off separator builds a vim-off editor: `ihi<Esc>` types
+    /// all three letters, where vim takes the `i` as a command.
+    #[test]
+    fn editor_keys_vim_off_types_its_keys() {
+        assert_eq!(drive(fuzz_path(), b"\x02ihi<Esc>").text(), "ihi");
+        assert_eq!(drive(fuzz_path(), b"\x00ihi<Esc>").text(), "hi");
+    }
+
+    /// The modes a vim-off editor may be in: Insert, the link prompt
+    /// (`Command`) and a prompt anywhere, and `Normal` only in reader mode.
+    /// The vim engine's own modes never.
+    #[test]
+    fn vim_off_modes() {
+        use crate::vim::Mode;
+        for reader in [false, true] {
+            for m in [Mode::Insert, Mode::Command, Mode::Prompt] {
+                assert!(vim_off_mode_ok(m, reader), "{m:?} reader {reader}");
+            }
+            for m in [Mode::Visual, Mode::VisualLine, Mode::Search, Mode::Confirm] {
+                assert!(!vim_off_mode_ok(m, reader), "{m:?} reader {reader}");
+            }
+        }
+        assert!(vim_off_mode_ok(Mode::Normal, true));
+        assert!(!vim_off_mode_ok(Mode::Normal, false));
+    }
+
+    /// A vim-off run through a selection, the wrap toggles, the link
+    /// prompt, the find bar and reader mode, on both platforms, keeps the
+    /// per-key checks.
+    #[test]
+    fn editor_keys_vim_off_keeps_its_checks() {
+        editor_keys(
+            "héllo wörld\n- a\n\x02<S-Right><S-Right><M-S-Right><D-b><D-i>\
+             <D-k>x<CR><D-f>l<CR><S-CR><Esc><D-S-r>jk<D-S-r><D-z><D-S-z>"
+                .as_bytes(),
+        );
+        editor_keys(
+            "héllo wörld\n- a\n\x03<C-S-Right><C-b><C-End><S-Up><C-k>x<Esc>\
+             <C-Home><BS><Del>"
+                .as_bytes(),
         );
     }
 
