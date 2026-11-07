@@ -6,6 +6,18 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-07
+
+### Changed
+
+- Pasting with Cmd+V (Ctrl+V on Linux) is checked against the same limits as a put: a paste of more than 64 MiB or 262,144 lines, or one that would take the document past 4,194,304 lines or 256 MiB, changes nothing and says `E1240: Resulting text too long`. A paste over a selection counts only what it adds beyond the selection.
+
+### Fixed
+
+- Typing at the start of a row in a big table, before its leading `|`, no longer takes time in proportion to the table's size: about 1 µs a key in a 100,000-row table (was about 10 ms). Only the first key, which takes the row out of the table, still costs that much.
+- `:s///n` counts its matches one at a time, so counting on a very long line no longer takes memory in proportion to the number of matches.
+- Undo, redo, `.` and commands that change several places at once (`:s` over many lines, list and table keys) no longer rescan the whole document: in a 200,000-line document, undo and redo take about 0.1 ms a key (were about 3 ms), and `.` repeating a list continuation about 0.2 ms (was about 6 ms).
+
 ## [0.9.1] - 2026-11-06
 
 ### Added
@@ -38,6 +50,7 @@ All notable changes to vimmed are documented here. The format follows
 - Safe file handling: atomic saves, recovery copies, and detection of changes made on disk by other tools.
 - `~/.config/vimmed/config.toml` for vim mode, autosave, fonts, column width and theme, with a light and dark theme that follows the system.
 
-[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/bawdo/vimmed/releases/tag/v0.9.2
 [0.9.1]: https://github.com/bawdo/vimmed/releases/tag/v0.9.1
 [0.9.0]: https://github.com/bawdo/vimmed/releases/tag/v0.9.0

@@ -19,6 +19,12 @@ use std::collections::VecDeque;
 use crate::buffer::{Buffer, Edit, Pos};
 use crate::limits::MAX_UNDO_BYTES;
 use crate::vim;
+use crate::vim::operator::Touched;
+
+/// Called after each edit an undo or redo step applies, with the buffer it
+/// left and the lines it touched, so the caller can follow it (the editor's
+/// blocks).
+pub type OnEdit<'f> = dyn FnMut(&Buffer, &Touched) + 'f;
 
 /// The most undo steps kept. Past it, the oldest group is dropped.
 pub const MAX_UNDO_GROUPS: usize = 1_000;
@@ -127,7 +133,14 @@ pub struct Landing {
 ///
 /// A group whose cursor was pinned (`History::pin_cursor`) goes to that
 /// cursor instead, wherever the edits were.
-fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group) -> Landing {
+///
+/// `on_edit` is called after each edit, as `OnEdit` says.
+fn apply<'a>(
+    buf: &mut Buffer,
+    edits: impl Iterator<Item = &'a Edit>,
+    g: &Group,
+    on_edit: &mut OnEdit,
+) -> Landing {
     let mut top = usize::MAX;
     let mut end = Pos::default();
     // How many lines the edit that set `top` leaves in its place.
@@ -147,7 +160,9 @@ fn apply<'a>(buf: &mut Buffer, edits: impl Iterator<Item = &'a Edit>, g: &Group)
                 (true, false) => 0,
             };
         }
+        let before = buf.line_count();
         let inverse = buf.replace(e.range.clone(), &e.text);
+        on_edit(buf, &Touched::of(e.range.end.line, before, &inverse, buf));
         end = inverse.range.end;
     }
     let saved = g.first_cursor;
@@ -304,14 +319,16 @@ impl History {
     /// Undoes the latest group in `buf` and returns where the cursor goes
     /// (see `apply`), or `None` when there is nothing to undo.
     pub fn undo(&mut self, buf: &mut Buffer) -> Option<Pos> {
-        let l = self.undo_step(buf)?;
+        let l = self.undo_step(buf, &mut |_, _| {})?;
         Some(vim::rest(buf, l.at))
     }
 
-    /// `undo`, handing back the `Landing` unrested.
-    pub fn undo_step(&mut self, buf: &mut Buffer) -> Option<Landing> {
+    /// `undo`, handing back the `Landing` unrested and calling `on_edit`
+    /// after each edit it applies.
+    pub fn undo_step(&mut self, buf: &mut Buffer, on_edit: &mut OnEdit) -> Option<Landing> {
         let g = self.undo.pop_back()?;
-        let l = apply(buf, g.edits.iter().rev().map(|(inverse, _)| inverse), &g);
+        let inverses = g.edits.iter().rev().map(|(inverse, _)| inverse);
+        let l = apply(buf, inverses, &g, on_edit);
         self.redo.push(g);
         Some(l)
     }
@@ -320,14 +337,16 @@ impl History {
     /// cursor goes, by the same rule as `undo`, or `None` when there is
     /// nothing to redo.
     pub fn redo(&mut self, buf: &mut Buffer) -> Option<Pos> {
-        let l = self.redo_step(buf)?;
+        let l = self.redo_step(buf, &mut |_, _| {})?;
         Some(vim::rest(buf, l.at))
     }
 
-    /// `redo`, handing back the `Landing` unrested.
-    pub fn redo_step(&mut self, buf: &mut Buffer) -> Option<Landing> {
+    /// `redo`, handing back the `Landing` unrested and calling `on_edit`
+    /// after each edit it applies.
+    pub fn redo_step(&mut self, buf: &mut Buffer, on_edit: &mut OnEdit) -> Option<Landing> {
         let g = self.redo.pop()?;
-        let l = apply(buf, g.edits.iter().map(|(_, forward)| forward), &g);
+        let forwards = g.edits.iter().map(|(_, forward)| forward);
+        let l = apply(buf, forwards, &g, on_edit);
         self.undo.push_back(g);
         Some(l)
     }

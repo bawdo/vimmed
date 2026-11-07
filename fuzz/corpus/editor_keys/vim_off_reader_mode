@@ -1,0 +1,10 @@
+# Notes
+
+héllo wörld, some **bold** text
+- a
+- b
+
+| a | b |
+|---|---|
+| 1 | 2 |
+R<C-d>jjk<C-u>gg<C-S-r><S-Right>typed<C-S-r><C-S-r>G

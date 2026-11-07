@@ -88,9 +88,12 @@ fn expand(replacement: &str, matched: &str) -> String {
 /// first match, so the two ways of running `:s` place matches alike.
 pub fn run(buf: &Buffer, sub: &Sub, lines: RangeInclusive<usize>) -> SubResult {
     if sub.flags.n {
+        // Counted one match at a time, so a line with millions of matches
+        // costs no memory.
+        let m = search::Literal::new(&sub.pattern, sub.flags.i);
         let mut out = SubResult::default();
         for l in lines {
-            let found = line_matches(buf.line(l), sub).len();
+            let found = replaced(&m, buf.line(l), sub).count();
             out.count += found;
             out.lines += usize::from(found > 0);
         }
@@ -1211,6 +1214,22 @@ mod tests {
         assert!(e.history().can_undo());
         let done = strings::substitutions(MAX_SUB_CHANGES, 1);
         assert_eq!(e.message(), Some(done.as_str()));
+    }
+
+    #[test]
+    fn n_counts_what_the_same_s_would_replace() {
+        let text = "aaa Aa\nno match\naA a\n\naaaa";
+        for f in ["", "g", "i", "gi"] {
+            for pattern in ["a", "aa", "A"] {
+                let buf = Buffer::from_text(text);
+                let all = 0..=buf.line_count() - 1;
+                let replace = run(&buf, &sub(pattern, "x", f), all.clone());
+                let n = run(&buf, &sub(pattern, "x", &format!("{f}n")), all);
+                assert!(n.edits.is_empty(), "{pattern:?} {f:?}");
+                assert_eq!(n.count, replace.count, "{pattern:?} {f:?}");
+                assert_eq!(n.lines, replace.lines, "{pattern:?} {f:?}");
+            }
+        }
     }
 
     #[test]

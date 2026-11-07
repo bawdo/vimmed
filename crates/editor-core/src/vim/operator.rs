@@ -30,9 +30,9 @@ use crate::vim::{Cursor, rest};
 /// Fuzz builds (`cfg(fuzzing)`) use a smaller limit (1 MiB) so a run cannot
 /// spend its time on huge puts.
 #[cfg(not(fuzzing))]
-const MAX_PUT_BYTES: usize = 1 << 26;
+pub(crate) const MAX_PUT_BYTES: usize = 1 << 26;
 #[cfg(fuzzing)]
-const MAX_PUT_BYTES: usize = 1 << 20;
+pub(crate) const MAX_PUT_BYTES: usize = 1 << 20;
 
 /// The most lines a single put may add. Each line costs about 175 bytes of
 /// memory on top of its text (the `String`, the Markdown line kind and the
@@ -42,9 +42,9 @@ const MAX_PUT_BYTES: usize = 1 << 20;
 /// Fuzz builds (`cfg(fuzzing)`) use a smaller limit (16,384 lines) so a run
 /// cannot spend its time on huge puts.
 #[cfg(not(fuzzing))]
-const MAX_PUT_LINES: usize = 1 << 18;
+pub(crate) const MAX_PUT_LINES: usize = 1 << 18;
 #[cfg(fuzzing)]
-const MAX_PUT_LINES: usize = 1 << 14;
+pub(crate) const MAX_PUT_LINES: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
@@ -275,6 +275,92 @@ pub struct Touched {
     pub delta: isize,
 }
 
+impl Touched {
+    /// The lines `Buffer::replace` touched replacing a range that ended on
+    /// line `end_line`: `before` is the buffer's line count before it,
+    /// `inverse` what it returned and `buf` the buffer after it.
+    pub fn of(end_line: usize, before: usize, inverse: &Edit, buf: &Buffer) -> Touched {
+        Touched {
+            start_line: inverse.range.start.line,
+            old_end_line: end_line.min(before - 1),
+            new_end_line: inverse.range.end.line,
+            delta: buf.line_count() as isize - before as isize,
+        }
+    }
+}
+
+/// Keeps a `Blocks` up to date through a run of edits (an operation, a `.`
+/// replay, the steps of an undo): each edit goes to `Blocks::update` in the
+/// buffer it left, so the work follows the edits rather than the document.
+///
+/// What an update returns is a fair measure of its work: the fence rescan
+/// runs while the fence state differs from the old one, changing the kind
+/// of every line it passes, and a table rescan repaints the whole table.
+/// Once the updates have returned more lines than the buffer holds (edits
+/// that each open or close a fence, say), following costs more than a
+/// scan, so it stops and rebuilds once, when the blocks are next asked for.
+pub struct BlockSync<'a> {
+    blocks: &'a mut Blocks,
+    /// The edits seen so far.
+    edits: usize,
+    /// The lengths of the ranges the updates returned since the blocks were
+    /// last rebuilt, summed.
+    spent: usize,
+    /// True when the blocks stopped following the edits and must be
+    /// rebuilt.
+    stale: bool,
+    /// What the first edit's update returned.
+    first: Option<Range<usize>>,
+}
+
+impl<'a> BlockSync<'a> {
+    /// Starts following edits to the buffer `blocks` describes.
+    pub fn new(blocks: &'a mut Blocks) -> BlockSync<'a> {
+        BlockSync {
+            blocks,
+            edits: 0,
+            spent: 0,
+            stale: false,
+            first: None,
+        }
+    }
+
+    /// After the edit `t`, which left `buf`.
+    pub fn edited(&mut self, buf: &Buffer, t: &Touched) {
+        self.edits += 1;
+        if self.stale {
+            return;
+        }
+        let changed = self
+            .blocks
+            .update(buf, t.start_line..t.new_end_line + 1, t.delta);
+        self.spent = self.spent.saturating_add(changed.len());
+        if self.edits == 1 {
+            self.first = Some(changed);
+        }
+        if self.spent > buf.line_count() {
+            self.stale = true;
+        }
+    }
+
+    /// The blocks, describing `buf` (rebuilt first if they stopped
+    /// following).
+    pub fn blocks(&mut self, buf: &Buffer) -> &Blocks {
+        if self.stale {
+            *self.blocks = Blocks::new(buf);
+            self.stale = false;
+            self.spent = 0;
+        }
+        self.blocks
+    }
+
+    /// The lines to repaint when there was exactly one edit: the range its
+    /// update returned. `None` after no edits or several.
+    pub fn changed(&self) -> Option<Range<usize>> {
+        self.first.clone().filter(|_| self.edits == 1)
+    }
+}
+
 /// What an edit works with. Every change to the buffer goes through
 /// `replace`, which records it in the history.
 pub struct EditCtx<'a> {
@@ -291,6 +377,8 @@ pub struct EditCtx<'a> {
     /// say once it returns (`strings`). `None` when it did not refuse.
     pub refusal: Option<&'static str>,
     touched: Vec<Touched>,
+    /// The editor's blocks, following every `replace`.
+    blocks: BlockSync<'a>,
 }
 
 impl<'a> EditCtx<'a> {
@@ -300,6 +388,7 @@ impl<'a> EditCtx<'a> {
         history: &'a mut History,
         registers: &'a mut Registers,
         host: &'a mut dyn Host,
+        blocks: &'a mut Blocks,
     ) -> EditCtx<'a> {
         EditCtx {
             buf,
@@ -310,6 +399,7 @@ impl<'a> EditCtx<'a> {
             register: None,
             refusal: None,
             touched: Vec::new(),
+            blocks: BlockSync::new(blocks),
         }
     }
 
@@ -318,18 +408,14 @@ impl<'a> EditCtx<'a> {
     /// boundaries (R12).
     pub fn replace(&mut self, r: Range<Pos>, text: &str) -> Edit {
         let before = self.buf.line_count();
-        let old_end_line = r.end.line.min(before - 1);
+        let end_line = r.end.line;
         let inverse = self.buf.replace(r, text);
-        let delta = self.buf.line_count() as isize - before as isize;
         self.history
             .record(self.cursor, inverse.clone(), undo::forward(&inverse, text));
         self.cursor = inverse.range.end;
-        self.touched.push(Touched {
-            start_line: inverse.range.start.line,
-            old_end_line,
-            new_end_line: inverse.range.end.line,
-            delta,
-        });
+        let t = Touched::of(end_line, before, &inverse, self.buf);
+        self.blocks.edited(self.buf, &t);
+        self.touched.push(t);
         inverse
     }
 
@@ -362,6 +448,20 @@ impl<'a> EditCtx<'a> {
     /// The edits made through this context, oldest first.
     pub fn touched(&self) -> &[Touched] {
         &self.touched
+    }
+
+    /// The buffer and the blocks describing it, for a command that plans
+    /// from the blocks partway through (`.` replaying a list key).
+    pub fn blocks(&mut self) -> (&Buffer, &Blocks) {
+        (&*self.buf, self.blocks.blocks(self.buf))
+    }
+
+    /// Brings the blocks up to date with every edit made through this
+    /// context and returns the lines to repaint when there was exactly one
+    /// (`BlockSync::changed`).
+    pub fn settle_blocks(&mut self) -> Option<Range<usize>> {
+        self.blocks.blocks(self.buf);
+        self.blocks.changed()
     }
 
     /// Writes the unnamed register and the system clipboard or, when the
@@ -774,7 +874,15 @@ mod tests {
         if nested {
             history.begin();
         }
-        let mut ctx = EditCtx::new(&mut buf, cursor, &mut history, &mut registers, &mut host);
+        let mut blocks = Blocks::new(&buf);
+        let mut ctx = EditCtx::new(
+            &mut buf,
+            cursor,
+            &mut history,
+            &mut registers,
+            &mut host,
+            &mut blocks,
+        );
         let at = ctx.apply_plan(plan);
         assert_eq!(ctx.cursor, at);
         let touched = ctx.touched().to_vec();
@@ -966,7 +1074,15 @@ mod tests {
         let host = FakeHost::default();
         let mut h = host.clone();
         let out = {
-            let mut ctx = EditCtx::new(&mut buf, cursor, &mut history, &mut regs, &mut h);
+            let mut blocks = Blocks::new(&buf);
+            let mut ctx = EditCtx::new(
+                &mut buf,
+                cursor,
+                &mut history,
+                &mut regs,
+                &mut h,
+                &mut blocks,
+            );
             f(&mut ctx)
         };
         Run {

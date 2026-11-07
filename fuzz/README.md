@@ -76,14 +76,26 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   applied, and the run also ends once the harness's own checking passes a
   per-run budget (`ORACLE_BUDGET`), so the timeout reflects the product, not
   the oracle.
-- `editor_keys`: `text SEP keys`, where `SEP` is the first `0x00` (Mac) or
-  `0x01` (Linux) and sets the platform. With neither, all of it is keys on an
-  empty text, on the Mac. A leading `R` in the keys opens the document in
-  reader mode and is not pressed. The keys use the tests' `<Esc>` notation
+- `editor_keys`: `text SEP keys`, where `SEP` is the first byte of
+  `0x00..=0x03` and sets the platform and vim mode:
+
+  | `SEP`  | Platform | Vim |
+  | ------ | -------- | --- |
+  | `0x00` | Mac      | on  |
+  | `0x01` | Linux    | on  |
+  | `0x02` | Mac      | off |
+  | `0x03` | Linux    | off |
+
+  With none, all of it is keys on an empty text, on the Mac, with vim on. A
+  leading `R` in the keys opens the document in reader mode and is not
+  pressed, with vim on or off. The keys use the tests' `<Esc>` notation
   (`keyseq::parse_keys`). The editor has no saver and no state directory, so
   `:w`, `:e!` and closing touch no file. After every key the cursor must sit
   on a char boundary of the buffer, and a key that closes the window ends the
-  run.
+  run. With vim off, both ends of the selection must sit on char boundaries
+  too, and the mode must be one a vim-off editor can be in: Insert, the link
+  prompt, a prompt, or Normal in reader mode only. The vim-off seeds are the
+  `vim_off_*` files in `corpus/editor_keys/`.
 
   Four long-line inputs live in `fuzz/regressions/editor_keys/`.
   `long_line_per_key_cost` is the original reduction and
@@ -96,6 +108,16 @@ are decoded lossily, so invalid UTF-8 is never a reason to bail out (except
   under ASan (about 1 s each, and over a minute before the column index). A
   plain `cargo test` replay of any of the four proves only that the run
   terminates, not that it is fast.
+
+  `long_grapheme_cluster` holds two lines that each carry one grapheme of
+  64 KiB (an `e` and 32,768 combining acute accents), and moves and types
+  next to it. The column index checkpoints only grapheme boundaries, so each
+  step across that grapheme walks all of it: a cost that grows with the
+  grapheme, about 250 µs a key at this size in a release build, and no index
+  avoids it. Run under ASan with `-timeout`, it catches that cost growing
+  faster than the grapheme; under `cargo test`, as with the others, it proves
+  only that the run terminates. It was written by hand, not found by the
+  fuzzer.
 
 ## Replay under `cargo test`
 

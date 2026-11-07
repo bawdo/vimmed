@@ -61,7 +61,7 @@ pub(crate) fn canon(buf: &Buffer, bl: &Blocks) -> Vec<String> {
 pub(crate) fn assert_fresh(buf: &Buffer, bl: &Blocks) {
     assert_eq!(
         canon(buf, bl),
-        canon(buf, &Blocks::new(buf)),
+        canon(buf, &Blocks::scan(buf)),
         "{:?}",
         buf.to_text()
     );
