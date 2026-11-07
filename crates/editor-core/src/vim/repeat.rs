@@ -14,7 +14,6 @@
 //! `A<CR>b<Esc>` on `- a`, then `j.` on `* c`, gives `* b`, not `- b`.
 
 use crate::grapheme;
-use crate::markdown::Blocks;
 use crate::search;
 use crate::vim::motion::Motion;
 use crate::vim::operator::{self, EditCtx, ListKey, OpOutcome, OpRange, Operator};
@@ -256,8 +255,7 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
             type_in(ctx, out, inserted.as_ref())
         }
         Change::InnerCode { op, inserted } => {
-            // `.` is rare enough that rescanning the blocks is fine.
-            match textobj::code_block(&Blocks::new(ctx.buf), cur.pos.line) {
+            match textobj::code_block(ctx.blocks().1, cur.pos.line) {
                 Some(block) if textobj::acts(*op, Some(&block)) => {
                     let out = textobj::operate(ctx, *op, block);
                     type_in(ctx, out, inserted.as_ref())
@@ -303,9 +301,8 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
             type_in(ctx, out, Some(text))
         }
         Change::List(key) => {
-            // Rescanned, as for `ic`: the blocks must describe the buffer.
-            let blocks = Blocks::new(ctx.buf);
-            match operator::list_plan(*key, ctx.buf, &blocks, cur.pos) {
+            let (buf, blocks) = ctx.blocks();
+            match operator::list_plan(*key, buf, blocks, cur.pos) {
                 Some(plan) => {
                     let at = ctx.apply_plan(plan);
                     let cursor = rest(ctx.buf, at);
@@ -323,8 +320,8 @@ pub fn replay(ctx: &mut EditCtx, change: &Change, search: Option<(&str, bool)>) 
 
 /// After a command: does again what was typed where it left the cursor
 /// and leaves Insert, when it entered Insert. `None` leaves the outcome as
-/// it is. Each list key rescans the blocks, so they describe the buffer as
-/// the pieces before it left it.
+/// it is. Each list key plans from the context's blocks, which have followed
+/// the pieces before it, so they describe the buffer as those left it.
 fn type_in(ctx: &mut EditCtx, out: OpOutcome, typed: Option<&Typed>) -> OpOutcome {
     let Some(typed) = typed else {
         return out;
@@ -340,13 +337,13 @@ fn type_in(ctx: &mut EditCtx, out: OpOutcome, typed: Option<&Typed>) -> OpOutcom
             Piece::Key(key) => {
                 // In a table the key moves between cells, as it did when
                 // typed (`Editor::insert_list_key`).
-                let blocks = Blocks::new(ctx.buf);
-                match operator::table_move(*key, ctx.buf, &blocks, at) {
+                let (buf, blocks) = ctx.blocks();
+                match operator::table_move(*key, buf, blocks, at) {
                     Some(mv) => {
                         operator::apply_move(ctx, mv);
                     }
                     None => {
-                        let plan = operator::list_plan(*key, ctx.buf, &blocks, at);
+                        let plan = operator::list_plan(*key, buf, blocks, at);
                         operator::insert_list_key(ctx, *key, plan);
                     }
                 }

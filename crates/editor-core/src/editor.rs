@@ -95,6 +95,8 @@
 
 mod appearance;
 mod autosave;
+#[cfg(test)]
+mod block_tests;
 mod cmdline;
 mod disk;
 mod ime;
@@ -139,7 +141,9 @@ use crate::undo::History;
 use crate::view_model::{
     CaretShape, LineShifts, MsgKind, Selection, StatusLeft, StatusModel, ViewSource,
 };
-use crate::vim::operator::{self, EditCtx, ListKey, OpOutcome, OpRange, Operator, Touched};
+use crate::vim::operator::{
+    self, BlockSync, EditCtx, ListKey, OpOutcome, OpRange, Operator, Touched,
+};
 use crate::vim::register::{Register, Registers};
 use crate::vim::repeat::Change;
 use crate::vim::{self, Cursor, Step, Vim, Want, textobj, visual};
@@ -565,7 +569,26 @@ impl Editor {
                 ..Effects::default()
             });
         }
+        #[cfg(test)]
+        self.check_blocks();
         fx
+    }
+
+    /// In tests, every input leaves the blocks describing the buffer, as a
+    /// fresh scan would: every editor test is an oracle for the edits that
+    /// keep them up to date (issue #13). Skipped past a few thousand lines,
+    /// where a scan per key would slow the big-document tests.
+    /// The block structure, for the fuzz harness's oracle.
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub(crate) fn blocks(&self) -> &Blocks {
+        &self.blocks
+    }
+
+    #[cfg(test)]
+    fn check_blocks(&self) {
+        if self.buf.line_count() <= 4_096 {
+            crate::markdown::block::oracle::assert_fresh(&self.buf, &self.blocks);
+        }
     }
 
     fn dispatch(&mut self, input: Input) -> Effects {
@@ -1563,22 +1586,25 @@ impl Editor {
             return Effects::default();
         }
         let mut landed = None;
+        // The blocks follow each edit the steps apply.
+        let mut sync = BlockSync::new(&mut self.blocks);
+        let mut on_edit = |buf: &Buffer, t: &Touched| sync.edited(buf, t);
         for _ in 0..count.max(1) {
             let step = if redo {
-                self.history.redo_step(&mut self.buf)
+                self.history.redo_step(&mut self.buf, &mut on_edit)
             } else {
-                self.history.undo_step(&mut self.buf)
+                self.history.undo_step(&mut self.buf, &mut on_edit)
             };
             match step {
                 Some(l) => landed = Some(l),
                 None => break,
             }
         }
+        sync.blocks(&self.buf);
         let Some(landed) = landed else {
             return Effects::default();
         };
-        // A step can touch many places, so rebuild and repaint it all.
-        self.blocks = Blocks::new(&self.buf);
+        // A step can touch many places, so repaint it all.
         if let Some(s) = self.search.as_mut() {
             s.refresh(&self.buf);
         }
@@ -1768,15 +1794,17 @@ impl Editor {
             &mut self.history,
             &mut self.registers,
             self.host.as_mut(),
+            &mut self.blocks,
         );
         ctx.register = self.register;
         let out = f(&mut ctx);
+        let changed = ctx.settle_blocks();
         let touched = ctx.touched().to_vec();
         let refusal = ctx.refusal;
         if out.insert {
             self.mode = Mode::Insert;
         }
-        let fx = self.finish(old, &touched, out.cursor);
+        let fx = self.finish(old, &touched, changed, out.cursor);
         self.history.end();
         if let Some(text) = refusal {
             self.say(text.to_owned());
@@ -1784,17 +1812,23 @@ impl Editor {
         fx
     }
 
-    /// After the edits in `touched`: updates the blocks, puts the cursor at
-    /// `cursor` and redraws the changed lines, the reveal extent the cursor
-    /// had (`old`, in the buffer before) and the one it has now.
-    fn finish(&mut self, old: Range<usize>, touched: &[Touched], cursor: Pos) -> Effects {
+    /// After the edits in `touched`, which the blocks have followed: puts
+    /// the cursor at `cursor` and redraws the changed lines (`changed`, the
+    /// lines the blocks say to repaint after a single edit), the reveal
+    /// extent the cursor had (`old`, in the buffer before) and the one it
+    /// has now.
+    fn finish(
+        &mut self,
+        old: Range<usize>,
+        touched: &[Touched],
+        changed: Option<Range<usize>>,
+        cursor: Pos,
+    ) -> Effects {
         let n = self.buf.line_count();
         let redraw = match touched {
             [] => Redraw::Lines(old),
             [t] => {
-                let changed =
-                    self.blocks
-                        .update(&self.buf, t.start_line..t.new_end_line + 1, t.delta);
+                let changed = changed.unwrap_or(0..n);
                 // The old extent, in the new buffer: lines after the
                 // replaced range moved by `delta`.
                 let shift = |i: usize| {
@@ -1807,11 +1841,8 @@ impl Editor {
                 let old = shift(old.start).min(n)..(shift(old.end - 1) + 1).min(n);
                 Redraw::Lines(changed).merge(Redraw::Lines(old))
             }
-            // Several edits (`:s` over many lines): rebuild it all.
-            _ => {
-                self.blocks = Blocks::new(&self.buf);
-                Redraw::All
-            }
+            // Several edits (`:s` over many lines): repaint it all.
+            _ => Redraw::All,
         };
         // The highlights follow the edit, on the lines it touched.
         if let Some(s) = self.search.as_mut() {

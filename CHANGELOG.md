@@ -14,6 +14,7 @@ All notable changes to vimmed are documented here. The format follows
 
 - Typing at the start of a row in a big table, before its leading `|`, no longer takes time in proportion to the table's size: about 1 µs a key in a 100,000-row table (was about 10 ms). Only the first key, which takes the row out of the table, still costs that much.
 - `:s///n` counts its matches one at a time, so counting on a very long line no longer takes memory in proportion to the number of matches.
+- Undo, redo, `.` and commands that change several places at once (`:s` over many lines, list and table keys) no longer rescan the whole document: in a 200,000-line document, undo and redo take about 0.1 ms a key (were about 3 ms), and `.` repeating a list continuation about 0.2 ms (was about 6 ms).
 
 ## [0.9.1] - 2026-11-06
 

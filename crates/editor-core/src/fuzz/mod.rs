@@ -538,8 +538,11 @@ const KEY_STEP_NS: u64 = 16_000_000;
 /// and no state directory (no registers file, lock or recovery copy).
 /// After every key the cursor must sit on a char boundary of the buffer.
 /// With vim off, so must both ends of the selection, and the mode must be
-/// one a vim-off editor can be in (`vim_off_mode_ok`). A key that closes
-/// the window ends the run.
+/// one a vim-off editor can be in (`vim_off_mode_ok`). While
+/// `ORACLE_BUDGET` lasts, the editor's blocks must also agree with a fresh
+/// scan (`assert_fresh`), so undo, redo, `.` and commands that make several
+/// edits are checked as they follow the blocks. A key that closes the
+/// window ends the run.
 pub fn editor_keys(data: &[u8]) {
     drive(fuzz_path(), data);
 }
@@ -612,6 +615,7 @@ fn drive(path: PathBuf, data: &[u8]) -> Editor {
         Box::new(host),
         false,
     );
+    let mut spent = 0usize;
     for (key, mods) in parse_keys(&input.keys) {
         let now = clock.get().saturating_add(KEY_STEP_NS);
         clock.set(now);
@@ -622,6 +626,14 @@ fn drive(path: PathBuf, data: &[u8]) -> Editor {
         }));
         let c = ViewSource::cursor(&editor);
         assert_eq!(editor.buffer().clamp(c), c, "cursor off a boundary");
+        // Two whole-buffer passes: the fresh scan and the comparison. Past
+        // the budget the keys still run, unchecked, so the product's own
+        // per-key cost stays exercised.
+        let pass = editor.buffer().line_count().saturating_mul(2 * LINE_STEPS);
+        if spent.saturating_add(pass) <= ORACLE_BUDGET {
+            spent += pass;
+            assert_fresh(editor.buffer(), editor.blocks());
+        }
         if !input.vim {
             if let Some(sel) = ViewSource::selection(&editor) {
                 for end in [sel.anchor, sel.head] {

@@ -28,10 +28,21 @@ impl Host for StubHost {
     }
 }
 
+/// One key: `\n` is Enter, `\x1b` Escape and `\x12` Ctrl+R; any other
+/// char types itself.
 fn key(c: char) -> Input {
+    let (key, ctrl) = match c {
+        '\n' => (Key::Enter, false),
+        '\x1b' => (Key::Esc, false),
+        '\x12' => (Key::Char('r'), true),
+        c => (Key::Char(c), false),
+    };
     Input::Key(KeyEvent {
-        key: Key::Char(c),
-        mods: Mods::default(),
+        key,
+        mods: Mods {
+            ctrl,
+            ..Mods::default()
+        },
         time_ns: 0,
     })
 }
@@ -112,4 +123,23 @@ fn per_key_cost() {
         "50000Gix",
         &repeat('x', 50),
     );
+
+    // Issue #13: undo, redo, `.` and several edits in one command.
+    let prose = "line\n".repeat(200_000);
+    let undo_redo: Vec<char> = (0..300)
+        .map(|i| if i % 2 == 0 { 'u' } else { '\x12' })
+        .collect();
+    scenario("u C-r in 200k lines", &prose, "100000Gdd", &undo_redo);
+    let list = format!("- a\n{prose}");
+    scenario(
+        ". list Enter in 200k lines",
+        &list,
+        "A\nb\x1b",
+        &repeat('.', 100),
+    );
+    let subs: Vec<char> = ":1,2s/line/row/\n:1,2s/row/line/\n"
+        .repeat(10)
+        .chars()
+        .collect();
+    scenario(":s over 2 of 200k lines", &prose, "", &subs);
 }

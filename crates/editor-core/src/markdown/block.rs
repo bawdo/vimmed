@@ -19,6 +19,23 @@ thread_local! {
     static FAST_PATHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+// How many times `Blocks::new` has scanned a whole buffer on this thread, so
+// a test can tell an edit that followed the blocks from one that rebuilt
+// them.
+#[cfg(test)]
+thread_local! {
+    static FULL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs `f` and returns how many times `Blocks::new` scanned a whole buffer
+/// meanwhile, on this thread.
+#[cfg(test)]
+pub(crate) fn full_scans(f: impl FnOnce()) -> usize {
+    let before = FULL_SCANS.with(|n| n.get());
+    f();
+    FULL_SCANS.with(|n| n.get()) - before
+}
+
 /// Counts one return from a fast path in `Blocks::update`.
 fn took_fast_path() {
     #[cfg(test)]
@@ -171,6 +188,14 @@ impl Rescan {
 
 impl Blocks {
     pub fn new(buf: &Buffer) -> Blocks {
+        #[cfg(test)]
+        FULL_SCANS.with(|n| n.set(n.get() + 1));
+        Blocks::scan(buf)
+    }
+
+    /// `new` without counting the scan (`full_scans`): for the oracle,
+    /// whose own scans are not the product's.
+    fn scan(buf: &Buffer) -> Blocks {
         let n = buf.line_count();
         let mut blocks = Blocks {
             kinds: vec![LineKind::Blank; n],
