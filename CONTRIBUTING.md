@@ -17,14 +17,21 @@ through [SECURITY.md](SECURITY.md), not the issue tracker.
 ## Making a change
 
 1. Fork and branch from `main`.
-2. Run `cargo xtask ci` before pushing. It mirrors the GitHub Actions checks.
+2. Add tests with your change. New functionality needs tests in the
+   automated suite that show it working, and a bug fix needs a test that
+   fails without the fix. Put unit tests beside the code and integration
+   tests in the crate's `tests/` directory. If a fuzz target finds the bug,
+   save the input under `fuzz/regressions/<target>/` (see
+   `fuzz/README.md`). A pull request that adds behaviour without tests will
+   be asked for them before it is merged.
+3. Run `cargo xtask ci` before pushing. It mirrors the GitHub Actions checks.
    If your change could behave differently on Linux, also run
    `cargo xtask linux-check`, which needs Docker.
    Parsers and editor input handling also have fuzz targets: see
    `fuzz/README.md`.
-3. Add a line under `[Unreleased]` in `CHANGELOG.md` for anything a user
+4. Add a line under `[Unreleased]` in `CHANGELOG.md` for anything a user
    would notice. Follow the existing Keep a Changelog headings.
-4. Open a pull request. The `CI result` check must pass before it can be
+5. Open a pull request. The `CI result` check must pass before it can be
    merged, and it lands as a merge commit so signed commits keep their
    signatures. There is no reviewer requirement, but expect questions.
 
