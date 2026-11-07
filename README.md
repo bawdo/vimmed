@@ -101,46 +101,6 @@ cd target/pkg/arch && makepkg -si
 The PKGBUILD fetches the locked dependencies, builds with `cargo build --frozen --release` and
 installs the layout above.
 
-## Icons
-
-The app icons and the logo above are made from two source images by `scripts/make-icons.sh`:
-the logo with black text (for light backgrounds) and the logo with white text (for dark ones).
-
-```sh
-scripts/make-icons.sh LIGHT_SRC.png DARK_SRC.png
-```
-
-It writes `docs/assets/logo-light.png` and `docs/assets/logo-dark.png` (this README picks one by
-the viewer's theme), `packaging/icons/AppIcon.icns` (copied into the `.app` by `bundle-mac`) and
-`packaging/icons/hicolor/<size>/apps/app-icon.png` (installed by the Linux packages). Both app
-icons use the white-text image: a `.icns` holds one image for every appearance, and the
-freedesktop icon theme has no light and dark variants either. It needs ImageMagick 7 and, for
-the `.icns`, macOS `iconutil`. Run it outside any sandbox, because `iconutil` writes temporary
-files under `/var/folders`.
-
-## Renaming
-
-To rename the project, change the one line:
-
-```toml
-[workspace.metadata.app]
-name = "new_name"
-```
-
-The slug must match `^[a-z][a-z0-9_]*$`. Then prove nothing still carries the old name:
-
-```sh
-cargo xtask rename-test             # binaries, plus the .app on macOS
-cargo xtask rename-test --linux     # also the .deb, the .rpm and the PKGBUILD (needs Docker)
-```
-
-`rename-test` copies the tree to a scratch directory, renames it there to a throwaway name
-(`--name SLUG` picks one), builds it, bundles and packages it, and searches every byte of the
-results, including the unpacked contents of the `.deb` and the `.rpm`, for every form of the
-current name. It passes with `0 hits` and the launcher's `--version` showing the throwaway
-name. Nothing in the working tree changes, and no other file (this README included) needs an
-edit when the name does.
-
 ## Contributing
 
 To send a change, read [CONTRIBUTING.md](CONTRIBUTING.md). The hand checks to run before a release are in [docs/manual-checks.md](docs/manual-checks.md).
