@@ -11,7 +11,7 @@
 [![CI][ci-badge]][ci]
 [![Latest release][release-badge]][release]
 [![OpenSSF Scorecard][scorecard-badge]][scorecard]
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16370/badge)]
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16370/badge)](https://www.bestpractices.dev/projects/16370)
 [![Coverage][coverage-badge]][coverage]
 [![REUSE status][reuse-badge]][reuse]
 [![Licence: MIT][licence-badge]](LICENSE)
