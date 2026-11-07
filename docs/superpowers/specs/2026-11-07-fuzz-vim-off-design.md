@@ -100,7 +100,8 @@ input.
 - A test that a vim-off run actually takes the vim-off path: the same keys
   give a different document with vim on and with vim off (`ihi<Esc>` types
   `ihi` with vim off).
-- A CHANGELOG line.
+- No CHANGELOG line: it records what users see, and has never listed
+  fuzzing work.
 
 ## Non-goals
 

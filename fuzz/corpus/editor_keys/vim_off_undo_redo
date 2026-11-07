@@ -1,0 +1,10 @@
+# Notes
+
+héllo wörld, some **bold** text
+- a
+- b
+
+| a | b |
+|---|---|
+| 1 | 2 |
+<D-Down>new words<BS><BS><CR>more<D-z><D-z><D-S-z><D-a><D-x><D-v><D-c><D-v><D-z>
