@@ -6,6 +6,11 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `:view` (or `:reader`) turns reader view on, and off again. In reader view the command line now opens, but runs only these two commands; anything else says `reader view: only :view (or :reader) runs here`. Unlike vim's `:view`, it takes no file name.
+- A page icon at the right end of the status bar toggles reader view when clicked, with a tooltip naming the Cmd+Shift+R (Ctrl+Shift+R on Linux) shortcut. It shows in the new `color.status.reader` token (the accent blue by default) while reader view is on.
+
 ## [0.9.2] - 2026-11-07
 
 ### Changed

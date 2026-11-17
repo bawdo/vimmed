@@ -411,8 +411,10 @@ fn a_long_prompt_keeps_its_start_and_end_on_one_row() {
     let t = Tokens::defaults(Theme::Light);
     let (mut v, probe) = probed(&t);
     let mut src = Fake::new(&["alpha"], t.clone());
+    // The file name is short enough that, with the page icon at the
+    // bar's right end, the room left still keeps it whole.
     let deep = "deep/".repeat(60);
-    let question = format!("open /Users/someone/{deep}report.pdf? [o]pen [c]ancel");
+    let question = format!("open /Users/someone/{deep}notes.pdf? [o]pen [c]ancel");
     src.left = StatusLeft::Prompt(question.clone());
     src.showcmd = "2d".into();
     v.paint_all(&src);
@@ -424,7 +426,7 @@ fn a_long_prompt_keeps_its_start_and_end_on_one_row() {
     // The scheme or path head, and the file name with the answers.
     assert!(shown.text.starts_with("open /Users/some"), "{}", shown.text);
     assert!(
-        shown.text.ends_with("report.pdf? [o]pen [c]ancel"),
+        shown.text.ends_with("notes.pdf? [o]pen [c]ancel"),
         "{}",
         shown.text
     );
@@ -439,7 +441,7 @@ fn a_long_prompt_keeps_its_start_and_end_on_one_row() {
     assert_no_overlap(&v);
     let items = v.status_items();
     assert!(
-        items[0].0.ends_with("report.pdf? [o]pen [c]ancel"),
+        items[0].0.ends_with("notes.pdf? [o]pen [c]ancel"),
         "{items:?}"
     );
     // A short prompt shows whole.
@@ -452,4 +454,46 @@ fn a_long_prompt_keeps_its_start_and_end_on_one_row() {
     assert!(shown.contains(&"notes.md"), "{shown:?}");
     assert!(shown.contains(&"read-only"), "{shown:?}");
     assert_no_overlap(&v);
+}
+
+/// The pixels of colour `c` in the status bar's right half.
+fn count_right(v: &DocView, t: &Tokens, c: Rgba) -> usize {
+    let g = Geom::new(t, 1.0);
+    let want = opaque(c);
+    (g.text_bottom()..g.height_px)
+        .flat_map(|y| (W_PT as u32 / 2..W_PT as u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| rgba(v, x, y) == want)
+        .count()
+}
+
+#[test]
+fn the_page_icon_shows_at_the_right_end_in_the_reader_colour_when_on() {
+    let t = tokens(&[
+        ("color.status.text", "#00FF00"),
+        ("color.status.reader", "#FF00FF"),
+    ]);
+    let (mut v, _probe) = probed(&t);
+    let mut src = Fake::new(&["alpha"], t.clone());
+    src.showcmd = "2d".into();
+    v.paint_all(&src);
+    let off = count_right(&v, &t, t.color(TokenId::ColorStatusText));
+    assert!(off > 10, "the icon in the status text colour: {off}");
+    assert_eq!(count_right(&v, &t, t.color(TokenId::ColorStatusReader)), 0);
+
+    // Right of every other item, inside the bar's padding.
+    let r = v.reader_icon_rect().expect("a page icon");
+    let pad = t.px(TokenId::SpaceStatusPad);
+    let items = v.status_items();
+    let last = items.iter().map(|(_, r)| r.end).fold(0.0, f32::max);
+    assert!(r.x >= last, "icon at {r:?}, items to {last}");
+    assert!(r.x + r.w <= W_PT - pad / 2.0 + 0.5, "{r:?}");
+    assert_eq!(r.y, H_PT - t.px(TokenId::SizeStatusHeight));
+    assert_no_overlap(&v);
+
+    // Reader view on: the same icon, in the reader colour.
+    src.reader = true;
+    v.paint_lines(&src, 0..0);
+    let on = count_right(&v, &t, t.color(TokenId::ColorStatusReader));
+    assert_eq!(on, off, "the same shape");
+    assert_eq!(count_right(&v, &t, t.color(TokenId::ColorStatusText)), 0);
 }

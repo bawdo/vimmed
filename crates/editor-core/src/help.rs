@@ -72,6 +72,7 @@ const SECTIONS: &[HelpSection] = &[
             (":cq", "Quit without saving, reporting failure"),
             (":e!", "Reload from disk, dropping changes"),
             (":help", "Show this help"),
+            (":view / :reader", "Reader view on / off"),
             (":table N M", "Insert NxM table"),
             (":table", "Open table grid picker"),
         ],
@@ -225,6 +226,7 @@ mod tests {
             assert!(keys.contains(&want), "{want} missing from {keys:?}");
         }
         assert!(keys.iter().any(|k| k.contains("Shift+R")), "reader toggle");
+        assert!(keys.contains(&":view / :reader"), "reader command");
         assert!(keys.iter().any(|k| k.ends_with("+L")), "link prompt");
     }
 

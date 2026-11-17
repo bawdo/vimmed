@@ -16,6 +16,7 @@ use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowArgs, WindowRequest};
 use editor_core::input::{Input, MouseEvent, MouseKind, SignalKind};
 use editor_core::platform::Platform;
+use editor_core::strings;
 use editor_core::tokens::{Theme, TokenId, Tokens};
 use editor_core::view_model::ViewSource;
 use editor_render::damage::Damage;
@@ -31,7 +32,8 @@ use objc2::{MainThreadMarker, MainThreadOnly, Message, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType,
-    NSMenu, NSMenuItem, NSScreen, NSTextInputContext, NSView, NSWindow, NSWindowStyleMask,
+    NSMenu, NSMenuItem, NSScreen, NSTextInputContext, NSToolTipTag, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGColor;
@@ -73,6 +75,15 @@ struct State {
     progress: Progress,
     /// The editor took text (`Editor::ime_active`) after the last input.
     ime_active: bool,
+    tooltip: Tooltip,
+}
+
+/// The status bar page icon's tooltip. AppKit keeps no reference to a
+/// tooltip's owner, so the string is kept here, with the rect (points) and
+/// tag it is registered under.
+struct Tooltip {
+    text: Retained<NSString>,
+    at: Option<(RectPt, NSToolTipTag)>,
 }
 
 /// What `run` prepares before the toolkit starts.
@@ -324,7 +335,7 @@ pub fn launch(delegate: &Delegate) {
     // SAFETY: the view implements `tick:`.
     let link = Link::new(&view, &view, DocumentView::tick_sel());
 
-    let state = State {
+    let mut state = State {
         editor,
         doc,
         presenter,
@@ -342,7 +353,12 @@ pub fn launch(delegate: &Delegate) {
             ..Progress::default()
         },
         ime_active: false,
+        tooltip: Tooltip {
+            text: NSString::from_str(strings::READER_ICON_TIP_MAC),
+            at: None,
+        },
     };
+    sync_tooltip(&mut state);
     let bench = state.bench.is_some();
     STATE.with(|s| *s.borrow_mut() = Some(state));
     // SIGTERM keeps a recovery copy of unsaved text; until now it ends
@@ -459,6 +475,7 @@ fn flush_ime() {
 
 /// Copies new damage into the back surface and wakes the display link.
 fn stage(st: &mut State) -> bool {
+    sync_tooltip(st);
     let d = st.doc.take_damage();
     if d.is_empty() {
         return false;
@@ -466,6 +483,34 @@ fn stage(st: &mut State) -> bool {
     st.presenter.stage(st.doc.frame(), &d);
     st.link.resume();
     true
+}
+
+/// Keeps the page icon's tooltip rect where the icon was last painted (the
+/// view is flipped, as the frame's points are).
+fn sync_tooltip(st: &mut State) {
+    let want = st.doc.reader_icon_rect();
+    if st.tooltip.at.map(|(r, _)| r) == want {
+        return;
+    }
+    if let Some((_, tag)) = st.tooltip.at.take() {
+        st.view.removeToolTip(tag);
+    }
+    if let Some(r) = want {
+        let rect = NSRect::new(
+            NSPoint::new(f64::from(r.x), f64::from(r.y)),
+            NSSize::new(f64::from(r.w), f64::from(r.h)),
+        );
+        let owner: &AnyObject = &st.tooltip.text;
+        // SAFETY: an owner that does not answer
+        // `view:stringForToolTip:point:userData:` shows its description,
+        // which for a string is the string; `st.tooltip` keeps it alive
+        // while the rect is registered. The user data is unused.
+        let tag = unsafe {
+            st.view
+                .addToolTipRect_owner_userData(rect, owner, std::ptr::null_mut())
+        };
+        st.tooltip.at = Some((r, tag));
+    }
 }
 
 /// True when this key-down goes through the input method.

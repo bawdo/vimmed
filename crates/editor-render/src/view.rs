@@ -339,6 +339,9 @@ pub struct DocView {
     /// Each status bar item as last painted: its text and where it runs
     /// across, in frame pixels (`status_items`).
     pub(crate) status_items: Vec<(String, Range<f32>)>,
+    /// Where a click on the status bar's page icon toggles reader view, in
+    /// frame pixels, as last painted (`None` when the bar had no room).
+    pub(crate) reader_icon: Option<RectF>,
     pub(crate) damage: Damage,
     /// The caret's line and its rectangle in frame pixels, as last painted.
     caret: Option<(usize, RectF)>,
@@ -397,6 +400,7 @@ impl DocView {
             status_cache: Vec::new(),
             last_status: None,
             status_items: Vec::new(),
+            reader_icon: None,
             damage: Damage::new(),
             caret: None,
             cursor_drawn: None,
@@ -569,6 +573,9 @@ impl DocView {
     /// What is under the point `x_pt, y_pt`, as the mouse sees it (`None`
     /// outside the text area or over a line not painted yet), from what
     /// was last painted:
+    /// - over the status bar's page icon (the bar's height across it and
+    ///   half the bar's padding either side), `Zone::ReaderToggle`, with
+    ///   positions that mean nothing;
     /// - over a cell of the table picker, `Zone::Picker` (the picker sits
     ///   over the text);
     /// - over an image line's picture, `Zone::Image`, at the line's start;
@@ -581,6 +588,16 @@ impl DocView {
     pub fn hit_test(&self, x_pt: f32, y_pt: f32) -> Option<MouseHit> {
         let s = self.frame.scale;
         let (x, y) = (x_pt * s, y_pt * s);
+        if let Some(r) = self.reader_icon
+            && (r.x..r.x + r.w).contains(&x)
+            && (r.y..r.y + r.h).contains(&y)
+        {
+            return Some(MouseHit {
+                pos: Pos::default(),
+                under: Pos::default(),
+                zone: Zone::ReaderToggle,
+            });
+        }
         let g = self.geo();
         if !(0.0..g.text_bottom).contains(&y) || self.lines.is_empty() {
             return None;
@@ -730,6 +747,19 @@ impl DocView {
         let moved = to != self.scroll;
         self.scroll = to;
         moved
+    }
+
+    /// Where a click on the status bar's page icon toggles reader view, in
+    /// points, as last painted (for the shells' tooltip).
+    pub fn reader_icon_rect(&self) -> Option<RectPt> {
+        let r = self.reader_icon?;
+        let s = self.frame.scale;
+        Some(RectPt {
+            x: r.x / s,
+            y: r.y / s,
+            w: r.w / s,
+            h: r.h / s,
+        })
     }
 
     /// The caret as last painted, in points (for IME placement).

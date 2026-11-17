@@ -7,7 +7,9 @@
 //! The commands are moon_edit's: `:w`, `:w!`, `:q`, `:q!`, `:wq`, `:x`,
 //! `:cq`, `:e!`, `:help` (or `:h`), `:table [cols rows]` and
 //! `[range]s/pattern/replacement/[flags]`, with `:qa`, `:qa!` and `:wqa`
-//! as aliases of `:q`, `:q!` and `:wq`.
+//! as aliases of `:q`, `:q!` and `:wq`, and this editor's own `:view` (or
+//! `:reader`), which toggles reader view. Unlike vim's `:view`, it takes
+//! no file name.
 
 use crate::strings;
 
@@ -28,6 +30,8 @@ pub enum ExCmd {
     ReloadForce,
     /// `:help` or `:h`.
     Help,
+    /// `:view` or `:reader`: reader view on, or off again.
+    Reader,
     /// `:table`, with the columns and rows when both are given and
     /// positive.
     Table(Option<(u32, u32)>),
@@ -87,6 +91,7 @@ pub fn parse(input: &str) -> Result<ExCmd, String> {
         "cq" => ExCmd::CQuit,
         "e!" => ExCmd::ReloadForce,
         "h" | "help" => ExCmd::Help,
+        "view" | "reader" => ExCmd::Reader,
         _ => {
             if let Some(args) = input.strip_prefix("table")
                 && (args.is_empty() || args.starts_with(char::is_whitespace))
@@ -241,6 +246,16 @@ mod tests {
     fn parses_w_as_write() {
         assert_eq!(parse("w"), Ok(ExCmd::Write { force: false }));
         assert_eq!(parse("w!"), Ok(ExCmd::Write { force: true }));
+    }
+
+    #[test]
+    fn parses_view_and_reader_as_reader() {
+        assert_eq!(parse("view"), Ok(ExCmd::Reader));
+        assert_eq!(parse("reader"), Ok(ExCmd::Reader));
+        assert_eq!(parse("  view "), Ok(ExCmd::Reader));
+        // No file name, unlike vim's `:view`.
+        assert!(parse("view notes.md").is_err());
+        assert!(parse("vie").is_err());
     }
 
     #[test]
@@ -735,12 +750,56 @@ mod tests {
     }
 
     #[test]
-    fn reader_mode_refuses_the_command_line() {
+    fn reader_mode_runs_no_command_but_view() {
         let mut e = build_reader("foo");
         colon(&mut e, "s/foo/bar/");
         assert_eq!(e.text(), "foo");
         assert_eq!(e.mode(), Mode::Normal);
+        assert_eq!(e.message(), Some(strings::READER_ONLY_VIEW));
+        assert!(e.reader());
         assert_eq!(colon(&mut e, "q").close, None);
+        // Nor does a command that is none say E492: the refusal is the
+        // same.
+        colon(&mut e, "foo");
+        assert_eq!(e.message(), Some(strings::READER_ONLY_VIEW));
+        assert!(e.reader());
+    }
+
+    #[test]
+    fn view_and_reader_toggle_reader_view() {
+        for cmd in ["view", "reader"] {
+            let mut e = ed("hello\nworld");
+            keys(&mut e, "j");
+            let fx = colon(&mut e, cmd);
+            assert!(e.reader(), ":{cmd} turns it on");
+            assert_eq!(fx.reader, Some(true));
+            assert_eq!(e.mode(), Mode::Normal);
+            let fx = colon(&mut e, cmd);
+            assert!(!e.reader(), ":{cmd} turns it off");
+            assert_eq!(fx.reader, Some(false));
+            assert_eq!(e.cursor(), Pos { line: 1, col: 0 });
+        }
+    }
+
+    #[test]
+    fn view_from_visual_in_reader_view_takes_no_range() {
+        let mut e = build_reader("hello world");
+        keys(&mut e, "vl:");
+        assert_eq!(e.mode(), Mode::Command);
+        assert!(matches!(
+            e.status().left,
+            StatusLeft::Input { ref text, .. } if text.is_empty()
+        ));
+        keys(&mut e, "view<CR>");
+        assert!(!e.reader());
+    }
+
+    #[test]
+    fn esc_on_reader_views_command_line_stays_in_reader_view() {
+        let mut e = build_reader("foo");
+        keys(&mut e, ":vi<Esc>");
+        assert!(e.reader());
+        assert_eq!(e.mode(), Mode::Normal);
     }
 
     // vim_engine_command_test.dart: substitute command execution.

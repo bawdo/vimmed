@@ -1,11 +1,14 @@
 //! Reader view and the help overlay.
 //!
-//! Reader view (`--view`, or Primary+Shift+R from Normal, Insert or
-//! Visual) hides the caret and reveals nothing. The status line stays
-//! (owner decision D21), naming reader view (`READER`) and leaving out the
-//! hidden cursor's position. It is read-only: edits, undo, `.`, paste and
-//! Primary+S do nothing, `:` and searching (`/ ? n N`) are disabled, and
-//! `ZZ` with unsaved changes refuses. `j k`, the arrows, PageUp and
+//! Reader view (`--view`, or from Normal, Insert or Visual: Primary+Shift+R,
+//! `:view` or `:reader`, or a click on the status bar's page icon) hides
+//! the caret and reveals nothing. The status line stays (owner decision
+//! D21), naming reader view (`READER`) and leaving out the hidden cursor's
+//! position; its page icon shows in `color.status.reader` while reader
+//! view is on. It is read-only: edits, undo, `.`, paste and Primary+S do
+//! nothing, the command line runs only `:view` and `:reader` (which leave
+//! it), searching (`/ ? n N`) is disabled, and `ZZ` with unsaved changes
+//! refuses. `j k`, the arrows, PageUp and
 //! PageDown, `gg`, `G`, `[N]gg` and `[N]G` scroll the view
 //! (`Effects::scroll`) and leave the cursor where it is, so toggling back
 //! finds the cursor, mode and selection as they were. Other keys still
@@ -99,6 +102,11 @@ impl Editor {
     /// it stopped.
     fn leave_reader(&mut self) -> Effects {
         self.vim.cancel();
+        // Left from its command line (Primary+Shift+R while `:` is typed):
+        // the line goes, as Esc would drop it.
+        if self.mode == Mode::Command {
+            self.cmdline.clear();
+        }
         self.reader = false;
         self.reader_g = false;
         if let Some(back) = self.reader_return.take() {
@@ -340,13 +348,17 @@ mod tests {
         assert_eq!(e.text(), "abc\ndef");
         assert!(!e.dirty());
         assert_eq!(e.mode(), Mode::Normal);
-        // `:` is disabled, so neither `:w` nor `:q` can run.
+        // The command line runs only `:view`, so neither `:w` nor `:q`
+        // can run: it says so.
         let fx = keys(&mut e, ":q<CR>");
         assert_eq!(fx.close, None);
         assert_eq!(e.mode(), Mode::Normal);
         assert_eq!(e.cmdline(), "");
-        // Primary+S does nothing in reader view.
-        keys(&mut e, "<D-s>");
+        assert_eq!(e.message(), Some(crate::strings::READER_ONLY_VIEW));
+        keys(&mut e, ":w<CR>");
+        assert!(files.calls().is_empty());
+        // Primary+S does nothing in reader view, and says nothing.
+        keys(&mut e, "<Esc><D-s>");
         assert!(files.calls().is_empty());
         assert_eq!(e.message(), None);
     }
