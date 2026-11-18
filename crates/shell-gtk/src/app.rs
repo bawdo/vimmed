@@ -404,6 +404,9 @@ fn connect(
         glib::Propagation::Stop
     });
     canvas.add_controller(scroll);
+    // The status bar's page icon has a tooltip naming its shortcut.
+    canvas.set_has_tooltip(true);
+    canvas.connect_query_tooltip(|_, x, y, _keyboard, tip| on_query_tooltip(x, y, tip));
 
     window.connect_close_request(|_| {
         request_close();
@@ -589,6 +592,26 @@ fn on_mouse(kind: MouseKind, x: f64, y: f64, state: gdk::ModifierType) {
     if let Some(Some(code)) = close {
         finish(code);
     }
+}
+
+/// The tooltip at `x, y` (canvas points): the page icon's, over the icon
+/// as last painted, else none.
+fn on_query_tooltip(x: i32, y: i32, tip: &gtk::Tooltip) -> bool {
+    let Some(Some(r)) = with_state(|st| st.doc.reader_icon_rect()) else {
+        return false;
+    };
+    let (px, py) = (x as f32, y as f32);
+    if !(r.x..r.x + r.w).contains(&px) || !(r.y..r.y + r.h).contains(&py) {
+        return false;
+    }
+    tip.set_text(Some(strings::READER_ICON_TIP_LINUX));
+    tip.set_tip_area(&gdk::Rectangle::new(
+        r.x.floor() as i32,
+        r.y.floor() as i32,
+        r.w.ceil() as i32,
+        r.h.ceil() as i32,
+    ));
+    true
 }
 
 /// The wheel (`wheel`, in notches) or a smooth scroll (in points), down

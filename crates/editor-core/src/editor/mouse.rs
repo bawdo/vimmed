@@ -35,8 +35,12 @@
 //! - While the table picker shows, hovering (`Move`) or pressing on a cell
 //!   selects that size and releasing on one inserts it, as Enter does;
 //!   other clicks do nothing.
-//! - Reader view and a read-only document take link clicks and the wheel
-//!   only: no checkbox toggles, no picker.
+//! - A press on the status bar's page icon (`Zone::ReaderToggle`) toggles
+//!   reader view, as Primary+Shift+R does; a double-click toggles it twice.
+//!   A drag or release over it is off the text, so a drag from the text
+//!   that ends on it toggles nothing.
+//! - Reader view and a read-only document take link clicks, the page icon
+//!   and the wheel only: no checkbox toggles, no picker.
 //! - Clicks and drags do nothing while a line is typed in the status bar
 //!   (`:`, `/`, the link prompt, the find bar), while `:s///c` asks, while
 //!   any prompt asks and while the help overlay shows (R68). A press held
@@ -133,10 +137,27 @@ fn word_at(text: &str, col: usize) -> Option<Range<usize>> {
 
 impl Editor {
     /// A mouse event (see the module notes).
-    pub(super) fn mouse(&mut self, m: MouseEvent) -> Effects {
+    pub(super) fn mouse(&mut self, mut m: MouseEvent) -> Effects {
         if self.picker.is_some() && !self.mouse_refused() {
             let fx = self.release_press();
             return fx.merge(self.picker_mouse(m));
+        }
+        // The status bar's page icon: a press toggles reader view, and is
+        // no press on the document. Anything else over it is off the text.
+        if matches!(
+            m.hit,
+            Some(MouseHit {
+                zone: Zone::ReaderToggle,
+                ..
+            })
+        ) {
+            if matches!(m.kind, MouseKind::Down | MouseKind::DoubleClick)
+                && !self.mouse_refused()
+                && self.pressed.is_none()
+            {
+                return self.toggle_reader();
+            }
+            m.hit = None;
         }
         if m.kind == MouseKind::Up {
             return self.lift();
@@ -918,6 +939,92 @@ mod tests {
         send(&mut r, MouseKind::Down, p.clone(), Mods::default());
         send(&mut r, MouseKind::Up, p, Mods::default());
         assert_eq!(r.text(), "- [ ] a");
+    }
+
+    fn icon() -> Option<MouseHit> {
+        zoned(Pos::default(), Zone::ReaderToggle)
+    }
+
+    #[test]
+    fn a_press_on_the_page_icon_toggles_reader_view() {
+        let mut e = ed("hello\nworld");
+        keys(&mut e, "jl");
+        let fx = send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(e.reader());
+        assert_eq!(fx.reader, Some(true));
+        send(&mut e, MouseKind::Up, icon(), Mods::default());
+        assert!(e.reader(), "the release toggles nothing");
+        // The hit's position is no place in the document.
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(!e.reader());
+        assert_eq!(e.cursor(), pos(1, 1));
+        assert_eq!(e.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn the_page_icon_toggles_from_insert_visual_and_vim_off() {
+        let mut e = ed("hello");
+        keys(&mut e, "i");
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(e.reader());
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert_eq!(e.mode(), Mode::Insert, "back to Insert");
+
+        let mut e = ed("hello");
+        keys(&mut e, "<Esc>vl");
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(e.reader());
+        assert_eq!(sel(&e), None);
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert_eq!(sel(&e), Some((pos(0, 0), pos(0, 1))), "the selection back");
+
+        let (mut e, _) = plain_with_host("hello");
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(e.reader());
+        send(&mut e, MouseKind::DoubleClick, icon(), Mods::default());
+        assert!(!e.reader(), "a double-click's second press toggles too");
+    }
+
+    #[test]
+    fn the_page_icon_does_nothing_while_a_line_is_typed_or_help_shows() {
+        let mut e = ed("hello");
+        keys(&mut e, ":");
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(!e.reader());
+        assert_eq!(e.mode(), Mode::Command);
+        keys(&mut e, "<Esc>/");
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(!e.reader());
+        let mut e = ed("hello");
+        keys(&mut e, ":help<CR>");
+        send(&mut e, MouseKind::Down, icon(), Mods::default());
+        assert!(!e.reader());
+    }
+
+    #[test]
+    fn a_drag_onto_the_page_icon_is_a_drag_off_the_text() {
+        let mut e = ed("hello world");
+        send(
+            &mut e,
+            MouseKind::Down,
+            on(pos(0, 1), pos(0, 1)),
+            Mods::default(),
+        );
+        send(
+            &mut e,
+            MouseKind::Drag,
+            on(pos(0, 4), pos(0, 4)),
+            Mods::default(),
+        );
+        send(&mut e, MouseKind::Drag, icon(), Mods::default());
+        send(&mut e, MouseKind::Up, icon(), Mods::default());
+        assert!(!e.reader());
+        assert_eq!(e.mode(), Mode::Visual);
+        assert_eq!(
+            sel(&e),
+            Some((pos(0, 1), pos(0, 4))),
+            "the drag kept its end"
+        );
     }
 
     /// `see [docs](https://example.com/d) now`: the link text `docs` is

@@ -68,6 +68,9 @@ pub struct StatusModel {
     /// The cursor position as shown, `line:col`: the line from 1 and the
     /// col the grapheme display column from 1.
     pub position: String,
+    /// True in reader view: the page icon at the bar's right end, which a
+    /// click on toggles reader view, shows in `color.status.reader`.
+    pub reader: bool,
 }
 
 /// How the document's caret is drawn.

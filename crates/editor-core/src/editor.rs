@@ -45,9 +45,9 @@
 //! Input methods (`ime`): committed text and the composition, which is
 //! held beside the buffer and drawn at the caret until it commits.
 //!
-//! Reader view and the help overlay (`reader`): Primary+Shift+R (or
-//! `--view`) hides the caret and makes the document
-//! read-only, with keys that scroll the view; `:help` shows the cheat
+//! Reader view and the help overlay (`reader`): Primary+Shift+R, `:view`
+//! (or `:reader`), the status bar's page icon or `--view` hides the caret
+//! and makes the document read-only, with keys that scroll the view; `:help` shows the cheat
 //! sheet over the document until Esc.
 //!
 //! Links (`link`): `open_link` opens a link's target through the host, and
@@ -871,7 +871,7 @@ impl Editor {
             // Primary+S is `:w`, from any mode but Confirm, whose `:s///c`
             // session is one undo step a save point must not split. Reader
             // view is read-only, so it does nothing there (nor can `:w`
-            // run, with `:` disabled).
+            // run: reader view's command line runs only `:view`).
             Key::Char('s') if primary && !k.mods.shift && !k.mods.alt => {
                 if self.mode == Mode::Confirm || self.reader {
                     return Effects::default();
@@ -1108,12 +1108,13 @@ impl Editor {
                 self.leave_visual();
                 status
             }
-            // Reader view disables the command line.
-            Step::Cmdline if self.reader => status,
             Step::Cmdline => {
                 // From Visual, the selection is remembered for `'<,'>`
-                // (it stays remembered, as vim's marks do).
+                // (it stays remembered, as vim's marks do). Reader view's
+                // command line runs only `:view` (`cmdline`), which takes
+                // no range.
                 self.cmdline = match self.shown_selection() {
+                    Some(_) if self.reader => String::new(),
                     Some(sel) => {
                         self.last_visual = Some(sel);
                         "'<,'>".to_owned()
@@ -2081,6 +2082,7 @@ impl ViewSource for Editor {
             warnings: self.shown_warnings(),
             showcmd: find.unwrap_or_else(|| self.showcmd()),
             position,
+            reader: self.reader,
         }
     }
     fn tokens(&self) -> &Tokens {

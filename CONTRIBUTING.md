@@ -76,9 +76,9 @@ malformed date or no link reference, fails the `Changelog` check.
 The checks use these pinned tools. Install the same versions to get the same
 results as CI:
 
-- cargo-deny: `cargo install --locked cargo-deny --version 0.20.2`
+- cargo-deny: `cargo install --locked cargo-deny --version 0.21.0`
 - zizmor: `cargo install --locked zizmor --version 1.30.1`
-- typos: `cargo install --locked typos-cli --version 1.51.1`
+- typos: `cargo install --locked typos-cli --version 1.52.2`
 - cargo-llvm-cov: `cargo install --locked cargo-llvm-cov --version 0.9.1` (for `cargo xtask ci --coverage`; needs the `llvm-tools-preview` component, which `rust-toolchain.toml` lists)
 - reuse: `pipx install reuse==6.2.0` (the CI action runs the latest 6.x image). New files are covered by the globs in `REUSE.toml`, or need an SPDX header if their licence differs.
 

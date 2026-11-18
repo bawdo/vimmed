@@ -204,3 +204,20 @@ The config file is `${XDG_CONFIG_HOME:-$HOME/.config}/<name>/config.toml`. The f
     with no config, and no status bar message.
 42. **Defaults unchanged.** Delete the config file and reopen. Expect SF and SF Mono as before
     this task, with italics still in SF Italic.
+
+## Reader view toggles
+
+Run these on the Mac, and on Linux. Use `test.md` from above.
+
+43. **The page icon.** A small outlined page with lines sits at the far right of the status bar,
+    right of `line:col`, in the status text colour. Hovering it for a moment shows
+    `Reader view (⌘⇧R)` (`Reader view (Ctrl+Shift+R)` on Linux). Click it: reader view comes on
+    (`READER` in the status bar, no caret) and the icon turns blue. Click again: back to Normal
+    with the cursor where it was. Do the same in light and dark appearance.
+44. **Icon edge cases.** Drag from the text down onto the icon and release: you get a Visual
+    selection and reader view stays off. Type `:` and click the icon: nothing happens. Make the
+    window narrow: nothing on the right side of the status bar overlaps the icon.
+45. **`:view` and `:reader`.** Type `:view` and Enter: reader view comes on. Type `:w` and Enter:
+    the status bar says `reader view: only :view (or :reader) runs here` and nothing is written.
+    Type `:reader` and Enter: reader view goes off. With `vim = false` there is no command line,
+    so only the icon and the shortcut work.

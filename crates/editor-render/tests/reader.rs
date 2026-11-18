@@ -7,9 +7,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use common::{
-    Fake, Geom, H_PT, Laid, Recording, W_PT, cosmic, open_editor, press, press_with, view,
+    Fake, Geom, H_PT, Laid, Recording, W_PT, cosmic, mouse_at, open_editor, press, press_with, view,
 };
-use editor_core::input::{Key, Mods};
+use editor_core::input::{Key, Mods, MouseKind, Zone};
 use editor_core::strings;
 use editor_core::tokens::{Rgba, Theme, TokenId, Tokens};
 use editor_core::view_model::ViewSource;
@@ -57,6 +57,91 @@ fn recording(t: &Tokens) -> (DocView, Rc<RefCell<Vec<Laid>>>) {
 /// Every text laid out since the last call, and forgets them.
 fn laid_texts(laid: &Rc<RefCell<Vec<Laid>>>) -> Vec<String> {
     laid.borrow_mut().drain(..).map(|l| l.text).collect()
+}
+
+/// The middle of the status bar's page icon, in points, as last painted.
+fn icon_mid(v: &DocView) -> (f32, f32) {
+    let r = v.reader_icon_rect().expect("a page icon");
+    (r.x + r.w / 2.0, r.y + r.h / 2.0)
+}
+
+/// A click on the status bar's page icon toggles reader view both ways,
+/// back to the cursor and mode it was entered from.
+#[test]
+fn the_page_icon_toggles_reader_view() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = scratch("icon");
+    let mut ed = open_editor(&dir, "one\ntwo\nthree", false);
+    let (mut v, laid) = recording(&t);
+    v.paint_all(&ed);
+    press(&mut ed, &mut v, Key::Char('j'));
+    let (x, y) = icon_mid(&v);
+    assert_eq!(v.hit_test(x, y).unwrap().zone, Zone::ReaderToggle);
+    laid_texts(&laid);
+
+    mouse_at(&mut ed, &mut v, MouseKind::Down, x, y);
+    assert!(ed.reader());
+    mouse_at(&mut ed, &mut v, MouseKind::Up, x, y);
+    assert!(ed.reader(), "the release does not toggle it back");
+    assert_eq!(v.caret_rect(), None);
+    let texts = laid_texts(&laid);
+    assert!(texts.iter().any(|s| s == strings::MODE_READER), "{texts:?}");
+
+    mouse_at(&mut ed, &mut v, MouseKind::Down, x, y);
+    mouse_at(&mut ed, &mut v, MouseKind::Up, x, y);
+    assert!(!ed.reader());
+    assert_eq!(ed.cursor().line, 1, "the cursor is where it was");
+    assert!(v.caret_rect().is_some());
+}
+
+/// A drag from the text that ends on the page icon selects and toggles
+/// nothing at the icon; while `:` is typed the icon does nothing.
+#[test]
+fn the_page_icon_ignores_drags_and_the_command_line() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = scratch("icon_drag");
+    let mut ed = open_editor(&dir, "one two three", false);
+    let mut v = view(&t, 1.0);
+    v.paint_all(&ed);
+    let (x, y) = icon_mid(&v);
+    let text_y = t.px(TokenId::SpacePageTop) + 5.0;
+    let text_x = v.text_left_px(0).unwrap() + 2.0;
+    mouse_at(&mut ed, &mut v, MouseKind::Down, text_x, text_y);
+    mouse_at(&mut ed, &mut v, MouseKind::Drag, x, y);
+    mouse_at(&mut ed, &mut v, MouseKind::Up, x, y);
+    assert!(!ed.reader());
+
+    press(&mut ed, &mut v, Key::Esc);
+    press(&mut ed, &mut v, Key::Char(':'));
+    mouse_at(&mut ed, &mut v, MouseKind::Down, x, y);
+    assert!(!ed.reader(), "refused while `:` is typed");
+}
+
+/// `:view` turns reader view on, and in reader view `:view` (the only
+/// command its command line runs) turns it off again.
+#[test]
+fn view_command_toggles_reader_view() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = scratch("view_cmd");
+    let mut ed = open_editor(&dir, "some text", false);
+    let mut v = view(&t, 1.0);
+    v.paint_all(&ed);
+    let colon = |ed: &mut _, v: &mut _, cmd: &str| {
+        press(ed, v, Key::Char(':'));
+        for c in cmd.chars() {
+            press(ed, v, Key::Char(c));
+        }
+        press(ed, v, Key::Enter);
+    };
+    colon(&mut ed, &mut v, "view");
+    assert!(ed.reader());
+    assert_eq!(v.caret_rect(), None);
+    colon(&mut ed, &mut v, "w");
+    assert!(ed.reader());
+    assert_eq!(ed.message(), Some(strings::READER_ONLY_VIEW));
+    colon(&mut ed, &mut v, "reader");
+    assert!(!ed.reader());
+    assert!(v.caret_rect().is_some());
 }
 
 /// Owner decision D21 (overriding the brief's "status line hidden"): in

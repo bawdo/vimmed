@@ -70,6 +70,9 @@ pub enum Zone {
     Link(Range<usize>),
     /// A cell of the table picker, `(col, row)` from 0, while it shows.
     Picker { col: u32, row: u32 },
+    /// The status bar's page icon, which toggles reader view. Off the
+    /// document: the hit's positions mean nothing.
+    ReaderToggle,
 }
 
 /// Where a mouse event landed in the document, as the renderer's hit test
@@ -102,7 +105,8 @@ impl MouseHit {
 }
 
 /// A mouse event: what happened, where (`None` outside the text area or
-/// over a line not painted yet) and the modifiers held.
+/// over a line not painted yet, but for the status bar's page icon) and the
+/// modifiers held.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MouseEvent {
     pub kind: MouseKind,

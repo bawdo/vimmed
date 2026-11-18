@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use editor_core::buffer::{Buffer, Pos};
 use editor_core::editor::{Config, Editor, OpenRequest};
-use editor_core::effects::Redraw;
+use editor_core::effects::{Effects, Redraw};
 use editor_core::host::{Host, Waker, WindowRequest};
-use editor_core::input::{Input, Key, KeyEvent, Mods};
+use editor_core::input::{Input, Key, KeyEvent, Mods, MouseEvent, MouseKind};
 use editor_core::markdown::{
     Blocks, LineDisplay, LineKind, Prefix, Reveal, SpanBase, code_bg, line_display,
     ordered_display, parse_line,
@@ -199,6 +199,7 @@ impl ViewSource for Fake {
             warnings: self.warnings.clone(),
             showcmd: self.showcmd.clone(),
             position: format!("{}:{}", self.cursor.line + 1, self.cursor.col + 1),
+            reader: self.reader,
         }
     }
     fn tokens(&self) -> &Tokens {
@@ -389,6 +390,23 @@ pub fn press_with(ed: &mut Editor, v: &mut DocView, k: Key, mods: Mods) {
         mods,
         time_ns: 0,
     }));
+    apply(ed, v, fx);
+}
+
+/// A mouse event at `x, y` (points), hit-tested against what `v` painted
+/// and sent to the editor, which is painted as a shell would.
+pub fn mouse_at(ed: &mut Editor, v: &mut DocView, kind: MouseKind, x: f32, y: f32) {
+    let hit = v.hit_test(x, y);
+    let fx = ed.handle(Input::Mouse(MouseEvent {
+        kind,
+        hit,
+        mods: Mods::default(),
+    }));
+    apply(ed, v, fx);
+}
+
+/// Paints what `fx` asks for, as a shell does.
+fn apply(ed: &mut Editor, v: &mut DocView, fx: Effects) {
     let mut redraw = fx.redraw;
     if let Some(on) = fx.reader {
         v.set_reader(on);

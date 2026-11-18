@@ -66,6 +66,16 @@ pub const NO_FILE_ACCESS: &str = "file access is not wired up yet";
 /// `ZZ` in reader view with unsaved changes: reader view never writes.
 pub const READ_ONLY_ZQ: &str = "read-only: ZQ to discard";
 
+/// Any command but `:view` or `:reader` typed in reader view, which is
+/// read-only.
+pub const READER_ONLY_VIEW: &str = "reader view: only :view (or :reader) runs here";
+
+/// The tooltip over the status bar's page icon, on the Mac.
+pub const READER_ICON_TIP_MAC: &str = "Reader view (\u{2318}\u{21e7}R)";
+
+/// The tooltip over the status bar's page icon, on Linux.
+pub const READER_ICON_TIP_LINUX: &str = "Reader view (Ctrl+Shift+R)";
+
 /// A write that succeeded.
 pub const WRITTEN: &str = "written";
 

@@ -6,6 +6,13 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-18
+
+### Added
+
+- `:view` (or `:reader`) turns reader view on, and off again. In reader view the command line now opens, but runs only these two commands; anything else says `reader view: only :view (or :reader) runs here`. Unlike vim's `:view`, it takes no file name.
+- A page icon at the right end of the status bar toggles reader view when clicked, with a tooltip naming the Cmd+Shift+R (Ctrl+Shift+R on Linux) shortcut. It shows in the new `color.status.reader` token (the accent blue by default) while reader view is on.
+
 ## [0.9.2] - 2026-11-07
 
 ### Changed
@@ -50,7 +57,8 @@ All notable changes to vimmed are documented here. The format follows
 - Safe file handling: atomic saves, recovery copies, and detection of changes made on disk by other tools.
 - `~/.config/vimmed/config.toml` for vim mode, autosave, fonts, column width and theme, with a light and dark theme that follows the system.
 
-[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/bawdo/vimmed/releases/tag/v0.9.3
 [0.9.2]: https://github.com/bawdo/vimmed/releases/tag/v0.9.2
 [0.9.1]: https://github.com/bawdo/vimmed/releases/tag/v0.9.1
 [0.9.0]: https://github.com/bawdo/vimmed/releases/tag/v0.9.0

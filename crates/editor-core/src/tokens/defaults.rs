@@ -32,6 +32,7 @@ token_table! {
     ColorStatusDirty, "color.status.dirty", Color, "#B35C00", "#E8A04E";
     ColorStatusWarning, "color.status.warning", Color, "#A86A00", "#F0B65A";
     ColorStatusError, "color.status.error", Color, "#B3261E", "#F2877F";
+    ColorStatusReader, "color.status.reader", Color, "#3B6EA5", "#7FAEE0";
     ColorOverlayBg, "color.overlay.bg", Color, "#2B2B2B", "#3A3A3F";
     ColorOverlayText, "color.overlay.text", Color, "#FAF9F6", "#E4E2DD";
     ColorPreeditUnderline, "color.preedit.underline", Color, "#3B6EA5", "#7FAEE0";
