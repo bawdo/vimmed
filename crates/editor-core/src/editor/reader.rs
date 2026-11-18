@@ -7,7 +7,7 @@
 //! position; its page icon shows in `color.status.reader` while reader
 //! view is on. It is read-only: edits, undo, `.`, paste and Primary+S do
 //! nothing, the command line runs only `:view` and `:reader` (which leave
-//! it), searching (`/ ? n N`) is disabled, and `ZZ` with unsaved changes
+//! it) and `:q`, `:q!` and `:cq` (which write nothing), searching (`/ ? n N`) is disabled, and `ZZ` with unsaved changes
 //! refuses. `j k`, the arrows, PageUp and
 //! PageDown, `gg`, `G`, `[N]gg` and `[N]G` scroll the view
 //! (`Effects::scroll`) and leave the cursor where it is, so toggling back
@@ -340,6 +340,31 @@ mod tests {
     }
 
     #[test]
+    fn reader_runs_the_quits() {
+        // Clean: `:q` closes.
+        let (mut e, _) = ed_with_files("abc");
+        toggle(&mut e);
+        assert_eq!(keys(&mut e, ":q<CR>").close, Some(0));
+
+        // Unsaved changes made before reader view: `:q` refuses as it does
+        // anywhere, `:q!` closes without writing.
+        let (mut e, files) = ed_with_files("abc");
+        keys(&mut e, "x");
+        toggle(&mut e);
+        assert!(e.reader() && e.dirty());
+        assert_eq!(keys(&mut e, ":q<CR>").close, None);
+        assert_eq!(e.message(), Some(crate::strings::NO_WRITE_SINCE_CHANGE));
+        assert!(e.reader(), "still in reader view");
+        assert_eq!(keys(&mut e, ":q!<CR>").close, Some(0));
+        assert_eq!(files.calls(), [crate::testkit::FileCall::Close { code: 0 }]);
+
+        // `:cq` closes with an error code.
+        let (mut e, _) = ed_with_files("abc");
+        toggle(&mut e);
+        assert_eq!(keys(&mut e, ":cq<CR>").close, Some(1));
+    }
+
+    #[test]
     fn reader_refuses_edits() {
         let (mut e, files) = ed_with_files("abc\ndef");
         toggle(&mut e);
@@ -348,14 +373,14 @@ mod tests {
         assert_eq!(e.text(), "abc\ndef");
         assert!(!e.dirty());
         assert_eq!(e.mode(), Mode::Normal);
-        // The command line runs only `:view`, so neither `:w` nor `:q`
-        // can run: it says so.
-        let fx = keys(&mut e, ":q<CR>");
+        // The command line runs `:view` and the quits, not `:w`: it says so.
+        let fx = keys(&mut e, ":w<CR>");
         assert_eq!(fx.close, None);
         assert_eq!(e.mode(), Mode::Normal);
         assert_eq!(e.cmdline(), "");
         assert_eq!(e.message(), Some(crate::strings::READER_ONLY_VIEW));
-        keys(&mut e, ":w<CR>");
+        keys(&mut e, ":wq<CR>");
+        keys(&mut e, ":x<CR>");
         assert!(files.calls().is_empty());
         // Primary+S does nothing in reader view, and says nothing.
         keys(&mut e, "<Esc><D-s>");
