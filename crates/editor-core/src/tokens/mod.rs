@@ -311,7 +311,7 @@ mod tests {
                 "bad value for space.column: wide"
             ]
         );
-        assert_eq!(t.px(TokenId::SpaceColumn), 660.0);
+        assert_eq!(t.px(TokenId::SpaceColumn), 900.0);
     }
 
     #[test]

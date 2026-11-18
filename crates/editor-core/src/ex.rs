@@ -750,14 +750,21 @@ mod tests {
     }
 
     #[test]
-    fn reader_mode_runs_no_command_but_view() {
+    fn reader_mode_runs_no_command_but_view_and_quit() {
         let mut e = build_reader("foo");
         colon(&mut e, "s/foo/bar/");
         assert_eq!(e.text(), "foo");
         assert_eq!(e.mode(), Mode::Normal);
         assert_eq!(e.message(), Some(strings::READER_ONLY_VIEW));
         assert!(e.reader());
-        assert_eq!(colon(&mut e, "q").close, None);
+        for cmd in ["w", "wq", "x"] {
+            assert_eq!(
+                colon(&mut e, cmd).close,
+                None,
+                ":{cmd} writes, so it is refused"
+            );
+            assert_eq!(e.message(), Some(strings::READER_ONLY_VIEW));
+        }
         // Nor does a command that is none say E492: the refusal is the
         // same.
         colon(&mut e, "foo");

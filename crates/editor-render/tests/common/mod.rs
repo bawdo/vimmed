@@ -320,13 +320,34 @@ impl TextLayout for Recording {
 
 /// The text column's left edge and width in pixels, as `DocView` computes them.
 pub fn column(t: &Tokens, scale: f32) -> (f32, f32) {
-    let width = (W_PT * scale).round();
-    let side = t.px(TokenId::SpacePageSide) * scale;
+    column_in(t, W_PT, scale)
+}
+
+/// `column` for a window `w_pt` points wide.
+pub fn column_in(t: &Tokens, w_pt: f32, scale: f32) -> (f32, f32) {
+    let width = (w_pt * scale).round();
     let col_w = (t.px(TokenId::SpaceColumn) * scale)
-        .min(width - 2.0 * side)
+        .min(width - 2.0 * side(t, width, scale))
         .max(1.0)
         .round();
     (((width - col_w) / 2.0).max(0.0).floor(), col_w)
+}
+
+/// The breakout column's left edge and width in pixels for a window `w_pt`
+/// points wide, as `DocView` computes them.
+pub fn wide_in(t: &Tokens, w_pt: f32, scale: f32) -> (f32, f32) {
+    let width = (w_pt * scale).round();
+    let (_, col_w) = column_in(t, w_pt, scale);
+    let wide_w = (t.px(TokenId::SpaceColumnWide) * scale)
+        .min(width - 2.0 * side(t, width, scale))
+        .round()
+        .max(col_w);
+    (((width - wide_w) / 2.0).max(0.0).floor(), wide_w)
+}
+
+/// The page's side margin in pixels for a frame `width` pixels wide.
+fn side(t: &Tokens, width: f32, scale: f32) -> f32 {
+    (t.px(TokenId::SpacePageSide) * scale).max(t.ratio(TokenId::SpacePageSideRatio) * width)
 }
 
 /// Line `i`'s top in frame pixels (no scroll), from the view's line heights.

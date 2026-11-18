@@ -68,7 +68,7 @@ pub const READ_ONLY_ZQ: &str = "read-only: ZQ to discard";
 
 /// Any command but `:view` or `:reader` typed in reader view, which is
 /// read-only.
-pub const READER_ONLY_VIEW: &str = "reader view: only :view (or :reader) runs here";
+pub const READER_ONLY_VIEW: &str = "reader view: only :view (or :reader) and :q run here";
 
 /// The tooltip over the status bar's page icon, on the Mac.
 pub const READER_ICON_TIP_MAC: &str = "Reader view (\u{2318}\u{21e7}R)";

@@ -218,6 +218,8 @@ Run these on the Mac, and on Linux. Use `test.md` from above.
     selection and reader view stays off. Type `:` and click the icon: nothing happens. Make the
     window narrow: nothing on the right side of the status bar overlaps the icon.
 45. **`:view` and `:reader`.** Type `:view` and Enter: reader view comes on. Type `:w` and Enter:
-    the status bar says `reader view: only :view (or :reader) runs here` and nothing is written.
-    Type `:reader` and Enter: reader view goes off. With `vim = false` there is no command line,
+    the status bar says `reader view: only :view (or :reader) and :q run here` and nothing is
+    written. Type `:reader` and Enter: reader view goes off. Turn reader view on again and type
+    `:q`: the window closes. Open again, make a change, turn reader view on and type `:q`: it
+    refuses with `E37`; `:q!` closes without saving. With `vim = false` there is no command line,
     so only the icon and the shortcut work.

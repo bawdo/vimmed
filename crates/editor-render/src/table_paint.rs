@@ -9,9 +9,17 @@
 //! row is a divider `size.table.border` tall; data rows have a bottom border.
 //! Every row draws the column verticals, so the grid is continuous. Cells sit
 //! `space.table.pad` in from the verticals and `space.table.pad.y` from the
-//! row's edges, aligned per column (`Align::None` renders left). When the
-//! natural widths overflow the column, every column shrinks in proportion and
-//! the cells wrap.
+//! row's edges, aligned per column (`Align::None` renders left).
+//!
+//! Width: a table is as wide as its cells need, never stretched. One that
+//! fits the text column starts at its left edge; a wider one breaks out of
+//! it, centred, up to the breakout column (`Room`). When even that is too
+//! narrow, columns shrink as a browser's automatic table layout does: each
+//! keeps its longest word (its min-content width) and the room left over is
+//! shared in proportion to how much more each column wants, so a short
+//! column such as an ID never wraps because a long one is next to it. Only
+//! when the longest words alone overflow do columns shrink below them, in
+//! proportion, and words break.
 
 use std::ops::Range;
 
@@ -23,7 +31,27 @@ use tiny_skia::Pixmap;
 
 use crate::layout::{LaidLine, TextLayout};
 use crate::paint::{blend, fill, styled_line};
-use crate::view::{Cached, lay};
+use crate::view::{Cached, Geo, lay};
+
+/// Where a table may sit, in pixels: the text column's width, and the
+/// breakout column's width and left edge relative to the text column's
+/// (zero or less).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Room {
+    pub(crate) col: f32,
+    pub(crate) wide: f32,
+    pub(crate) left: f32,
+}
+
+impl Room {
+    pub(crate) fn of(g: &Geo) -> Room {
+        Room {
+            col: g.col_w,
+            wide: g.wide_w,
+            left: (g.wide_x - g.col_x).min(0.0),
+        }
+    }
+}
 
 /// One cell: its source bytes on the line, the display of just those bytes,
 /// and its layout.
@@ -45,13 +73,15 @@ pub(crate) struct Row {
     pub(crate) cells: Vec<Cell>,
 }
 
-/// The geometry of one table, in pixels relative to the column's left edge.
+/// The geometry of one table, in pixels relative to the text column's left
+/// edge (negative for a table that breaks out of it).
 pub(crate) struct TableGeom {
     /// The table's lines, header to last row.
     pub(crate) lines: Range<usize>,
     /// What the geometry was made from: every row's source, then the sizes.
-    key: (Vec<String>, [f32; 5]),
+    key: (Vec<String>, [f32; 7]),
     /// The x of each column's left vertical, then the right edge's vertical.
+    /// The first is the table's left edge.
     pub(crate) verticals: Vec<f32>,
     /// Each column's text width (inside the padding).
     pub(crate) inner: Vec<f32>,
@@ -81,7 +111,14 @@ impl Sizes {
 impl TableGeom {
     /// The table's full width, outer verticals included.
     pub(crate) fn width(&self, t: &Tokens, s: f32) -> f32 {
-        self.verticals.last().copied().unwrap_or(0.0) + Sizes::new(t, s).border
+        let (first, last) = (self.verticals.first(), self.verticals.last());
+        let span = last.zip(first).map_or(0.0, |(l, f)| l - f);
+        span + Sizes::new(t, s).border
+    }
+
+    /// The table's left edge, relative to the text column's.
+    pub(crate) fn left(&self) -> f32 {
+        self.verticals.first().copied().unwrap_or(0.0)
     }
 
     pub(crate) fn row(&self, line: usize) -> Option<&Row> {
@@ -191,19 +228,19 @@ fn cell_display(d: &LineDisplay, cell: &Range<usize>, strong: bool) -> LineDispl
 pub(crate) fn key_of(
     src: &dyn ViewSource,
     lines: &Range<usize>,
-    avail: f32,
+    room: Room,
     t: &Tokens,
     s: f32,
-) -> (Vec<String>, [f32; 5]) {
+) -> (Vec<String>, [f32; 7]) {
     let z = Sizes::new(t, s);
     (
         lines.clone().map(|j| src.line(j).to_owned()).collect(),
-        [avail, s, z.pad, z.pad_y, z.border],
+        [room.col, room.wide, room.left, s, z.pad, z.pad_y, z.border],
     )
 }
 
 impl TableGeom {
-    pub(crate) fn matches(&self, key: &(Vec<String>, [f32; 5])) -> bool {
+    pub(crate) fn matches(&self, key: &(Vec<String>, [f32; 7])) -> bool {
         self.key == *key
     }
 
@@ -222,13 +259,14 @@ pub(crate) fn build(
     src: &dyn ViewSource,
     lines: Range<usize>,
     displays: &[LineDisplay],
-    avail: f32,
+    room: Room,
     t: &Tokens,
     s: f32,
     old: Option<TableGeom>,
 ) -> TableGeom {
     let z = Sizes::new(t, s);
-    let key = key_of(src, &lines, avail, t, s);
+    let key = key_of(src, &lines, room, t, s);
+    let avail = room.wide;
     let mut pool: Vec<Cached> = old
         .into_iter()
         .flat_map(|g| g.rows.into_iter())
@@ -257,9 +295,11 @@ pub(crate) fn build(
         .and_then(|j| alignments(src.line(j)))
         .unwrap_or_default();
 
-    // Natural widths: every cell laid out unwrapped.
+    // Natural widths: every cell laid out unwrapped. Min-content widths:
+    // each cell's longest word.
     let mut rows: Vec<Row> = Vec::with_capacity(displays.len());
     let mut natural: Vec<f32> = vec![0.0; aligns.len()];
+    let mut least: Vec<f32> = vec![0.0; aligns.len()];
     for (j, d) in lines.clone().zip(displays) {
         let part = match d.deco {
             BlockDeco::TableRow { part, .. } => part,
@@ -272,11 +312,16 @@ pub(crate) fn build(
                 let display = cell_display(d, &r, part == TablePart::Header);
                 let (text, spans) = styled_line(line, &display, t, s);
                 let mut slot = take(&text, &spans, avail);
-                let w = lay(layout, &mut slot, text, spans, avail).width();
+                lay(layout, &mut slot, text, spans, avail);
+                let (w, word) = slot.as_ref().map_or((0.0, 0.0), |c| {
+                    (c.laid.width(), longest_word(&c.laid, c.key_text()))
+                });
                 if c >= natural.len() {
                     natural.push(0.0);
+                    least.push(0.0);
                 }
                 natural[c] = natural[c].max(w.ceil());
+                least[c] = least[c].max(word.ceil());
                 cells.push(Cell {
                     display,
                     laid: slot,
@@ -290,21 +335,19 @@ pub(crate) fn build(
         });
     }
 
-    // Column widths, shrunk in proportion when they overflow the column.
+    // Column widths, shrunk to fit the breakout column.
     let n = natural.len();
     let chrome = (n as f32 + 1.0) * z.border + n as f32 * 2.0 * z.pad;
-    let want: f32 = natural.iter().sum();
-    let room = (avail - chrome).max(n as f32);
-    let inner: Vec<f32> = if want > room {
-        natural
-            .iter()
-            .map(|w| (w * room / want).floor().max(1.0))
-            .collect()
+    let inner = column_widths(&natural, &least, (avail - chrome).max(n as f32));
+    let full = chrome + inner.iter().sum::<f32>();
+    // Inside the text column from its left edge; wider, centred on it.
+    let dx = if full <= room.col {
+        0.0
     } else {
-        natural.clone()
+        ((room.col - full) / 2.0).floor().max(room.left)
     };
     let mut verticals = Vec::with_capacity(n + 1);
-    let mut x = 0.0;
+    let mut x = dx;
     for w in &inner {
         verticals.push(x);
         x += z.border + 2.0 * z.pad + w;
@@ -342,6 +385,55 @@ pub(crate) fn build(
     }
 }
 
+/// The widest run of non-space clusters in `laid` (made from `text`): the
+/// narrowest the line can wrap to without breaking a word.
+fn longest_word(laid: &LaidLine, text: &str) -> f32 {
+    let mut widest: f32 = 0.0;
+    for row in laid.row_geometry() {
+        let mut run: Option<(f32, f32)> = None;
+        for g in &row.glyphs {
+            let space = text
+                .get(g.bytes.clone())
+                .is_some_and(|c| c.chars().all(char::is_whitespace));
+            if space {
+                run = None;
+                continue;
+            }
+            let (a, b) = (g.x, g.x + g.w);
+            let (lo, hi) = run.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
+            widest = widest.max(hi - lo);
+            run = Some((lo, hi));
+        }
+    }
+    widest
+}
+
+/// Text widths for columns that want `natural` and cannot go below `least`
+/// without breaking a word, inside `room`: the natural widths when they
+/// fit; else each column's least plus a share of what is left over, in
+/// proportion to how much more it wants; else, when the least widths alone
+/// overflow, those shrunk in proportion.
+pub(crate) fn column_widths(natural: &[f32], least: &[f32], room: f32) -> Vec<f32> {
+    let least: Vec<f32> = natural.iter().zip(least).map(|(n, l)| l.min(*n)).collect();
+    let want: f32 = natural.iter().sum();
+    let floor: f32 = least.iter().sum();
+    if want <= room {
+        natural.to_vec()
+    } else if floor >= room {
+        least
+            .iter()
+            .map(|w| (w * room / floor.max(1.0)).floor().max(1.0))
+            .collect()
+    } else {
+        let share = (room - floor) / (want - floor);
+        natural
+            .iter()
+            .zip(&least)
+            .map(|(n, l)| (l + (n - l) * share).floor().max(1.0))
+            .collect()
+    }
+}
+
 /// Paints row `line` of `geom` at column x `cx`, row top `top`: borders in
 /// `color.table.border`, then each cell's text. Only rows `clip` change.
 #[allow(clippy::too_many_arguments)]
@@ -365,10 +457,11 @@ pub(crate) fn paint_row(
     for v in &geom.verticals {
         fill(p, cx + v, top, z.border, h, c, clip);
     }
+    let x = cx + geom.left();
     match row.part {
-        TablePart::Header => fill(p, cx, top, w, z.border, c, clip),
-        TablePart::Separator => fill(p, cx, top, w, h, c, clip),
-        TablePart::Row => fill(p, cx, top + h - z.border, w, z.border, c, clip),
+        TablePart::Header => fill(p, x, top, w, z.border, c, clip),
+        TablePart::Separator => fill(p, x, top, w, h, c, clip),
+        TablePart::Row => fill(p, x, top + h - z.border, w, z.border, c, clip),
     }
     let rows = clip.start as u32..clip.end.ceil() as u32;
     for (k, cell) in row.cells.iter().enumerate() {
@@ -378,5 +471,54 @@ pub(crate) fn paint_row(
         let (x, y) = geom.cell_origin(line, k, t, s);
         let (ox, oy) = ((cx + x) as i32, (top + y) as i32);
         layout.draw(laid, &mut |m| blend(p, ox, oy, &m, &rows));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::column_widths;
+
+    #[test]
+    fn natural_widths_when_they_fit() {
+        assert_eq!(
+            column_widths(&[40.0, 300.0], &[40.0, 60.0], 400.0),
+            [40.0, 300.0]
+        );
+    }
+
+    #[test]
+    fn short_columns_keep_their_longest_word() {
+        // 40 + 1000 wanted, 400 of room: the ID column wants nothing past its
+        // word, so the long column takes all that is left.
+        assert_eq!(
+            column_widths(&[40.0, 1000.0], &[40.0, 60.0], 400.0),
+            [40.0, 360.0]
+        );
+    }
+
+    #[test]
+    fn leftover_room_is_shared_by_how_much_more_each_wants() {
+        // Floors 100 + 100; wants 300 + 700; 400 of room leaves 200 to share,
+        // a quarter of the 800 wanted past the floors.
+        assert_eq!(
+            column_widths(&[300.0, 700.0], &[100.0, 100.0], 400.0),
+            [150.0, 250.0]
+        );
+    }
+
+    #[test]
+    fn words_break_only_when_the_floors_overflow() {
+        assert_eq!(
+            column_widths(&[300.0, 300.0], &[200.0, 300.0], 250.0),
+            [100.0, 150.0]
+        );
+    }
+
+    #[test]
+    fn a_floor_never_exceeds_the_natural_width() {
+        assert_eq!(
+            column_widths(&[50.0, 500.0], &[80.0, 20.0], 300.0),
+            [50.0, 250.0]
+        );
     }
 }

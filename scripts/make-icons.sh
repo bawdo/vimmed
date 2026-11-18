@@ -9,8 +9,11 @@
 #
 # Writes:
 #   docs/assets/logo-light.png, docs/assets/logo-dark.png  (README, 512 px)
-#   packaging/icons/AppIcon.icns                           (macOS, from DARK_SRC)
-#   packaging/icons/hicolor/<s>x<s>/apps/app-icon.png      (Linux, from DARK_SRC)
+#   packaging/icons/AppIcon.icns                           (macOS, from LIGHT_SRC)
+#   packaging/icons/hicolor/<s>x<s>/apps/app-icon.png      (Linux, from LIGHT_SRC)
+#
+# The app icons use the black text: the enso is transparent inside, so the
+# text sits on whatever the dock or panel shows through it.
 #
 # Needs ImageMagick 7 (`magick`) and, for the .icns, macOS `iconutil`.
 set -eu
@@ -38,7 +41,7 @@ square "$dark" 512 "$root/docs/assets/logo-dark.png"
 for s in 32 48 64 128 256 512; do
   dir="$root/packaging/icons/hicolor/${s}x${s}/apps"
   mkdir -p "$dir"
-  square "$dark" "$s" "$dir/app-icon.png"
+  square "$light" "$s" "$dir/app-icon.png"
 done
 
 if command -v iconutil >/dev/null 2>&1; then
@@ -46,8 +49,8 @@ if command -v iconutil >/dev/null 2>&1; then
   set=$work/AppIcon.iconset
   mkdir "$set"
   for s in 16 32 128 256 512; do
-    square "$dark" "$s" "$set/icon_${s}x${s}.png"
-    square "$dark" "$((s * 2))" "$set/icon_${s}x${s}@2x.png"
+    square "$light" "$s" "$set/icon_${s}x${s}.png"
+    square "$light" "$((s * 2))" "$set/icon_${s}x${s}@2x.png"
   done
   iconutil -c icns -o "$root/packaging/icons/AppIcon.icns" "$set"
   rm -rf "$work"

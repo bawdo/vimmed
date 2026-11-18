@@ -1,5 +1,6 @@
 //! The command line (`:`) and what it runs: typing it, `crate::ex`
-//! parsing it on Enter (in reader view, only `:view` or `:reader` runs), `:w`, `:q` and `:e!` through the `Saver`, and
+//! parsing it on Enter (in reader view, only `:view`, `:reader`, `:q`, `:q!`
+//! and `:cq` run), `:w`, `:q` and `:e!` through the `Saver`, and
 //! `:s` (with `crate::substitute` finding the replacements), including the
 //! Confirm mode `:s///c` asks in.
 
@@ -48,8 +49,9 @@ impl Editor {
                 }
                 let fx = match ex::parse(&input) {
                     // Reader view is read-only: its command line runs only
-                    // the command that leaves it.
-                    Ok(ExCmd::Reader) => self.ex(ExCmd::Reader),
+                    // the command that leaves it and the quits that write
+                    // nothing (`:q` still refuses unsaved changes).
+                    Ok(cmd @ (ExCmd::Reader | ExCmd::Quit { .. } | ExCmd::CQuit)) => self.ex(cmd),
                     _ if self.reader => {
                         self.say(strings::READER_ONLY_VIEW.to_owned());
                         Effects::default()

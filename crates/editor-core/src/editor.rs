@@ -871,7 +871,7 @@ impl Editor {
             // Primary+S is `:w`, from any mode but Confirm, whose `:s///c`
             // session is one undo step a save point must not split. Reader
             // view is read-only, so it does nothing there (nor can `:w`
-            // run: reader view's command line runs only `:view`).
+            // run: reader view's command line runs only `:view` and `:q`).
             Key::Char('s') if primary && !k.mods.shift && !k.mods.alt => {
                 if self.mode == Mode::Confirm || self.reader {
                     return Effects::default();
@@ -1111,8 +1111,8 @@ impl Editor {
             Step::Cmdline => {
                 // From Visual, the selection is remembered for `'<,'>`
                 // (it stays remembered, as vim's marks do). Reader view's
-                // command line runs only `:view` (`cmdline`), which takes
-                // no range.
+                // command line runs only `:view` and `:q` (`cmdline`),
+                // which take no range.
                 self.cmdline = match self.shown_selection() {
                     Some(_) if self.reader => String::new(),
                     Some(sel) => {
