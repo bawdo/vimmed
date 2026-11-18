@@ -6,6 +6,8 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-18
+
 ### Changed
 
 - The text column grows with the window, up to 900 points (was a fixed 660). The side margins scale with the window too: each is 5% of its width or 24 points, whichever is wider, set by the new `space.page.side.ratio` token and the existing `space.page.side`. `column_width` (`space.column`) still sets the most the column can take.
@@ -69,7 +71,8 @@ All notable changes to vimmed are documented here. The format follows
 - Safe file handling: atomic saves, recovery copies, and detection of changes made on disk by other tools.
 - `~/.config/vimmed/config.toml` for vim mode, autosave, fonts, column width and theme, with a light and dark theme that follows the system.
 
-[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/bawdo/vimmed/releases/tag/v0.10.0
 [0.9.3]: https://github.com/bawdo/vimmed/releases/tag/v0.9.3
 [0.9.2]: https://github.com/bawdo/vimmed/releases/tag/v0.9.2
 [0.9.1]: https://github.com/bawdo/vimmed/releases/tag/v0.9.1
