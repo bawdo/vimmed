@@ -1,10 +1,12 @@
 //! `DocView`: the document painted into a frame, one layout object per
 //! source line, with row-range damage.
 //!
-//! Geometry, top to bottom: `space.page.top`, then the lines in a column
-//! `space.column` wide (narrower when the window is, keeping `space.page.side`
-//! each side) and centred, then the status bar (`size.status.height`) at the
-//! bottom. Line heights are whole pixels, so every damaged row belongs to
+//! Geometry, top to bottom: `space.page.top`, then the lines in a centred
+//! column, then the status bar (`size.status.height`) at the bottom. The
+//! column grows with the window up to `space.column`, keeping a margin each
+//! side of `space.page.side` or `space.page.side.ratio` of the window,
+//! whichever is wider. A table wider than the column breaks out of it,
+//! centred, up to `space.column.wide` within the same margins (`Geo::wide_w`). Line heights are whole pixels, so every damaged row belongs to
 //! exactly one line or the status bar.
 //!
 //! Only on-screen lines are shaped. A line not shaped yet counts as
@@ -322,6 +324,10 @@ pub(crate) struct Geo {
     pub(crate) height: f32,
     pub(crate) col_x: f32,
     pub(crate) col_w: f32,
+    /// The breakout column wide tables may use: never narrower than the
+    /// text column, and centred like it.
+    pub(crate) wide_x: f32,
+    pub(crate) wide_w: f32,
     pub(crate) page_top: f32,
     /// The first row of the status bar.
     pub(crate) text_bottom: f32,
@@ -1052,17 +1058,22 @@ impl DocView {
         let s = self.frame.scale;
         let width = self.frame.width_px as f32;
         let height = self.frame.height_px as f32;
-        let side = t.px(TokenId::SpacePageSide) * s;
-        let col_w = (t.px(TokenId::SpaceColumn) * s)
-            .min(width - 2.0 * side)
-            .max(1.0)
-            .round();
+        let side =
+            (t.px(TokenId::SpacePageSide) * s).max(t.ratio(TokenId::SpacePageSideRatio) * width);
+        let room = width - 2.0 * side;
+        let col_w = (t.px(TokenId::SpaceColumn) * s).min(room).max(1.0).round();
+        let wide_w = (t.px(TokenId::SpaceColumnWide) * s)
+            .min(room)
+            .round()
+            .max(col_w);
         let status = (t.px(TokenId::SizeStatusHeight) * s).round().min(height);
         Geo {
             width,
             height,
             col_x: ((width - col_w) / 2.0).max(0.0).floor(),
             col_w,
+            wide_x: ((width - wide_w) / 2.0).max(0.0).floor(),
+            wide_w,
             page_top: (t.px(TokenId::SpacePageTop) * s).round(),
             text_bottom: height - status,
         }
@@ -1209,8 +1220,9 @@ impl DocView {
             return Some(k);
         }
         let (lines, displays) = table_paint::extent(src, i, d)?;
-        let (t, s, avail) = (&self.tokens, self.frame.scale, self.geo().col_w);
-        let key = table_paint::key_of(src, &lines, avail, t, s);
+        let (t, s, g) = (&self.tokens, self.frame.scale, self.geo());
+        let room = table_paint::Room::of(&g);
+        let key = table_paint::key_of(src, &lines, room, t, s);
         if let Some(k) = self
             .tables
             .iter()
@@ -1224,7 +1236,7 @@ impl DocView {
         let old = old.map(|k| self.tables.swap_remove(k));
         self.tables.retain(|g| !overlaps(g));
         let layout = self.layout.as_mut();
-        let mut geom = table_paint::build(layout, src, lines, &displays, avail, t, s, old);
+        let mut geom = table_paint::build(layout, src, lines, &displays, room, t, s, old);
         geom.frame = f;
         self.tables.push(geom);
         Some(self.tables.len() - 1)
@@ -1392,10 +1404,8 @@ impl DocView {
         let old_image = slot.image.take();
         match (&d.deco, self.images.as_mut()) {
             (BlockDeco::Image { src, alt }, Some(images)) => {
-                images.set_limits(
-                    t.px(TokenId::SpaceColumn),
-                    t.px(TokenId::SizeImageMaxHeight),
-                );
+                // The column as laid out, so images grow and shrink with it.
+                images.set_limits(g.col_w / s, t.px(TokenId::SizeImageMaxHeight));
                 let r = images.reserve(i, src);
                 let known = r.w_pt > 0.0;
                 let boxed = known.then(|| ((r.w_pt * s).round(), (r.h_pt * s).ceil()));

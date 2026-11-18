@@ -5,7 +5,7 @@
 //! vim = true
 //! autosave = false
 //! theme = "system"      # or "light", "dark"
-//! column_width = 660
+//! column_width = 900
 //!
 //! [font]
 //! body = "Inter"
@@ -32,7 +32,8 @@
 //!
 //! Font sizes (`font.size` and every `font.size.*` token) must be above
 //! zero and at most `MAX_FONT_SIZE` points, `column_width` (`space.column`)
-//! above zero and at most `MAX_COLUMN_WIDTH`, and line heights
+//! and `space.column.wide` above zero and at most `MAX_COLUMN_WIDTH`,
+//! `space.page.side.ratio` within `SIDE_RATIOS`, and line heights
 //! (`line.height.*`) within `LINE_HEIGHTS`; anything else is a bad value.
 //!
 //! What applies where, in v0.9:
@@ -116,7 +117,7 @@ impl Default for Config {
             font_body: None,
             font_mono: None,
             font_size: 16.0,
-            column_width: 660.0,
+            column_width: 900.0,
             theme: ThemePref::System,
             tokens: TokenOverrides::default(),
         }
@@ -251,6 +252,9 @@ impl Config {
 pub const MAX_FONT_SIZE: f32 = 200.0;
 /// The widest `space.column` (`column_width`), in points.
 pub const MAX_COLUMN_WIDTH: f32 = 4000.0;
+/// The side margins (`space.page.side.ratio`, a share of the window's
+/// width on each side) allowed: above zero, and under half the window.
+pub const SIDE_RATIOS: std::ops::RangeInclusive<f32> = 0.001..=0.4;
 /// The line heights (`line.height.*`, a ratio of the font size) allowed.
 pub const LINE_HEIGHTS: std::ops::RangeInclusive<f32> = 0.5..=5.0;
 
@@ -266,8 +270,10 @@ fn within_limits(token: &str, value: &str) -> bool {
     let above_zero_to = |max: f32| n.is_finite() && n > 0.0 && n <= max;
     if token.starts_with("font.size") {
         above_zero_to(MAX_FONT_SIZE)
-    } else if token == "space.column" {
+    } else if token == "space.column" || token == "space.column.wide" {
         above_zero_to(MAX_COLUMN_WIDTH)
+    } else if token == "space.page.side.ratio" {
+        SIDE_RATIOS.contains(&n)
     } else if token.starts_with("line.height") {
         LINE_HEIGHTS.contains(&n)
     } else {
@@ -494,7 +500,7 @@ mod tests {
         assert_eq!(cfg.font_body, None);
         assert_eq!(cfg.font_mono, None);
         assert_eq!(cfg.font_size, 16.0);
-        assert_eq!(cfg.column_width, 660.0);
+        assert_eq!(cfg.column_width, 900.0);
         assert_eq!(cfg.theme, ThemePref::System);
         assert_eq!(cfg.tokens, TokenOverrides::default());
         let (t, m) = cfg.tokens(Theme::Dark);
@@ -564,7 +570,7 @@ mod tests {
         );
         assert_eq!(cfg.vim, Config::default().vim);
         assert_eq!(cfg.theme, ThemePref::System);
-        assert_eq!(cfg.column_width, 660.0);
+        assert_eq!(cfg.column_width, 900.0);
         assert_eq!(cfg.font_size, 16.0);
         for want in [
             "bad value for vim: \"yes\"",
@@ -612,26 +618,33 @@ mod tests {
         let (cfg, messages) = load(
             "column_width = 4001\n[font]\nsize = 201\n\
              [tokens]\n\"font.size.h2\" = 500\n\"space.column\" = 9000\n\
+             \"space.column.wide\" = 4001\n\"space.page.side.ratio\" = 0.5\n\
              \"line.height.code\" = 50\n",
         );
-        assert_eq!(cfg.column_width, 660.0);
+        assert_eq!(cfg.column_width, 900.0);
         assert_eq!(cfg.font_size, 16.0);
         for want in [
             "bad value for column_width: 4001",
             "bad value for font.size: 201",
             "bad value for tokens.font.size.h2: 500",
             "bad value for tokens.space.column: 9000",
+            "bad value for tokens.space.column.wide: 4001",
+            "bad value for tokens.space.page.side.ratio: 0.5",
             "bad value for tokens.line.height.code: 50",
         ] {
             assert!(messages.iter().any(|m| m == want), "{want}: {messages:?}");
         }
         assert_eq!(cfg.tokens(Theme::Light).0, Tokens::defaults(Theme::Light));
         // The ceilings themselves are fine.
-        let (cfg, messages) =
-            load("column_width = 4000\n[font]\nsize = 200\n[tokens]\n\"line.height.body\" = 5\n");
+        let (cfg, messages) = load(
+            "column_width = 4000\n[font]\nsize = 200\n[tokens]\n\"line.height.body\" = 5\n\
+                 \"space.column.wide\" = 4000\n\"space.page.side.ratio\" = 0.4\n",
+        );
         assert!(messages.is_empty(), "{messages:?}");
         let (t, _) = cfg.tokens(Theme::Light);
         assert_eq!(t.px(TokenId::SpaceColumn), 4000.0);
+        assert_eq!(t.px(TokenId::SpaceColumnWide), 4000.0);
+        assert_eq!(t.ratio(TokenId::SpacePageSideRatio), 0.4);
         assert_eq!(t.px(TokenId::FontSize), 200.0);
         assert_eq!(t.ratio(TokenId::LineHeightBody), 5.0);
     }

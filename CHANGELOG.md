@@ -6,6 +6,16 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The text column grows with the window, up to 900 points (was a fixed 660). The side margins scale with the window too: each is 5% of its width or 24 points, whichever is wider, set by the new `space.page.side.ratio` token and the existing `space.page.side`. `column_width` (`space.column`) still sets the most the column can take.
+- A table wider than the text column breaks out of it, centred, up to the new `space.column.wide` token (1600 points by default) within the same margins. A table that fits keeps its natural width at the column's left edge and is never stretched.
+- When a table still doesn't fit, each column keeps room for its longest word and the space left over goes to the columns that want more, so a short column such as an ID no longer wraps because a long one sits next to it. Words break only when the longest words alone don't fit.
+
+### Fixed
+
+- Images now size to the text column as laid out, not to `space.column`, so they grow and shrink with the window instead of staying at the configured width.
+
 ## [0.9.3] - 2026-11-18
 
 ### Added

@@ -71,13 +71,13 @@ fn pixel(v: &editor_render::view::DocView, x: usize, y: usize) -> [u8; 4] {
 fn reserve_reads_header_without_decoding() {
     let t = Tokens::defaults(Theme::Light);
     let dir = TempDir::new();
-    write_png(dir.path(), "img1.png", 1200, 700);
+    write_png(dir.path(), "img1.png", 1800, 700);
     let (w, _) = waker();
     let mut images = Images::new(dir.path(), w);
     let slot = images.reserve(3, "img1.png");
     assert_eq!(slot.w_pt, t.px(TokenId::SpaceColumn));
     assert!(slot.h_pt <= t.px(TokenId::SizeImageMaxHeight));
-    assert_eq!(slot.h_pt, 700.0_f32 * slot.w_pt / 1200.0);
+    assert_eq!(slot.h_pt, 700.0_f32 * slot.w_pt / 1800.0);
     assert!(matches!(slot.state, ImageState::Pending), "not decoded yet");
     assert_eq!(images.pending(), 1);
 
@@ -108,7 +108,12 @@ fn decode_completes_without_relayout() {
     v.take_damage();
 
     let heights: Vec<f32> = (0..3).map(|i| v.line_height_px(i).unwrap()).collect();
-    let col = t.px(TokenId::SpaceColumn);
+    // As wide as the column the window leaves, not `space.column`.
+    let col = common::column(&t, 2.0).1 / 2.0;
+    assert!(
+        col < t.px(TokenId::SpaceColumn),
+        "the window narrows the column"
+    );
     let want = (700.0 * col / 1200.0 * 2.0).ceil();
     assert_eq!(heights[1], want, "the image line reserves its final size");
     let page_top = (t.px(TokenId::SpacePageTop) * 2.0).round();
@@ -155,8 +160,7 @@ fn image_draw_changes_only_its_own_rect() {
     let after = v.frame().pixmap.data();
     let width = v.frame().width_px as usize;
 
-    let col_w = (t.px(TokenId::SpaceColumn) * 2.0).round();
-    let col_x = ((W_PT * 2.0 - col_w) / 2.0).floor() as usize;
+    let col_x = common::column(&t, 2.0).0 as usize;
     let page_top = (t.px(TokenId::SpacePageTop) * 2.0).round();
     let top = (page_top + v.line_height_px(0).unwrap()) as usize;
     let (bw, bh) = (80, 60);
@@ -188,7 +192,7 @@ fn translucent_image_blends_with_the_page() {
     v.set_images(dir.path(), w);
     v.paint_all(&src);
     until("the image to decode", || v.poll_async());
-    let col_x = ((W_PT * 2.0 - (t.px(TokenId::SpaceColumn) * 2.0).round()) / 2.0).floor() as usize;
+    let col_x = common::column(&t, 2.0).0 as usize;
     let page_top = (t.px(TokenId::SpacePageTop) * 2.0).round();
     let top = (page_top + v.line_height_px(0).unwrap()) as usize;
     let px = pixel(&v, col_x + 40, top + 30);
@@ -269,7 +273,8 @@ fn missing_shows_placeholder() {
     let ph = t.color(TokenId::ColorImagePlaceholder);
     let y = t.px(TokenId::SpacePageTop) as usize + 1;
     // Far right of the column, clear of any label text.
-    let x = (W_PT / 2.0 + t.px(TokenId::SpaceColumn) / 2.0) as usize - 2;
+    let (cx, cw) = common::column(&t, 1.0);
+    let x = (cx + cw) as usize - 2;
     let second = y + v.line_height_px(0).unwrap() as usize;
     for row in [y, second] {
         let px = pixel(&v, x, row);
@@ -281,7 +286,7 @@ fn missing_shows_placeholder() {
     }
     // The label text sits on the placeholder: some pixel in the first line differs from it.
     let h0 = v.line_height_px(0).unwrap() as usize;
-    let left = (W_PT / 2.0 - t.px(TokenId::SpaceColumn) / 2.0) as usize;
+    let left = common::column(&t, 1.0).0 as usize;
     let inked = (left..left + 120)
         .any(|xx| (y - 1..y - 1 + h0).any(|yy| pixel(&v, xx, yy)[..3] != [ph.r, ph.g, ph.b]));
     assert!(inked, "the 'image not found' label is drawn");
@@ -333,7 +338,7 @@ fn pending_resample_keeps_the_alt_label() {
     assert!(!v.has_scaled_image(1));
     let ph = t.color(TokenId::ColorImagePlaceholder);
     let top = t.px(TokenId::SpacePageTop).round() as usize + v.line_height_px(0).unwrap() as usize;
-    let left = (W_PT / 2.0 - t.px(TokenId::SpaceColumn) / 2.0) as usize;
+    let left = common::column(&t, 1.0).0 as usize;
     let label_rows = top..top + t.px(TokenId::FontSize) as usize * 2;
     let inked = |v: &editor_render::view::DocView, colour: [u8; 3]| {
         (left..left + 120).any(|x| label_rows.clone().any(|y| pixel(v, x, y)[..3] != colour))
@@ -377,7 +382,7 @@ fn image_resample_not_on_ui_thread() {
         "no scaled copy straight after relayout"
     );
     let height = v.line_height_px(1).unwrap();
-    let col = t.px(TokenId::SpaceColumn);
+    let col = common::column(&t, 1.0).1;
     assert_eq!(height, (700.0 * col / 1200.0).ceil(), "final box height");
     let top = t.px(TokenId::SpacePageTop).round() + v.line_height_px(0).unwrap();
     let mid = (top + height / 2.0) as usize;
@@ -510,4 +515,25 @@ fn scroll_back_does_not_resample_on_ui_thread() {
         resampled,
         "nothing was resampled on this thread"
     );
+}
+
+#[test]
+fn images_follow_the_column_as_the_window_widens() {
+    let t = Tokens::defaults(Theme::Light);
+    let dir = TempDir::new();
+    write_png(dir.path(), "wide.png", 1800, 700);
+    let (w, _) = waker();
+    let src = Fake::new(&["alpha", "![pic](wide.png)", "omega"], t.clone());
+    let mut v = view(&t, 1.0);
+    v.set_images(dir.path(), w);
+    v.paint_all(&src);
+    let narrow = common::column(&t, 1.0).1;
+    assert_eq!(v.line_height_px(1), Some((700.0 * narrow / 1800.0).ceil()));
+
+    // Wide enough for the whole `space.column`: the image grows with it.
+    v.resize(1400.0, H_PT, 1.0);
+    v.paint_all(&src);
+    let col = t.px(TokenId::SpaceColumn);
+    assert!(col > narrow);
+    assert_eq!(v.line_height_px(1), Some((700.0 * col / 1800.0).ceil()));
 }

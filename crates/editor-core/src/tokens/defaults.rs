@@ -72,7 +72,11 @@ token_table! {
     LineHeightCode, "line.height.code", Ratio, "1.4", "1.4";
 
     // Spacing and sizes.
-    SpaceColumn, "space.column", Px, "660", "660";
+    // The prose column grows with the window up to `space.column`, keeping
+    // a side margin of `space.page.side` or `space.page.side.ratio` of the
+    // window, whichever is wider. Tables wider than the prose column break
+    // out of it, up to `space.column.wide` (within the same margins).
+    SpaceColumn, "space.column", Px, "900", "900";
     SpacePageTop, "space.page.top", Px, "40", "40";
     SpacePageSide, "space.page.side", Px, "24", "24";
     SpaceParagraph, "space.paragraph", Px, "14", "14";
@@ -102,4 +106,8 @@ token_table! {
     // The left-margin gutter that block prefixes (`#`, `>`, list markers) hang
     // in, as iA Writer does. 0 turns hanging off.
     SizeHangingPrefix, "size.hanging_prefix", Px, "0", "0";
+
+    // Fluid page width (appended: rows are never reordered or renamed).
+    SpacePageSideRatio, "space.page.side.ratio", Ratio, "0.05", "0.05";
+    SpaceColumnWide, "space.column.wide", Px, "1600", "1600";
 }
