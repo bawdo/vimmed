@@ -6,6 +6,8 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-19
+
 ### Changed
 
 - A code block wider than the text column breaks out of it the way tables do, up to `space.column.wide`, so long lines stop wrapping when the window has room. The whole block shares one box, as wide as its longest line; a block that fits keeps the column's width, and lines longer than the breakout still wrap.
@@ -76,7 +78,8 @@ All notable changes to vimmed are documented here. The format follows
 - Safe file handling: atomic saves, recovery copies, and detection of changes made on disk by other tools.
 - `~/.config/vimmed/config.toml` for vim mode, autosave, fonts, column width and theme, with a light and dark theme that follows the system.
 
-[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/bawdo/vimmed/releases/tag/v0.10.1
 [0.10.0]: https://github.com/bawdo/vimmed/releases/tag/v0.10.0
 [0.9.3]: https://github.com/bawdo/vimmed/releases/tag/v0.9.3
 [0.9.2]: https://github.com/bawdo/vimmed/releases/tag/v0.9.2
