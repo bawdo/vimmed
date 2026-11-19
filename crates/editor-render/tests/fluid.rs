@@ -1,6 +1,7 @@
 //! The fluid page: the text column grows with the window up to
-//! `space.column`, its margins scale with the window, and tables wider than
-//! the column break out of it, centred, up to `space.column.wide`.
+//! `space.column`, its margins scale with the window, and tables and code
+//! blocks wider than the column break out of it to the right, keeping its
+//! left edge, up to `space.column.wide` and the right margin.
 
 mod common;
 
@@ -159,7 +160,7 @@ fn a_narrow_table_stays_at_the_column_left_edge() {
 }
 
 #[test]
-fn a_wide_table_breaks_out_of_the_column_centred() {
+fn a_wide_table_breaks_out_of_the_column_to_the_right() {
     let t = with(&[("color.table.border", "#FF0000")]);
     let mut src = Fake::new(WIDE, t.clone());
     src.cursor = Pos { line: 5, col: 0 };
@@ -169,21 +170,13 @@ fn a_wide_table_breaks_out_of_the_column_centred() {
 
     let (col_x, col_w) = column_in(&t, w_pt, S);
     let (wide_x, wide_w) = wide_in(&t, w_pt, S);
+    assert_eq!(wide_x, col_x, "the breakout starts where the text does");
     let runs = red_runs(&v, mid(&v, &t, 3));
     assert_eq!(runs.len(), 4, "three columns, four verticals: {runs:?}");
     let (left, right) = (runs[0].start as f32, runs[3].end as f32);
-    assert!(
-        left < col_x,
-        "starts left of the column ({left} vs {col_x})"
-    );
+    assert_eq!(left, col_x, "starts at the text's left edge");
     assert!(right > col_x + col_w, "ends right of the column");
-    assert!(
-        left >= wide_x && right <= wide_x + wide_w,
-        "inside the breakout"
-    );
-    let centre = (left + right) / 2.0;
-    let page = (w_pt * S) / 2.0;
-    assert!((centre - page).abs() <= 1.0, "centred: {centre} vs {page}");
+    assert!(right <= wide_x + wide_w, "inside the breakout");
 
     // Room to spare, so no cell wraps: rows are as tall as a narrow table's.
     let mut narrow = Fake::new(NARROW, t.clone());
@@ -216,18 +209,20 @@ fn a_click_on_a_broken_out_cell_hits_that_cell() {
     let w_pt = 2400.0;
     let (mut v, _) = recording(&t, w_pt);
     v.paint_all(&src);
-    let (col_x, _) = column_in(&t, w_pt, S);
+    let (col_x, col_w) = column_in(&t, w_pt, S);
     let y = mid(&v, &t, 3);
     let runs = red_runs(&v, y);
-    // Just inside the first cell, which sits left of the text column.
-    let x = runs[0].end as f32 + 14.0;
-    assert!(x < col_x, "the point is in the breakout margin");
+    // Right of the text column, inside the table.
+    let x = col_x + col_w + 10.0;
+    assert!(x < runs[3].start as f32, "the point is inside the table");
+    let k = runs.iter().rposition(|r| r.end as f32 <= x).unwrap();
     let hit = v.hit_test(x / S, y as f32 / S).expect("a hit");
     assert_eq!(hit.pos.line, 3);
-    let first_cell = WIDE[3].find("a cell").unwrap();
+    // Cell `k` runs from just after the `k + 1`th pipe to the next one.
+    let pipes: Vec<usize> = WIDE[3].match_indices('|').map(|(i, _)| i).collect();
     assert!(
-        (first_cell..first_cell + 3).contains(&hit.pos.col),
-        "at the first cell's start, got {:?}",
+        (pipes[k]..pipes[k + 1]).contains(&hit.pos.col),
+        "in cell {k}, got {:?}",
         hit.pos
     );
 }
@@ -257,4 +252,176 @@ fn a_short_column_keeps_its_word_when_the_table_must_shrink() {
         .find(|l| l.text == long.trim_end())
         .unwrap();
     assert!(desc.rows.len() > 1, "the long cell wraps instead");
+}
+
+/// A code line of about 1150 pixels of mono text: wider than the 900 column,
+/// inside the 1530 breakout of a 2400 point window.
+fn long_code() -> String {
+    format!("let wide = {};", "x".repeat(108))
+}
+
+fn code_doc(code: &str) -> Vec<String> {
+    ["Intro", "```", "short()", code, "```", "", "after"]
+        .iter()
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// The code background's run on line `i`: one box, so one run.
+fn code_box(v: &DocView, t: &Tokens, i: usize) -> Range<u32> {
+    let runs = red_runs(v, mid(v, t, i));
+    assert!(!runs.is_empty(), "line {i} paints the code background");
+    runs.first().unwrap().start..runs.last().unwrap().end
+}
+
+fn code_view(lines: &[String], w_pt: f32) -> (DocView, Tokens, Rc<RefCell<Vec<Laid>>>, Fake) {
+    let t = with(&[("color.code.bg", "#FF0000")]);
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let mut src = Fake::new(&refs, t.clone());
+    src.cursor = Pos {
+        line: lines.len() - 1,
+        col: 0,
+    };
+    let (mut v, laid) = recording(&t, w_pt);
+    v.paint_all(&src);
+    (v, t, laid, src)
+}
+
+#[test]
+fn a_narrow_code_block_keeps_the_column_width() {
+    let lines = code_doc("let a = 1;");
+    let w_pt = 2400.0;
+    let (v, t, _, _) = code_view(&lines, w_pt);
+    let (col_x, col_w) = column_in(&t, w_pt, S);
+    let b = code_box(&v, &t, 3);
+    // The rounded corners only cut the fence lines, so the middle is full.
+    assert_eq!(b, col_x as u32..(col_x + col_w) as u32);
+}
+
+#[test]
+fn a_wide_code_block_grows_to_the_right_without_wrapping() {
+    let code = long_code();
+    let lines = code_doc(&code);
+    let w_pt = 2400.0;
+    let (v, t, laid, _) = code_view(&lines, w_pt);
+    let (col_x, col_w) = column_in(&t, w_pt, S);
+    let (_, wide_w) = wide_in(&t, w_pt, S);
+    let b = code_box(&v, &t, 3);
+    assert_eq!(b.start, col_x as u32, "starts at the text's left edge");
+    assert!(b.end as f32 > col_x + col_w, "ends right of the column");
+    assert!(b.end as f32 <= col_x + wide_w, "inside the breakout");
+    let l = laid.borrow();
+    let line = l.iter().rev().find(|l| l.text == code).unwrap();
+    assert_eq!(line.rows.len(), 1, "the long line does not wrap");
+    drop(l);
+    // One box for the whole block: the short line's is as wide.
+    assert_eq!(code_box(&v, &t, 2), b, "every line shares the box");
+    let pad = (t.px(TokenId::SpaceCodePad) * S).round();
+    let width = (b.end - b.start) as f32;
+    assert_eq!(laid_width(&laid, "short()"), width - 2.0 * pad);
+}
+
+#[test]
+fn a_very_long_code_line_wraps_at_the_breakout() {
+    let code = format!("let wide = {};", "x".repeat(400));
+    let lines = code_doc(&code);
+    let w_pt = 2400.0;
+    let (v, t, laid, _) = code_view(&lines, w_pt);
+    let (col_x, wide_w) = wide_in(&t, w_pt, S);
+    let b = code_box(&v, &t, 3);
+    assert_eq!(
+        b,
+        col_x as u32..(col_x + wide_w) as u32,
+        "the whole breakout"
+    );
+    let l = laid.borrow();
+    let line = l.iter().rev().find(|l| l.text == code).unwrap();
+    assert!(line.rows.len() > 1, "still too long, so it wraps");
+}
+
+#[test]
+fn a_wide_code_block_in_a_narrow_window_stays_in_the_column() {
+    let lines = code_doc(&long_code());
+    let w_pt = 700.0;
+    let (v, t, _, _) = code_view(&lines, w_pt);
+    let (col_x, col_w) = column_in(&t, w_pt, S);
+    assert_eq!(code_box(&v, &t, 3), col_x as u32..(col_x + col_w) as u32);
+}
+
+#[test]
+fn lengthening_a_code_line_widens_the_whole_block() {
+    let lines = code_doc("let a = 1;");
+    let w_pt = 2400.0;
+    let (mut v, t, _, mut src) = code_view(&lines, w_pt);
+    let (col_x, col_w) = column_in(&t, w_pt, S);
+    assert_eq!(code_box(&v, &t, 2).end, (col_x + col_w) as u32);
+    src.set_line(3, &long_code());
+    v.paint_lines(&src, 3..4);
+    let wide = code_box(&v, &t, 3);
+    assert!(wide.end as f32 > col_x + col_w, "the edited line widens");
+    assert_eq!(code_box(&v, &t, 2), wide, "and so does the line above it");
+    // Back to short: the box narrows again.
+    src.set_line(3, "let a = 1;");
+    v.paint_lines(&src, 3..4);
+    assert_eq!(code_box(&v, &t, 2).end, (col_x + col_w) as u32);
+}
+
+#[test]
+fn a_click_on_broken_out_code_hits_its_column() {
+    let code = long_code();
+    let lines = code_doc(&code);
+    let w_pt = 2400.0;
+    let (v, t, _, _) = code_view(&lines, w_pt);
+    let (col_x, col_w) = column_in(&t, w_pt, S);
+    let y = mid(&v, &t, 3) as f32;
+    let x = col_x + col_w + 50.0;
+    let hit = v.hit_test(x / S, y / S).expect("a hit");
+    assert_eq!(hit.pos.line, 3);
+    let left = v.text_left_px(3).unwrap();
+    let per_char = (code_box(&v, &t, 3).end as f32 - left) / code.len() as f32;
+    assert!(
+        hit.pos.col > (col_w / per_char) as usize,
+        "past what the column holds, got {:?}",
+        hit.pos
+    );
+}
+
+#[test]
+fn an_edit_in_a_code_block_measures_only_the_edited_line() {
+    let mut lines = vec!["Intro".to_string(), "```".to_string()];
+    lines.extend((0..200).map(|k| format!("line_{k}();")));
+    lines.extend(["```".to_string(), "after".to_string()]);
+    let (mut v, _, laid, mut src) = code_view(&lines, 2400.0);
+    // Measuring lays a line out unwrapped, far wider than any window.
+    let measured = |laid: &Rc<RefCell<Vec<Laid>>>| {
+        let l = laid.borrow();
+        l.iter()
+            .filter(|l| l.width_px > 100_000.0)
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(measured(&laid).len(), 200, "every content line once");
+    laid.borrow_mut().clear();
+    src.set_line(100, "line_100(edited);");
+    v.paint_lines(&src, 100..101);
+    assert_eq!(measured(&laid), ["line_100(edited);"]);
+}
+
+#[test]
+fn lengthening_a_code_line_off_screen_widens_the_lines_on_screen() {
+    let mut lines = vec!["Intro".to_string(), "```".to_string()];
+    lines.extend((0..200).map(|k| format!("line_{k}();")));
+    lines.extend(["```".to_string(), "after".to_string()]);
+    let w_pt = 2400.0;
+    let (mut v, t, _, mut src) = code_view(&lines, w_pt);
+    let (col_x, col_w) = column_in(&t, w_pt, S);
+    assert_eq!(code_box(&v, &t, 3).end, (col_x + col_w) as u32);
+    // A substitution far down the block, as `:s` makes with the cursor up top.
+    src.cursor = Pos { line: 0, col: 0 };
+    src.set_line(150, &long_code());
+    v.paint_lines(&src, 150..151);
+    assert!(
+        code_box(&v, &t, 3).end as f32 > col_x + col_w,
+        "the box on screen widens"
+    );
 }

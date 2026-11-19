@@ -5,6 +5,7 @@
 //! Every colour, size and spacing comes from `editor_core::tokens`.
 
 mod code_track;
+mod code_width;
 pub mod damage;
 pub mod fonts;
 pub mod frame;

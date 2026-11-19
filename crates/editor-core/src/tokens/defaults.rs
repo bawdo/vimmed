@@ -74,8 +74,9 @@ token_table! {
     // Spacing and sizes.
     // The prose column grows with the window up to `space.column`, keeping
     // a side margin of `space.page.side` or `space.page.side.ratio` of the
-    // window, whichever is wider. Tables wider than the prose column break
-    // out of it, up to `space.column.wide` (within the same margins).
+    // window, whichever is wider. Tables and code blocks wider than the
+    // prose column break out of it to the right, keeping its left edge, up
+    // to `space.column.wide` (within the right margin).
     SpaceColumn, "space.column", Px, "900", "900";
     SpacePageTop, "space.page.top", Px, "40", "40";
     SpacePageSide, "space.page.side", Px, "24", "24";
