@@ -36,6 +36,17 @@ cargo xtask linux-check    # build, test and smoke run in the Linux container (n
 The binaries are built as `launcher` (the command you run) and `window` (the editor itself,
 which the launcher starts). Packaging renames them.
 
+`make help` lists the chores for working on the code. Each is a thin call to cargo or
+`cargo xtask`. The ones you'll reach for most:
+
+```sh
+make doctor                # which of the tools in CONTRIBUTING.md are installed
+make run FILE=notes.md     # build and run from target/release, installing nothing
+make verify                # the full gate CI runs (cargo xtask ci)
+make audit                 # cargo deny check, as CI does
+make fuzz TARGET=ex_command TIME=60   # a short fuzz run (pinned nightly and cargo-fuzz)
+```
+
 ## macOS install
 
 On Apple silicon you can skip the build: download the `_macos_arm64.zip` asset from the latest

@@ -8,6 +8,10 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [0.10.1] - 2026-11-19
 
+### Added
+
+- A `Makefile` of chores for working on the code: `make help` lists them, including `build`, `run` (the release build straight from `target/release`, nothing installed), `verify` (`cargo xtask ci`), `audit` (`cargo deny check`), `fuzz TARGET=<name>` and `doctor` (which of the tools CONTRIBUTING.md lists are installed). Each is a thin call to cargo or `cargo xtask`.
+
 ### Changed
 
 - A code block wider than the text column breaks out of it the way tables do, up to `space.column.wide`, so long lines stop wrapping when the window has room. The whole block shares one box, as wide as its longest line; a block that fits keeps the column's width, and lines longer than the breakout still wrap.
