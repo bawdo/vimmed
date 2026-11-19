@@ -118,14 +118,7 @@ impl CodeTracks {
         d: &LineDisplay,
     ) -> Option<(BlockId, usize, LineSpans)> {
         self.hl.as_ref()?;
-        let e = match self.extents.iter().position(|e| e.lines.contains(&i)) {
-            Some(k) => k,
-            None => {
-                let e = self.find(src, i, d)?;
-                self.extents.push(e);
-                self.extents.len() - 1
-            }
-        };
+        let e = self.extent_of(src, i, d)?;
         let e = &self.extents[e];
         if !e.content.contains(&i) {
             return None;
@@ -133,6 +126,32 @@ impl CodeTracks {
         let id = e.id?;
         let k = i - e.content.start;
         Some((id, k, self.line_classes(id, k)))
+    }
+
+    /// The lines of the code block holding line `i` (displayed as `d`): all
+    /// of them, fences included, then the content between the fences.
+    /// `None` when the line is not in a code block. Found once a frame,
+    /// with highlighting on or off.
+    pub(crate) fn extent(
+        &mut self,
+        src: &dyn ViewSource,
+        i: usize,
+        d: &LineDisplay,
+    ) -> Option<(Range<usize>, Range<usize>)> {
+        let k = self.extent_of(src, i, d)?;
+        let e = &self.extents[k];
+        Some((e.lines.clone(), e.content.clone()))
+    }
+
+    /// The index in `extents` of the block holding line `i`, found this
+    /// frame or now.
+    fn extent_of(&mut self, src: &dyn ViewSource, i: usize, d: &LineDisplay) -> Option<usize> {
+        if let Some(k) = self.extents.iter().position(|e| e.lines.contains(&i)) {
+            return Some(k);
+        }
+        let e = self.find(src, i, d)?;
+        self.extents.push(e);
+        Some(self.extents.len() - 1)
     }
 
     /// The classes of line `k` of tracked block `id` as things stand.
@@ -169,8 +188,9 @@ impl CodeTracks {
         out
     }
 
-    /// Finds the block holding line `i` and makes sure its current text is
-    /// requested (only when its language has a highlighter).
+    /// Finds the block holding line `i` and, with highlighting on, makes
+    /// sure its current text is requested (only when its language has a
+    /// highlighter).
     ///
     /// Only fence-shaped lines (` ``` ` or `~~~` at column 0, as the block
     /// parser requires) can start or end a block, so the scan reads
@@ -242,7 +262,7 @@ impl CodeTracks {
         let content = start..content_end.max(start);
         let lines = open.unwrap_or(top)..end + 1;
         let lang = open.map_or("", |o| fence_lang(src.line(o))).to_owned();
-        let id = (language_for(&lang).is_some() && !content.is_empty())
+        let id = (self.hl.is_some() && language_for(&lang).is_some() && !content.is_empty())
             .then(|| self.track(src, &content, lang));
         Some(Extent { lines, content, id })
     }

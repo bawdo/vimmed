@@ -11,9 +11,10 @@
 //! `space.table.pad` in from the verticals and `space.table.pad.y` from the
 //! row's edges, aligned per column (`Align::None` renders left).
 //!
-//! Width: a table is as wide as its cells need, never stretched. One that
-//! fits the text column starts at its left edge; a wider one breaks out of
-//! it, centred, up to the breakout column (`Room`). When even that is too
+//! Width: a table is as wide as its cells need, never stretched. It always
+//! starts at the text column's left edge; a table wider than the column
+//! breaks out of it to the right, up to the breakout column (`Room`). When
+//! even that is too
 //! narrow, columns shrink as a browser's automatic table layout does: each
 //! keeps its longest word (its min-content width) and the room left over is
 //! shared in proportion to how much more each column wants, so a short
@@ -34,13 +35,11 @@ use crate::paint::{blend, fill, styled_line};
 use crate::view::{Cached, Geo, lay};
 
 /// Where a table may sit, in pixels: the text column's width, and the
-/// breakout column's width and left edge relative to the text column's
-/// (zero or less).
+/// breakout column's, both from the text column's left edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Room {
     pub(crate) col: f32,
     pub(crate) wide: f32,
-    pub(crate) left: f32,
 }
 
 impl Room {
@@ -48,7 +47,6 @@ impl Room {
         Room {
             col: g.col_w,
             wide: g.wide_w,
-            left: (g.wide_x - g.col_x).min(0.0),
         }
     }
 }
@@ -74,12 +72,12 @@ pub(crate) struct Row {
 }
 
 /// The geometry of one table, in pixels relative to the text column's left
-/// edge (negative for a table that breaks out of it).
+/// edge.
 pub(crate) struct TableGeom {
     /// The table's lines, header to last row.
     pub(crate) lines: Range<usize>,
     /// What the geometry was made from: every row's source, then the sizes.
-    key: (Vec<String>, [f32; 7]),
+    key: (Vec<String>, [f32; 6]),
     /// The x of each column's left vertical, then the right edge's vertical.
     /// The first is the table's left edge.
     pub(crate) verticals: Vec<f32>,
@@ -231,16 +229,16 @@ pub(crate) fn key_of(
     room: Room,
     t: &Tokens,
     s: f32,
-) -> (Vec<String>, [f32; 7]) {
+) -> (Vec<String>, [f32; 6]) {
     let z = Sizes::new(t, s);
     (
         lines.clone().map(|j| src.line(j).to_owned()).collect(),
-        [room.col, room.wide, room.left, s, z.pad, z.pad_y, z.border],
+        [room.col, room.wide, s, z.pad, z.pad_y, z.border],
     )
 }
 
 impl TableGeom {
-    pub(crate) fn matches(&self, key: &(Vec<String>, [f32; 7])) -> bool {
+    pub(crate) fn matches(&self, key: &(Vec<String>, [f32; 6])) -> bool {
         self.key == *key
     }
 
@@ -339,15 +337,9 @@ pub(crate) fn build(
     let n = natural.len();
     let chrome = (n as f32 + 1.0) * z.border + n as f32 * 2.0 * z.pad;
     let inner = column_widths(&natural, &least, (avail - chrome).max(n as f32));
-    let full = chrome + inner.iter().sum::<f32>();
-    // Inside the text column from its left edge; wider, centred on it.
-    let dx = if full <= room.col {
-        0.0
-    } else {
-        ((room.col - full) / 2.0).floor().max(room.left)
-    };
+    // From the text column's left edge, however wide.
     let mut verticals = Vec::with_capacity(n + 1);
-    let mut x = dx;
+    let mut x = 0.0;
     for w in &inner {
         verticals.push(x);
         x += z.border + 2.0 * z.pad + w;

@@ -334,15 +334,16 @@ pub fn column_in(t: &Tokens, w_pt: f32, scale: f32) -> (f32, f32) {
 }
 
 /// The breakout column's left edge and width in pixels for a window `w_pt`
-/// points wide, as `DocView` computes them.
+/// points wide, as `DocView` computes them: from the text column's left
+/// edge to the right margin, up to `space.column.wide`.
 pub fn wide_in(t: &Tokens, w_pt: f32, scale: f32) -> (f32, f32) {
     let width = (w_pt * scale).round();
-    let (_, col_w) = column_in(t, w_pt, scale);
+    let (col_x, col_w) = column_in(t, w_pt, scale);
     let wide_w = (t.px(TokenId::SpaceColumnWide) * scale)
-        .min(width - 2.0 * side(t, width, scale))
-        .round()
+        .min(width - side(t, width, scale) - col_x)
+        .floor()
         .max(col_w);
-    (((width - wide_w) / 2.0).max(0.0).floor(), wide_w)
+    (col_x, wide_w)
 }
 
 /// The page's side margin in pixels for a frame `width` pixels wide.

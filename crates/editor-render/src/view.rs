@@ -5,9 +5,11 @@
 //! column, then the status bar (`size.status.height`) at the bottom. The
 //! column grows with the window up to `space.column`, keeping a margin each
 //! side of `space.page.side` or `space.page.side.ratio` of the window,
-//! whichever is wider. A table wider than the column breaks out of it,
-//! centred, up to `space.column.wide` within the same margins (`Geo::wide_w`). Line heights are whole pixels, so every damaged row belongs to
-//! exactly one line or the status bar.
+//! whichever is wider. A table or code block wider than the column breaks
+//! out of it to the right, keeping the column's left edge, up to
+//! `space.column.wide` and the right margin (`Geo::wide_w`). Line heights
+//! are whole pixels, so every damaged row belongs to exactly one line or
+//! the status bar.
 //!
 //! Only on-screen lines are shaped. A line not shaped yet counts as
 //! `font.size * line.height.body` tall. An unchanged line keeps its layout
@@ -17,7 +19,8 @@
 //! so the lines below an edit keep their layouts and resampled images.
 //!
 //! Blocks: code blocks sit on a `color.code.bg` box with `radius.code`
-//! corners, their text `space.code.pad` in, the language label top right on
+//! corners, one width for the whole block (`code_width`), their text
+//! `space.code.pad` in, the language label top right on
 //! the opening fence and, when the block is unclosed, a `size.unclosed.bar`
 //! accent on its last line; with highlighting on (`set_highlighting`) their
 //! content is coloured as results land. Tables are a grid laid out a whole
@@ -63,6 +66,7 @@ use editor_core::tokens::{TokenId, Tokens};
 use editor_core::view_model::{CaretShape, StatusModel, ViewSource};
 
 use crate::code_track::CodeTracks;
+use crate::code_width::{self, CodeWidth};
 use crate::damage::Damage;
 use crate::frame::Frame;
 use crate::images::{ImageSlot, ImageState, Images, Scaled};
@@ -250,6 +254,8 @@ struct LineSlot {
     /// The language label of an opening fence.
     code_label: Option<Cached>,
     code: Option<CodeLine>,
+    /// For a code block line: the block's box width in pixels.
+    code_w: Option<f32>,
     /// For a rendered table row: the table's first line.
     table: Option<usize>,
     /// An input method's composition laid into the text at the caret: its
@@ -273,6 +279,7 @@ impl LineSlot {
             label: None,
             code_label: None,
             code: None,
+            code_w: None,
             table: None,
             preedit: None,
             overlay: Overlay::default(),
@@ -287,6 +294,7 @@ impl LineSlot {
         self.label = None;
         self.code_label = None;
         self.code = None;
+        self.code_w = None;
         self.table = None;
         self.preedit = None;
         self.overlay = Overlay::default();
@@ -324,9 +332,8 @@ pub(crate) struct Geo {
     pub(crate) height: f32,
     pub(crate) col_x: f32,
     pub(crate) col_w: f32,
-    /// The breakout column wide tables may use: never narrower than the
-    /// text column, and centred like it.
-    pub(crate) wide_x: f32,
+    /// The breakout column wide tables and code blocks may use: it starts
+    /// at the text column's left edge and is never narrower than it.
     pub(crate) wide_w: f32,
     pub(crate) page_top: f32,
     /// The first row of the status bar.
@@ -363,6 +370,8 @@ pub struct DocView {
     code: CodeTracks,
     /// Table geometry for the tables painted recently.
     tables: Vec<TableGeom>,
+    /// Box widths for the code blocks painted recently.
+    codes: Vec<CodeWidth>,
     /// Counts paints, so per-frame caches know when they are stale.
     frame_no: u64,
     /// Where the source's line shifts stood at the last sync (`None` before
@@ -414,6 +423,7 @@ impl DocView {
             image_marked: false,
             code: CodeTracks::new(),
             tables: Vec::new(),
+            codes: Vec::new(),
             frame_no: 0,
             shift_mark: None,
             reader: false,
@@ -457,6 +467,7 @@ impl DocView {
             }
             self.status_cache.clear();
             self.tables.clear();
+            self.codes.clear();
             if old_scale > 0.0 {
                 self.scroll = (self.scroll * scale / old_scale).round();
             }
@@ -491,9 +502,10 @@ impl DocView {
             &(0.0..g.text_bottom),
         );
         self.paint_down_from(src, 0, g.page_top - self.scroll);
-        // Only the tables on screen keep their geometry.
+        // Only the tables and code blocks on screen keep their geometry.
         let f = self.frame_no;
         self.tables.retain(|t| t.frame == f);
+        self.codes.retain(|c| c.frame == f);
         self.paint_overlays();
         self.last_status = None;
         self.paint_status(src);
@@ -509,7 +521,9 @@ impl DocView {
     /// shape.
     ///
     /// An edit in or next to a rendered table repaints the whole table: its
-    /// column widths come from every row, so any row can move them all.
+    /// column widths come from every row, so any row can move them all. An
+    /// edit that changes a code block's width, on screen or off, repaints
+    /// from the block's first line.
     ///
     /// Reader view, the help overlay or the table picker coming, going or
     /// changing repaints it all (`paint_all`); while one shows, it is
@@ -528,6 +542,7 @@ impl DocView {
         let moved = self.sync(src);
         let count = self.lines.len();
         let first_edit = lines.start;
+        let edited = lines.clone();
         let mut todo: Vec<usize> = lines.collect();
         for i in near_table {
             for j in i.saturating_sub(1)..(i + 2).min(count) {
@@ -551,6 +566,26 @@ impl DocView {
         // Slots that moved are repainted from the edit (or the first moved
         // slot, if that is above it) to the bottom.
         let mut from = moved.map(|m| first_edit.min(m).min(count));
+        // An edit off screen can still widen or narrow a code block that is
+        // on screen.
+        for i in edited.filter(|&i| i < count) {
+            let top = self.line_top(i);
+            let off = top >= g.text_bottom || top + self.lines[i].height <= 0.0;
+            let was = self.codes.iter().find(|c| c.lines.contains(&i));
+            let Some(was) = was.filter(|_| off).map(|c| c.box_w) else {
+                continue;
+            };
+            let d = src.display(i);
+            if self.ensure_code(src, i, &d).is_some_and(|now| now != was) {
+                let f = self.frame_no;
+                let block = self
+                    .codes
+                    .iter()
+                    .find(|c| c.frame == f && c.lines.contains(&i));
+                let start = block.map_or(i, |c| c.lines.start);
+                from = Some(from.map_or(start, |f| f.min(start)));
+            }
+        }
         for i in todo {
             if from.is_some_and(|f| i >= f) {
                 break;
@@ -561,8 +596,20 @@ impl DocView {
                 continue;
             }
             let before = self.lines[i].height;
+            let was_w = self.lines[i].code_w;
             if self.relayout(src, i) != before {
                 from = Some(i);
+                break;
+            }
+            // A code block that changed width moves every line of it.
+            let now_w = self.lines[i].code_w;
+            if now_w.is_some() && now_w != was_w {
+                let f = self.frame_no;
+                let start = self
+                    .codes
+                    .iter()
+                    .find(|c| c.frame == f && c.lines.contains(&i));
+                from = Some(start.map_or(i, |c| c.lines.start.min(i)));
                 break;
             }
             self.draw_line(src, i, top);
@@ -1062,17 +1109,18 @@ impl DocView {
             (t.px(TokenId::SpacePageSide) * s).max(t.ratio(TokenId::SpacePageSideRatio) * width);
         let room = width - 2.0 * side;
         let col_w = (t.px(TokenId::SpaceColumn) * s).min(room).max(1.0).round();
+        let col_x = ((width - col_w) / 2.0).max(0.0).floor();
+        // From the column's left edge to the right margin.
         let wide_w = (t.px(TokenId::SpaceColumnWide) * s)
-            .min(room)
-            .round()
+            .min(width - side - col_x)
+            .floor()
             .max(col_w);
         let status = (t.px(TokenId::SizeStatusHeight) * s).round().min(height);
         Geo {
             width,
             height,
-            col_x: ((width - col_w) / 2.0).max(0.0).floor(),
+            col_x,
             col_w,
-            wide_x: ((width - wide_w) / 2.0).max(0.0).floor(),
             wide_w,
             page_top: (t.px(TokenId::SpacePageTop) * s).round(),
             text_bottom: height - status,
@@ -1110,8 +1158,10 @@ impl DocView {
     /// new line count (sync cannot tell, so the caller's edit range decides).
     fn sync(&mut self, src: &dyn ViewSource) -> Option<usize> {
         if *src.tokens() != self.tokens {
-            // Table geometry bakes cell colours, fonts and widths in.
+            // Table geometry bakes cell colours, fonts and widths in, and
+            // code widths fonts.
             self.tables.clear();
+            self.codes.clear();
             self.tokens = src.tokens().clone();
         }
         let n = src.line_count();
@@ -1242,6 +1292,41 @@ impl DocView {
         Some(self.tables.len() - 1)
     }
 
+    /// The box width of the code block holding line `i` (displayed as `d`),
+    /// checked against the source once per frame and measured again when
+    /// its content changed.
+    fn ensure_code(&mut self, src: &dyn ViewSource, i: usize, d: &LineDisplay) -> Option<f32> {
+        let f = self.frame_no;
+        if let Some(c) = self
+            .codes
+            .iter()
+            .find(|c| c.frame == f && c.lines.contains(&i))
+        {
+            return Some(c.box_w);
+        }
+        let (lines, content) = self.code.extent(src, i, d)?;
+        let (t, s, g) = (&self.tokens, self.frame.scale, self.geo());
+        if let Some(c) = self
+            .codes
+            .iter_mut()
+            .find(|c| c.lines == lines && c.same_text(src, &content))
+        {
+            c.refit(g.col_w, g.wide_w, t, s);
+            c.frame = f;
+            return Some(c.box_w);
+        }
+        let overlaps = |c: &CodeWidth| c.lines.start < lines.end && lines.start < c.lines.end;
+        let old = self.codes.iter().position(overlaps);
+        let old = old.map(|k| self.codes.swap_remove(k));
+        self.codes.retain(|c| !overlaps(c));
+        let layout = self.layout.as_mut();
+        let mut c = code_width::build(layout, src, lines, content, g.col_w, g.wide_w, t, s, old);
+        c.frame = f;
+        let w = c.box_w;
+        self.codes.push(c);
+        Some(w)
+    }
+
     /// The source column under `x, y` (pixels from the column's left edge and
     /// the line's top) when line `i` is a rendered table row.
     fn hit_table(&self, i: usize, x: f32, y: f32) -> Option<usize> {
@@ -1271,6 +1356,10 @@ impl DocView {
             BlockDeco::TableRow { .. } => self.ensure_table(src, i, &d),
             _ => None,
         };
+        let code_w = match d.deco {
+            BlockDeco::CodeBg { .. } => self.ensure_code(src, i, &d),
+            _ => None,
+        };
         let g = self.geo();
         let t = &self.tokens;
         let s = self.frame.scale;
@@ -1278,6 +1367,7 @@ impl DocView {
         let layout = self.layout.as_mut();
         let slot = &mut self.lines[i];
         slot.code = None;
+        slot.code_w = code_w;
         slot.table = None;
         slot.preedit = None;
         slot.bars = 0;
@@ -1357,7 +1447,7 @@ impl DocView {
             None => slot.prefix = None,
         }
         let inset = if is_code { 2.0 * code_pad } else { offset };
-        let width = (g.col_w - inset).max(1.0);
+        let width = (slot.code_w.unwrap_or(g.col_w) - inset).max(1.0);
 
         let (mut text, mut spans) = styled_line(line, &d, t, s);
         let content = !d.spans.is_empty()
@@ -1610,10 +1700,11 @@ impl DocView {
                     top: *first,
                     bottom: *last,
                 };
+                let bw = slot.code_w.unwrap_or(cw);
                 let b = RectF {
                     x: cx,
                     y: top,
-                    w: cw,
+                    w: bw,
                     h,
                 };
                 fill_rounded(pix, b, corners, t.color(TokenId::ColorCodeBg), &clip);
@@ -1626,7 +1717,7 @@ impl DocView {
                 }
                 if let Some(l) = &slot.code_label {
                     let pad = (t.px(TokenId::SpaceCodePad) * s).round();
-                    let lx = (cx + cw - pad - l.laid.width()).round() as i32;
+                    let lx = (cx + bw - pad - l.laid.width()).round() as i32;
                     let ly = (top + ((h - l.laid.height) / 2.0).floor()) as i32;
                     self.layout
                         .draw(&l.laid, &mut |m| blend(pix, lx, ly, &m, &rows));

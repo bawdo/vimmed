@@ -6,6 +6,11 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A code block wider than the text column breaks out of it the way tables do, up to `space.column.wide`, so long lines stop wrapping when the window has room. The whole block shares one box, as wide as its longest line; a block that fits keeps the column's width, and lines longer than the breakout still wrap.
+- Wide tables and code blocks now keep the text's left edge and grow to the right, up to `space.column.wide` and the right margin, instead of centring on the window. In a wide window that leaves them a little less room than before, since only the right margin is free.
+
 ## [0.10.0] - 2026-11-18
 
 ### Changed
