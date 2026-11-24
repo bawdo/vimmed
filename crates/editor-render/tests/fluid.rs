@@ -1,7 +1,8 @@
 //! The fluid page: the text column grows with the window up to
 //! `space.column`, its margins scale with the window, and tables and code
 //! blocks wider than the column break out of it to the right, keeping its
-//! left edge, up to `space.column.wide` and the right margin.
+//! left edge, up to `space.column.wide` and the right margin. A table too
+//! wide even for that moves left, down to `space.page.side`.
 
 mod common;
 
@@ -196,9 +197,101 @@ fn a_wide_table_in_a_narrow_window_stays_inside_the_margins() {
     v.paint_all(&src);
     let (col_x, col_w) = column_in(&t, w_pt, S);
     let runs = red_runs(&v, mid(&v, &t, 3));
-    assert_eq!(runs.first().map(|r| r.start as f32), Some(col_x));
+    // 5% of 700 is a 35 side; the table reaches left to the fixed 24.
+    let side = t.px(TokenId::SpacePageSide);
+    assert!(col_x > side, "the ratio margin is the wider one");
+    assert_eq!(runs.first().map(|r| r.start as f32), Some(side));
     let right = runs.last().unwrap().end as f32;
     assert!(right <= col_x + col_w, "wraps inside the column: {right}");
+}
+
+/// A table of five long columns: about 2000 pixels of text, too wide for
+/// any breakout, so it must shrink.
+fn huge() -> Vec<String> {
+    let cell = "words enough to make this cell wide in any window";
+    let row = format!("| {cell} | {cell} | {cell} | {cell} | {cell} |");
+    vec![
+        "Intro".into(),
+        row.clone(),
+        "|---|---|---|---|---|".into(),
+        row,
+        String::new(),
+        "after".into(),
+    ]
+}
+
+#[test]
+fn an_overflowing_table_moves_left_to_the_fixed_margin() {
+    let t = with(&[("color.table.border", "#FF0000")]);
+    let lines = huge();
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let mut src = Fake::new(&lines, t.clone());
+    src.cursor = Pos { line: 5, col: 0 };
+    let w_pt = 1400.0;
+    let (mut v, _) = recording(&t, w_pt);
+    v.paint_all(&src);
+    let (col_x, _) = column_in(&t, w_pt, S);
+    let (wide_x, wide_w) = wide_in(&t, w_pt, S);
+    let side = t.px(TokenId::SpacePageSide);
+    let runs = red_runs(&v, mid(&v, &t, 3));
+    assert_eq!(runs.len(), 6, "five columns, six verticals: {runs:?}");
+    assert_eq!(
+        runs[0].start as f32, side,
+        "left of the column, at the margin"
+    );
+    assert!(side < col_x);
+    let right = runs[5].end as f32;
+    assert!(right <= wide_x + wide_w, "inside the right margin: {right}");
+    assert!(
+        right > wide_x + wide_w - 10.0,
+        "uses the room: {right} of {}",
+        wide_x + wide_w
+    );
+}
+
+#[test]
+fn an_overflowing_table_moves_left_only_as_far_as_it_needs() {
+    let t = with(&[("color.table.border", "#FF0000"), ("space.column", "800")]);
+    let mut src = Fake::new(WIDE, t.clone());
+    src.cursor = Pos { line: 5, col: 0 };
+    // At 1100 with an 800 column the breakout is 895 wide, under WIDE's
+    // natural width of about 930, and the left margin has 126 to give:
+    // WIDE needs only part of it.
+    let w_pt = 1100.0;
+    let (mut v, _) = recording(&t, w_pt);
+    v.paint_all(&src);
+    let (col_x, _) = column_in(&t, w_pt, S);
+    let (wide_x, wide_w) = wide_in(&t, w_pt, S);
+    let side = t.px(TokenId::SpacePageSide);
+    let runs = red_runs(&v, mid(&v, &t, 3));
+    let (left, right) = (runs[0].start as f32, runs[3].end as f32);
+    assert!(left < col_x, "moved left: {left}");
+    assert!(left > side, "not all the way: {left}");
+    assert_eq!(right, wide_x + wide_w, "ends at the breakout's edge");
+}
+
+#[test]
+fn a_one_word_header_keeps_its_word_beside_long_urls() {
+    // Each URL is wider than the room, so the longest words overflow.
+    let url = format!("https://example.com/{}", "segment".repeat(60));
+    let lines = [
+        "| Status | Link | Mirror |".to_string(),
+        "|---|---|---|".to_string(),
+        format!("| ok | {url} | {url} |"),
+        String::new(),
+        "after".to_string(),
+    ];
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let t = Tokens::defaults(Theme::Light);
+    let mut src = Fake::new(&lines, t.clone());
+    src.cursor = Pos { line: 4, col: 0 };
+    let (mut v, laid) = recording(&t, 800.0);
+    v.paint_all(&src);
+    let laid = laid.borrow();
+    let head = laid.iter().rev().find(|l| l.text == "Status").unwrap();
+    assert_eq!(head.rows.len(), 1, "the header does not split");
+    let link = laid.iter().rev().find(|l| l.text == url).unwrap();
+    assert!(link.rows.len() > 1, "the URL breaks instead");
 }
 
 #[test]

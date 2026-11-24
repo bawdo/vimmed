@@ -6,6 +6,14 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A table too wide for the room right of the text column now moves left as far as it needs, down to `space.page.side` from the window's edge, so a wide window's left margin is no longer wasted. A table that fits still keeps the text's left edge, and no table is wider than `space.column.wide`.
+
+### Fixed
+
+- A one-word table header no longer splits mid-word because a long URL or identifier sits further down. When the longest words can't all fit, body words break first; a header word only breaks when the header words alone overflow.
+
 ## [0.10.1] - 2026-11-19
 
 ### Added

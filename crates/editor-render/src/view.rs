@@ -335,6 +335,12 @@ pub(crate) struct Geo {
     /// The breakout column wide tables and code blocks may use: it starts
     /// at the text column's left edge and is never narrower than it.
     pub(crate) wide_w: f32,
+    /// How far left of the text column's edge a table too wide for the
+    /// breakout column may reach: to `space.page.side` from the frame's
+    /// left edge.
+    pub(crate) table_left: f32,
+    /// The widest a table may be (`space.column.wide`).
+    pub(crate) wide_max: f32,
     pub(crate) page_top: f32,
     /// The first row of the status bar.
     pub(crate) text_bottom: f32,
@@ -1115,6 +1121,8 @@ impl DocView {
             .min(width - side - col_x)
             .floor()
             .max(col_w);
+        let table_left = (col_x - (t.px(TokenId::SpacePageSide) * s).round()).max(0.0);
+        let wide_max = (t.px(TokenId::SpaceColumnWide) * s).floor();
         let status = (t.px(TokenId::SizeStatusHeight) * s).round().min(height);
         Geo {
             width,
@@ -1122,6 +1130,8 @@ impl DocView {
             col_x,
             col_w,
             wide_w,
+            table_left,
+            wide_max,
             page_top: (t.px(TokenId::SpacePageTop) * s).round(),
             text_bottom: height - status,
         }
