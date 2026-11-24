@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 cosmic-text = "0.19"
-parley = "0.12"
+parley = "0.13"
 # Already in the graph through fontdb. Used so that both libraries see the same font
 # files memory-mapped, rather than one reading them into the heap.
 memmap2 = "0.9"
