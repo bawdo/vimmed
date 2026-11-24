@@ -443,10 +443,6 @@ impl Parley {
         }
         b.build_into(layout, text);
         layout.break_all_lines(Some(WIDTH_PX));
-        layout.align(
-            parley::Alignment::Start,
-            parley::AlignmentOptions::default(),
-        );
     }
 }
 
