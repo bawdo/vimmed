@@ -99,7 +99,7 @@ fn reserve_reads_header_without_decoding() {
 fn decode_completes_without_relayout() {
     let t = Tokens::defaults(Theme::Light);
     let dir = TempDir::new();
-    write_png(dir.path(), "img1.png", 1200, 700);
+    write_png(dir.path(), "img1.png", 1200, 600);
     let (w, woken) = waker();
     let src = Fake::new(&["alpha", "![pic](img1.png)", "omega"], t.clone());
     let mut v = view(&t, 2.0);
@@ -114,7 +114,7 @@ fn decode_completes_without_relayout() {
         col < t.px(TokenId::SpaceColumn),
         "the window narrows the column"
     );
-    let want = (700.0 * col / 1200.0 * 2.0).ceil();
+    let want = (600.0 * col / 1200.0 * 2.0).ceil();
     assert_eq!(heights[1], want, "the image line reserves its final size");
     let page_top = (t.px(TokenId::SpacePageTop) * 2.0).round();
     let start = page_top + heights[0];
@@ -363,7 +363,7 @@ fn pending_resample_keeps_the_alt_label() {
 fn image_resample_not_on_ui_thread() {
     let t = Tokens::defaults(Theme::Light);
     let dir = TempDir::new();
-    write_png(dir.path(), "img1.png", 1200, 700);
+    write_png(dir.path(), "img1.png", 1200, 600);
     let (w, _) = waker();
     let src = Fake::new(&["alpha", "![pic](img1.png)", "omega"], t.clone());
     let resampled = resamples_on_this_thread();
@@ -383,7 +383,7 @@ fn image_resample_not_on_ui_thread() {
     );
     let height = v.line_height_px(1).unwrap();
     let col = common::column(&t, 1.0).1;
-    assert_eq!(height, (700.0 * col / 1200.0).ceil(), "final box height");
+    assert_eq!(height, (600.0 * col / 1200.0).ceil(), "final box height");
     let top = t.px(TokenId::SpacePageTop).round() + v.line_height_px(0).unwrap();
     let mid = (top + height / 2.0) as usize;
     let ph = t.color(TokenId::ColorImagePlaceholder);

@@ -11,12 +11,10 @@
 //! `space.table.pad` in from the verticals and `space.table.pad.y` from the
 //! row's edges, aligned per column (`Align::None` renders left).
 //!
-//! Width: a table is as wide as its cells need, never stretched. It starts
-//! at the text column's left edge; a table wider than the column breaks out
-//! of it to the right, up to the breakout column (`Room`). A table too wide
-//! even for that moves left as far as it needs, down to `space.page.side`
-//! from the frame's left edge, and is never wider than `space.column.wide`.
-//! When that is still too narrow, columns shrink as a browser's automatic
+//! Width: a table is as wide as its cells need, never stretched. It always
+//! starts at the text column's left edge; a table wider than the column
+//! breaks out of it to the right, up to the breakout column (`Room`). When
+//! even that is too narrow, columns shrink as a browser's automatic
 //! table layout does: each keeps its longest word (its min-content width)
 //! and the room left over is shared in proportion to how much more each
 //! column wants, so a short column such as an ID never wraps because a long
@@ -38,14 +36,11 @@ use crate::paint::{blend, fill, styled_line};
 use crate::view::{Cached, Geo, lay};
 
 /// Where a table may sit, in pixels: the text column's width, and the
-/// breakout column's, both from the text column's left edge; how far left
-/// of that edge an overflowing table may reach; and the widest it may be.
+/// breakout column's, both from the text column's left edge.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Room {
     pub(crate) col: f32,
     pub(crate) wide: f32,
-    pub(crate) left: f32,
-    pub(crate) max: f32,
 }
 
 impl Room {
@@ -53,21 +48,7 @@ impl Room {
         Room {
             col: g.col_w,
             wide: g.wide_w,
-            left: g.table_left,
-            max: g.wide_max,
         }
-    }
-
-    /// The widest a table may be: the breakout column plus the reach left,
-    /// up to `max`, and never narrower than the breakout column.
-    fn total(&self) -> f32 {
-        (self.wide + self.left).min(self.max).max(self.wide)
-    }
-
-    /// How far left of the text column's edge a table `width` wide starts:
-    /// only as far as it overflows the breakout column, up to `left`.
-    fn shift(&self, width: f32) -> f32 {
-        (width - self.wide).clamp(0.0, self.left).ceil()
     }
 }
 
@@ -97,7 +78,7 @@ pub(crate) struct TableGeom {
     /// The table's lines, header to last row.
     pub(crate) lines: Range<usize>,
     /// What the geometry was made from: every row's source, then the sizes.
-    key: (Vec<String>, [f32; 8]),
+    key: (Vec<String>, [f32; 6]),
     /// The x of each column's left vertical, then the right edge's vertical.
     /// The first is the table's left edge.
     pub(crate) verticals: Vec<f32>,
@@ -249,18 +230,16 @@ pub(crate) fn key_of(
     room: Room,
     t: &Tokens,
     s: f32,
-) -> (Vec<String>, [f32; 8]) {
+) -> (Vec<String>, [f32; 6]) {
     let z = Sizes::new(t, s);
     (
         lines.clone().map(|j| src.line(j).to_owned()).collect(),
-        [
-            room.col, room.wide, room.left, room.max, s, z.pad, z.pad_y, z.border,
-        ],
+        [room.col, room.wide, s, z.pad, z.pad_y, z.border],
     )
 }
 
 impl TableGeom {
-    pub(crate) fn matches(&self, key: &(Vec<String>, [f32; 8])) -> bool {
+    pub(crate) fn matches(&self, key: &(Vec<String>, [f32; 6])) -> bool {
         self.key == *key
     }
 
@@ -286,7 +265,7 @@ pub(crate) fn build(
 ) -> TableGeom {
     let z = Sizes::new(t, s);
     let key = key_of(src, &lines, room, t, s);
-    let avail = room.total();
+    let avail = room.wide;
     let mut pool: Vec<Cached> = old
         .into_iter()
         .flat_map(|g| g.rows.into_iter())
@@ -360,22 +339,13 @@ pub(crate) fn build(
         });
     }
 
-    // Column widths, shrunk to fit the room.
+    // Column widths, shrunk to fit the breakout column.
     let n = natural.len();
     let chrome = (n as f32 + 1.0) * z.border + n as f32 * 2.0 * z.pad;
     let inner = column_widths(&natural, &least, &head, (avail - chrome).max(n as f32));
-    // From the text column's left edge, moved left as far as the table
-    // overflows the breakout column. A table shrunk to fit takes all the
-    // room, so it starts at the room's left edge whatever its widths lost
-    // to rounding.
-    let squeezed = natural.iter().sum::<f32>() + chrome > avail;
-    let width = if squeezed {
-        avail
-    } else {
-        inner.iter().sum::<f32>() + chrome
-    };
+    // From the text column's left edge, however wide.
     let mut verticals = Vec::with_capacity(n + 1);
-    let mut x = -room.shift(width);
+    let mut x = 0.0;
     for w in &inner {
         verticals.push(x);
         x += z.border + 2.0 * z.pad + w;
@@ -516,7 +486,7 @@ pub(crate) fn paint_row(
 
 #[cfg(test)]
 mod tests {
-    use super::{Room, column_widths};
+    use super::column_widths;
 
     #[test]
     fn natural_widths_when_they_fit() {
@@ -598,35 +568,5 @@ mod tests {
             column_widths(&[100.0, 400.0], &[100.0, 400.0], &[300.0, 0.0], 300.0),
             [100.0, 200.0]
         );
-    }
-
-    fn room(wide: f32, left: f32, max: f32) -> Room {
-        Room {
-            col: 600.0,
-            wide,
-            left,
-            max,
-        }
-    }
-
-    #[test]
-    fn a_table_that_fits_the_breakout_stays_at_the_column_edge() {
-        let r = room(1000.0, 300.0, 1600.0);
-        assert_eq!(r.total(), 1300.0);
-        assert_eq!(r.shift(900.0), 0.0);
-        assert_eq!(r.shift(1000.0), 0.0);
-    }
-
-    #[test]
-    fn an_overflowing_table_moves_left_only_as_far_as_it_needs() {
-        let r = room(1000.0, 300.0, 1600.0);
-        assert_eq!(r.shift(1120.5), 121.0);
-        assert_eq!(r.shift(5000.0), 300.0);
-    }
-
-    #[test]
-    fn the_room_is_capped_at_the_widest_but_never_below_the_breakout() {
-        assert_eq!(room(1400.0, 400.0, 1600.0).total(), 1600.0);
-        assert_eq!(room(1000.0, 0.0, 800.0).total(), 1000.0);
     }
 }

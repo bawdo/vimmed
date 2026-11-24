@@ -72,11 +72,12 @@ token_table! {
     LineHeightCode, "line.height.code", Ratio, "1.4", "1.4";
 
     // Spacing and sizes.
-    // The prose column grows with the window up to `space.column`, keeping
-    // a side margin of `space.page.side` or `space.page.side.ratio` of the
-    // window, whichever is wider. Tables and code blocks wider than the
-    // prose column break out of it to the right, keeping its left edge, up
-    // to `space.column.wide` (within the right margin).
+    // The prose column sits `space.page.side` from the window's left edge
+    // and grows with the window up to `space.column`, keeping a right margin
+    // of `space.page.side` or `space.page.side.ratio` of the window,
+    // whichever is wider. Tables and code blocks wider than the prose column
+    // break out of it to the right, keeping its left edge, up to
+    // `space.column.wide` (within the right margin).
     SpaceColumn, "space.column", Px, "900", "900";
     SpacePageTop, "space.page.top", Px, "40", "40";
     SpacePageSide, "space.page.side", Px, "24", "24";

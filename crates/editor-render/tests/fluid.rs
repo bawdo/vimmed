@@ -1,8 +1,8 @@
-//! The fluid page: the text column grows with the window up to
-//! `space.column`, its margins scale with the window, and tables and code
-//! blocks wider than the column break out of it to the right, keeping its
-//! left edge, up to `space.column.wide` and the right margin. A table too
-//! wide even for that moves left, down to `space.page.side`.
+//! The fluid page: the text column sits `space.page.side` from the window's
+//! left edge and grows with the window up to `space.column`, its right
+//! margin scales with the window, and tables and code blocks wider than the
+//! column break out of it to the right, keeping its left edge, up to
+//! `space.column.wide` and the right margin.
 
 mod common;
 
@@ -88,13 +88,14 @@ fn the_column_grows_with_the_window_up_to_space_column() {
             col_w,
             "wraps at the column at {w_pt}"
         );
-        assert_eq!(v.text_left_px(0), Some(col_x), "centred at {w_pt}");
+        assert_eq!(v.text_left_px(0), Some(col_x), "left aligned at {w_pt}");
+        assert_eq!(col_x, t.px(TokenId::SpacePageSide), "at the fixed margin");
         assert!(col_w >= last, "never narrower in a wider window ({w_pt})");
         assert!(col_w <= cap, "never past space.column ({w_pt})");
         last = col_w;
     }
-    // 5% of 800 is 40 a side; 5% of 1000 leaves exactly the 900 cap.
-    assert_eq!(column_in(&t, 800.0, S).1, 720.0);
+    // 24 on the left; 5% of 800 is 40 on the right. At 1000 the 900 cap.
+    assert_eq!(column_in(&t, 800.0, S).1, 736.0);
     assert_eq!(column_in(&t, 1000.0, S).1, 900.0);
     assert_eq!(column_in(&t, 2400.0, S).1, 900.0);
     // A narrow window keeps the fixed margin: 5% of 300 is under 24.
@@ -107,14 +108,19 @@ fn the_margin_is_the_wider_of_the_fixed_and_the_ratio() {
     let src = Fake::new(&[PARA], t.clone());
     let (mut v, laid) = recording(&t, 1000.0);
     v.paint_all(&src);
-    assert_eq!(laid_width(&laid, PARA), 600.0, "20% a side of 1000");
-    assert_eq!(v.text_left_px(0), Some(200.0));
+    assert_eq!(laid_width(&laid, PARA), 776.0, "24 left, 20% of 1000 right");
+    assert_eq!(
+        v.text_left_px(0),
+        Some(24.0),
+        "the ratio is the right side's"
+    );
 
     let t = with(&[("space.page.side", "300")]);
     let src = Fake::new(&[PARA], t.clone());
     let (mut v, laid) = recording(&t, 1000.0);
     v.paint_all(&src);
     assert_eq!(laid_width(&laid, PARA), 400.0, "the fixed side beats 5%");
+    assert_eq!(v.text_left_px(0), Some(300.0), "and sets the left margin");
 }
 
 #[test]
@@ -197,77 +203,42 @@ fn a_wide_table_in_a_narrow_window_stays_inside_the_margins() {
     v.paint_all(&src);
     let (col_x, col_w) = column_in(&t, w_pt, S);
     let runs = red_runs(&v, mid(&v, &t, 3));
-    // 5% of 700 is a 35 side; the table reaches left to the fixed 24.
-    let side = t.px(TokenId::SpacePageSide);
-    assert!(col_x > side, "the ratio margin is the wider one");
-    assert_eq!(runs.first().map(|r| r.start as f32), Some(side));
+    assert_eq!(runs.first().map(|r| r.start as f32), Some(col_x));
     let right = runs.last().unwrap().end as f32;
     assert!(right <= col_x + col_w, "wraps inside the column: {right}");
 }
 
-/// A table of five long columns: about 2000 pixels of text, too wide for
-/// any breakout, so it must shrink.
-fn huge() -> Vec<String> {
-    let cell = "words enough to make this cell wide in any window";
-    let row = format!("| {cell} | {cell} | {cell} | {cell} | {cell} |");
-    vec![
-        "Intro".into(),
-        row.clone(),
-        "|---|---|---|---|---|".into(),
-        row,
-        String::new(),
-        "after".into(),
-    ]
-}
-
 #[test]
-fn an_overflowing_table_moves_left_to_the_fixed_margin() {
+fn text_tables_and_code_share_the_left_edge_as_the_window_widens() {
     let t = with(&[("color.table.border", "#FF0000")]);
-    let lines = huge();
-    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let mut src = Fake::new(&lines, t.clone());
-    src.cursor = Pos { line: 5, col: 0 };
-    let w_pt = 1400.0;
-    let (mut v, _) = recording(&t, w_pt);
-    v.paint_all(&src);
-    let (col_x, _) = column_in(&t, w_pt, S);
-    let (wide_x, wide_w) = wide_in(&t, w_pt, S);
     let side = t.px(TokenId::SpacePageSide);
-    let runs = red_runs(&v, mid(&v, &t, 3));
-    assert_eq!(runs.len(), 6, "five columns, six verticals: {runs:?}");
-    assert_eq!(
-        runs[0].start as f32, side,
-        "left of the column, at the margin"
-    );
-    assert!(side < col_x);
-    let right = runs[5].end as f32;
-    assert!(right <= wide_x + wide_w, "inside the right margin: {right}");
-    assert!(
-        right > wide_x + wide_w - 10.0,
-        "uses the room: {right} of {}",
-        wide_x + wide_w
-    );
-}
-
-#[test]
-fn an_overflowing_table_moves_left_only_as_far_as_it_needs() {
-    let t = with(&[("color.table.border", "#FF0000"), ("space.column", "800")]);
-    let mut src = Fake::new(WIDE, t.clone());
-    src.cursor = Pos { line: 5, col: 0 };
-    // At 1100 with an 800 column the breakout is 895 wide, under WIDE's
-    // natural width of about 930, and the left margin has 126 to give:
-    // WIDE needs only part of it.
-    let w_pt = 1100.0;
-    let (mut v, _) = recording(&t, w_pt);
-    v.paint_all(&src);
-    let (col_x, _) = column_in(&t, w_pt, S);
-    let (wide_x, wide_w) = wide_in(&t, w_pt, S);
-    let side = t.px(TokenId::SpacePageSide);
-    let runs = red_runs(&v, mid(&v, &t, 3));
-    let (left, right) = (runs[0].start as f32, runs[3].end as f32);
-    assert!(left < col_x, "moved left: {left}");
-    assert!(left > side, "not all the way: {left}");
-    assert_eq!(right, wide_x + wide_w, "ends at the breakout's edge");
+    let code = long_code();
+    let mut lines: Vec<&str> = WIDE.to_vec();
+    lines.extend(["```", code.as_str(), "```", "", PARA]);
+    let para = lines.len() - 1;
+    for w_pt in [1000.0, 1400.0, 2400.0, 3200.0] {
+        let mut src = Fake::new(&lines, t.clone());
+        src.cursor = Pos { line: 4, col: 0 };
+        let (mut v, laid) = recording(&t, w_pt);
+        v.paint_all(&src);
+        let (col_x, col_w) = column_in(&t, w_pt, S);
+        let (_, wide_w) = wide_in(&t, w_pt, S);
+        assert_eq!(col_x, side, "at the fixed margin at {w_pt}");
+        assert_eq!(v.text_left_px(para), Some(side), "text at {w_pt}");
+        let runs = red_runs(&v, mid(&v, &t, 3));
+        assert_eq!(runs[0].start as f32, side, "table at {w_pt}");
+        assert_eq!(
+            v.text_left_px(7).map(|x| x < side + 40.0),
+            Some(true),
+            "code at {w_pt}"
+        );
+        // Past the column's cap the text stops; the breakout keeps going.
+        assert!(col_w <= t.px(TokenId::SpaceColumn));
+        if w_pt >= 1400.0 {
+            assert_eq!(laid_width(&laid, PARA), col_w, "text capped at {w_pt}");
+            assert!(wide_w > col_w, "breakout wider than the text at {w_pt}");
+        }
+    }
 }
 
 #[test]
