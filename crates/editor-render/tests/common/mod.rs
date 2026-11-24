@@ -326,11 +326,12 @@ pub fn column(t: &Tokens, scale: f32) -> (f32, f32) {
 /// `column` for a window `w_pt` points wide.
 pub fn column_in(t: &Tokens, w_pt: f32, scale: f32) -> (f32, f32) {
     let width = (w_pt * scale).round();
+    let left = (t.px(TokenId::SpacePageSide) * scale).round();
     let col_w = (t.px(TokenId::SpaceColumn) * scale)
-        .min(width - 2.0 * side(t, width, scale))
+        .min(width - left - side(t, width, scale))
         .max(1.0)
         .round();
-    (((width - col_w) / 2.0).max(0.0).floor(), col_w)
+    (left.min(width).max(0.0), col_w)
 }
 
 /// The breakout column's left edge and width in pixels for a window `w_pt`
@@ -346,7 +347,7 @@ pub fn wide_in(t: &Tokens, w_pt: f32, scale: f32) -> (f32, f32) {
     (col_x, wide_w)
 }
 
-/// The page's side margin in pixels for a frame `width` pixels wide.
+/// The page's right margin in pixels for a frame `width` pixels wide.
 fn side(t: &Tokens, width: f32, scale: f32) -> f32 {
     (t.px(TokenId::SpacePageSide) * scale).max(t.ratio(TokenId::SpacePageSideRatio) * width)
 }

@@ -252,8 +252,8 @@ impl Config {
 pub const MAX_FONT_SIZE: f32 = 200.0;
 /// The widest `space.column` (`column_width`), in points.
 pub const MAX_COLUMN_WIDTH: f32 = 4000.0;
-/// The side margins (`space.page.side.ratio`, a share of the window's
-/// width on each side) allowed: above zero, and under half the window.
+/// The right margins (`space.page.side.ratio`, a share of the window's
+/// width) allowed: above zero, and under half the window.
 pub const SIDE_RATIOS: std::ops::RangeInclusive<f32> = 0.001..=0.4;
 /// The line heights (`line.height.*`, a ratio of the font size) allowed.
 pub const LINE_HEIGHTS: std::ops::RangeInclusive<f32> = 0.5..=5.0;

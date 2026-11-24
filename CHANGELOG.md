@@ -6,6 +6,16 @@ All notable changes to vimmed are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-24
+
+### Changed
+
+- The page is left aligned instead of centred: the text column, tables and code blocks all start `space.page.side` (24 points) from the window's left edge, however wide the window. The text still stops growing at `space.column`; tables and code blocks keep growing to the right, up to `space.column.wide` and the right margin. `space.page.side.ratio` now sets only the right margin.
+
+### Fixed
+
+- A one-word table header no longer splits mid-word because a long URL or identifier sits further down. When the longest words can't all fit, body words break first; a header word only breaks when the header words alone overflow.
+
 ## [0.10.1] - 2026-11-19
 
 ### Added
@@ -82,7 +92,8 @@ All notable changes to vimmed are documented here. The format follows
 - Safe file handling: atomic saves, recovery copies, and detection of changes made on disk by other tools.
 - `~/.config/vimmed/config.toml` for vim mode, autosave, fonts, column width and theme, with a light and dark theme that follows the system.
 
-[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/bawdo/vimmed/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/bawdo/vimmed/releases/tag/v0.10.2
 [0.10.1]: https://github.com/bawdo/vimmed/releases/tag/v0.10.1
 [0.10.0]: https://github.com/bawdo/vimmed/releases/tag/v0.10.0
 [0.9.3]: https://github.com/bawdo/vimmed/releases/tag/v0.9.3

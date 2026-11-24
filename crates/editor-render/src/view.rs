@@ -1,13 +1,14 @@
 //! `DocView`: the document painted into a frame, one layout object per
 //! source line, with row-range damage.
 //!
-//! Geometry, top to bottom: `space.page.top`, then the lines in a centred
-//! column, then the status bar (`size.status.height`) at the bottom. The
-//! column grows with the window up to `space.column`, keeping a margin each
-//! side of `space.page.side` or `space.page.side.ratio` of the window,
-//! whichever is wider. A table or code block wider than the column breaks
-//! out of it to the right, keeping the column's left edge, up to
-//! `space.column.wide` and the right margin (`Geo::wide_w`). Line heights
+//! Geometry, top to bottom: `space.page.top`, then the lines in a column,
+//! then the status bar (`size.status.height`) at the bottom. The column sits
+//! `space.page.side` from the window's left edge and grows with the window
+//! up to `space.column`, keeping a right margin of `space.page.side` or
+//! `space.page.side.ratio` of the window, whichever is wider. A table or
+//! code block wider than the column breaks out of it to the right, keeping
+//! the column's left edge, up to `space.column.wide` and the right margin
+//! (`Geo::wide_w`). Line heights
 //! are whole pixels, so every damaged row belongs to exactly one line or
 //! the status bar.
 //!
@@ -1105,11 +1106,14 @@ impl DocView {
         let s = self.frame.scale;
         let width = self.frame.width_px as f32;
         let height = self.frame.height_px as f32;
+        // A fixed margin on the left; on the right, the fixed margin or the
+        // ratio of the window, whichever is wider.
+        let left = (t.px(TokenId::SpacePageSide) * s).round();
         let side =
             (t.px(TokenId::SpacePageSide) * s).max(t.ratio(TokenId::SpacePageSideRatio) * width);
-        let room = width - 2.0 * side;
+        let room = width - left - side;
         let col_w = (t.px(TokenId::SpaceColumn) * s).min(room).max(1.0).round();
-        let col_x = ((width - col_w) / 2.0).max(0.0).floor();
+        let col_x = left.min(width).max(0.0);
         // From the column's left edge to the right margin.
         let wide_w = (t.px(TokenId::SpaceColumnWide) * s)
             .min(width - side - col_x)

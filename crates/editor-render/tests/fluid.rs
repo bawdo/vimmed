@@ -1,7 +1,8 @@
-//! The fluid page: the text column grows with the window up to
-//! `space.column`, its margins scale with the window, and tables and code
-//! blocks wider than the column break out of it to the right, keeping its
-//! left edge, up to `space.column.wide` and the right margin.
+//! The fluid page: the text column sits `space.page.side` from the window's
+//! left edge and grows with the window up to `space.column`, its right
+//! margin scales with the window, and tables and code blocks wider than the
+//! column break out of it to the right, keeping its left edge, up to
+//! `space.column.wide` and the right margin.
 
 mod common;
 
@@ -87,13 +88,14 @@ fn the_column_grows_with_the_window_up_to_space_column() {
             col_w,
             "wraps at the column at {w_pt}"
         );
-        assert_eq!(v.text_left_px(0), Some(col_x), "centred at {w_pt}");
+        assert_eq!(v.text_left_px(0), Some(col_x), "left aligned at {w_pt}");
+        assert_eq!(col_x, t.px(TokenId::SpacePageSide), "at the fixed margin");
         assert!(col_w >= last, "never narrower in a wider window ({w_pt})");
         assert!(col_w <= cap, "never past space.column ({w_pt})");
         last = col_w;
     }
-    // 5% of 800 is 40 a side; 5% of 1000 leaves exactly the 900 cap.
-    assert_eq!(column_in(&t, 800.0, S).1, 720.0);
+    // 24 on the left; 5% of 800 is 40 on the right. At 1000 the 900 cap.
+    assert_eq!(column_in(&t, 800.0, S).1, 736.0);
     assert_eq!(column_in(&t, 1000.0, S).1, 900.0);
     assert_eq!(column_in(&t, 2400.0, S).1, 900.0);
     // A narrow window keeps the fixed margin: 5% of 300 is under 24.
@@ -106,14 +108,19 @@ fn the_margin_is_the_wider_of_the_fixed_and_the_ratio() {
     let src = Fake::new(&[PARA], t.clone());
     let (mut v, laid) = recording(&t, 1000.0);
     v.paint_all(&src);
-    assert_eq!(laid_width(&laid, PARA), 600.0, "20% a side of 1000");
-    assert_eq!(v.text_left_px(0), Some(200.0));
+    assert_eq!(laid_width(&laid, PARA), 776.0, "24 left, 20% of 1000 right");
+    assert_eq!(
+        v.text_left_px(0),
+        Some(24.0),
+        "the ratio is the right side's"
+    );
 
     let t = with(&[("space.page.side", "300")]);
     let src = Fake::new(&[PARA], t.clone());
     let (mut v, laid) = recording(&t, 1000.0);
     v.paint_all(&src);
     assert_eq!(laid_width(&laid, PARA), 400.0, "the fixed side beats 5%");
+    assert_eq!(v.text_left_px(0), Some(300.0), "and sets the left margin");
 }
 
 #[test]
@@ -199,6 +206,63 @@ fn a_wide_table_in_a_narrow_window_stays_inside_the_margins() {
     assert_eq!(runs.first().map(|r| r.start as f32), Some(col_x));
     let right = runs.last().unwrap().end as f32;
     assert!(right <= col_x + col_w, "wraps inside the column: {right}");
+}
+
+#[test]
+fn text_tables_and_code_share_the_left_edge_as_the_window_widens() {
+    let t = with(&[("color.table.border", "#FF0000")]);
+    let side = t.px(TokenId::SpacePageSide);
+    let code = long_code();
+    let mut lines: Vec<&str> = WIDE.to_vec();
+    lines.extend(["```", code.as_str(), "```", "", PARA]);
+    let para = lines.len() - 1;
+    for w_pt in [1000.0, 1400.0, 2400.0, 3200.0] {
+        let mut src = Fake::new(&lines, t.clone());
+        src.cursor = Pos { line: 4, col: 0 };
+        let (mut v, laid) = recording(&t, w_pt);
+        v.paint_all(&src);
+        let (col_x, col_w) = column_in(&t, w_pt, S);
+        let (_, wide_w) = wide_in(&t, w_pt, S);
+        assert_eq!(col_x, side, "at the fixed margin at {w_pt}");
+        assert_eq!(v.text_left_px(para), Some(side), "text at {w_pt}");
+        let runs = red_runs(&v, mid(&v, &t, 3));
+        assert_eq!(runs[0].start as f32, side, "table at {w_pt}");
+        assert_eq!(
+            v.text_left_px(7).map(|x| x < side + 40.0),
+            Some(true),
+            "code at {w_pt}"
+        );
+        // Past the column's cap the text stops; the breakout keeps going.
+        assert!(col_w <= t.px(TokenId::SpaceColumn));
+        if w_pt >= 1400.0 {
+            assert_eq!(laid_width(&laid, PARA), col_w, "text capped at {w_pt}");
+            assert!(wide_w > col_w, "breakout wider than the text at {w_pt}");
+        }
+    }
+}
+
+#[test]
+fn a_one_word_header_keeps_its_word_beside_long_urls() {
+    // Each URL is wider than the room, so the longest words overflow.
+    let url = format!("https://example.com/{}", "segment".repeat(60));
+    let lines = [
+        "| Status | Link | Mirror |".to_string(),
+        "|---|---|---|".to_string(),
+        format!("| ok | {url} | {url} |"),
+        String::new(),
+        "after".to_string(),
+    ];
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let t = Tokens::defaults(Theme::Light);
+    let mut src = Fake::new(&lines, t.clone());
+    src.cursor = Pos { line: 4, col: 0 };
+    let (mut v, laid) = recording(&t, 800.0);
+    v.paint_all(&src);
+    let laid = laid.borrow();
+    let head = laid.iter().rev().find(|l| l.text == "Status").unwrap();
+    assert_eq!(head.rows.len(), 1, "the header does not split");
+    let link = laid.iter().rev().find(|l| l.text == url).unwrap();
+    assert!(link.rows.len() > 1, "the URL breaks instead");
 }
 
 #[test]
